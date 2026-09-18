@@ -305,6 +305,27 @@ fn control_and_format_characters_in_a_key_are_escaped() {
 }
 
 #[test]
+fn a_key_spelling_an_escape_renders_apart_from_a_key_holding_the_character() {
+    // Six characters of text - backslash, `u`, `{`, `1`, `b`, `}` - against
+    // one real ESC. Before a backslash was escaped both rendered as
+    // `\u{1b}`, and a reader could not tell which key the server sent.
+    let spelled = keyed_path(r"\u{1b}");
+    let real = keyed_path("\u{1b}");
+
+    assert_eq!(spelled, r"answers.\\u{1b}.noul");
+    assert_eq!(real, r"answers.\u{1b}.noul");
+    assert_ne!(spelled, real);
+
+    // Every backslash is doubled, a trailing one included, and it counts as
+    // the two characters it renders as.
+    assert_eq!(keyed_path(r"a\b\"), r"answers.a\\b\\.noul");
+    let before = "k".repeat(MAX_PATH_SEGMENT_CHARS - 1);
+    assert_eq!(keyed_path(&format!(r"{before}\")), format!("answers.{before}\u{2026}.noul"));
+    let room = "k".repeat(MAX_PATH_SEGMENT_CHARS - 2);
+    assert_eq!(keyed_path(&format!(r"{room}\")), format!(r"answers.{room}\\.noul"));
+}
+
+#[test]
 fn a_long_key_is_cut_at_the_segment_cap_without_splitting_a_character() {
     let cut = |kept: &str| format!("answers.{kept}\u{2026}.noul");
 
@@ -379,12 +400,13 @@ fn an_ordinary_path_renders_exactly_as_serde_path_to_error_prints_it() {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// For any printable key, the rendering is byte for byte the text
-    /// `serde_path_to_error` itself prints for the same failure.
+    /// For any printable key without a backslash, the rendering is byte for
+    /// byte the text `serde_path_to_error` itself prints for the same failure.
+    /// A backslash is the one printable character the rendering doubles.
     #[test]
     fn a_printable_path_is_unchanged_by_the_rendering(
-        outer in r"[\p{L}\p{N}\p{P}\p{S} ]{0,40}",
-        inner in r"[\p{L}\p{N}\p{P}\p{S} ]{0,40}",
+        outer in r"[[\p{L}\p{N}\p{P}\p{S} ]&&[^\\]]{0,40}",
+        inner in r"[[\p{L}\p{N}\p{P}\p{S} ]&&[^\\]]{0,40}",
         index in 0_usize..3,
     ) {
         let elements = std::iter::repeat_n("{}".to_owned(), index)

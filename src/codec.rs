@@ -138,7 +138,9 @@ impl DecodeError {
     /// A name in the path may be an object key the input chose, so it is
     /// rendered safe to print: a control character or a format character that
     /// reorders or hides text is written as a Rust escape (`\n`, `\u{1b}`,
-    /// `\u{202e}`), and printable text, non-ASCII included, is kept as it is.
+    /// `\u{202e}`), a backslash is written `\\` so that an escape cannot be
+    /// mistaken for text, and other printable text, non-ASCII included, is kept
+    /// as it is.
     /// Each name is cut at 128 characters and the whole path at 320, counted
     /// after escaping, and a cut is marked with U+2026.
     #[must_use]
@@ -431,7 +433,8 @@ const MAX_PATH_CHARS: usize = 320;
 /// A name keeps its printable text, non-ASCII included. A control character,
 /// or a format character that reorders or hides the text around it, is
 /// written as a Rust escape (`\n`, `\r`, `\t`, or `\u{1b}` for the others), so
-/// that a key cannot break a log line, recolour a terminal or disguise itself.
+/// that a key cannot break a log line, recolour a terminal or disguise itself;
+/// a backslash is written `\\`, so that no escape can be mistaken for text.
 /// Each name is capped at [`MAX_PATH_SEGMENT_CHARS`] characters and the whole
 /// path at [`MAX_PATH_CHARS`], counted after escaping; a cut never splits a
 /// character or an escape, and is marked with U+2026.
@@ -493,7 +496,10 @@ impl PathText {
             let short;
             let code;
             let (shown, len): (&dyn fmt::Display, usize) = match character {
-                '\n' | '\r' | '\t' => {
+                // A backslash is the one printable character escaped: written
+                // bare, a key spelling `\u{1b}` would read exactly like a key
+                // holding a real ESC.
+                '\\' | '\n' | '\r' | '\t' => {
                     short = character.escape_default();
                     (&short, short.len())
                 }
