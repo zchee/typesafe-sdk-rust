@@ -57,8 +57,8 @@ pub(crate) const MAX_JSON_DEPTH: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DecodeErrorKind {
-    /// The document is nested deeper than [`MAX_JSON_DEPTH`] and was rejected
-    /// without being parsed.
+    /// The document is nested deeper than the 16 levels this crate parses, and
+    /// was rejected without being parsed.
     TooDeep,
     /// The bytes are not syntactically valid JSON, or they end early.
     Syntax,
@@ -235,10 +235,15 @@ pub(crate) fn write_json_string(buf: &mut Vec<u8>, text: &str) {
 ///
 /// Returns whatever `fill` returns.
 // The first in-crate caller is the request builder, which is not written yet;
-// until then only the `internals` wrappers reach this. `#[expect]` is the wrong
-// tool, because with that feature on the item IS used and the expectation would
-// go unfulfilled - and therefore warn - in exactly that configuration.
-#[cfg_attr(not(feature = "internals"), allow(dead_code))]
+// until then only the `internals` wrappers and the tests reach this. Naming
+// both of those in the condition is what lets this be an `expect` rather than
+// an `allow`: it is applied only in the one configuration where the item is
+// genuinely unreachable, so it cannot go unfulfilled, and it turns into a
+// warning - a failed gate - as soon as the request builder calls it.
+#[cfg_attr(
+    all(not(test), not(feature = "internals")),
+    expect(dead_code, reason = "the request builder that calls this is written in phase 2")
+)]
 pub(crate) fn encode_body<F>(fill: F) -> Result<Bytes, EncodeError>
 where
     F: FnOnce(&mut Vec<u8>) -> Result<(), EncodeError>,

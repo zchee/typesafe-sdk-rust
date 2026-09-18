@@ -38,11 +38,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # rust-toolchain.toml names the version and its components; touching
-      # rustup at all is what makes it install them before the first build,
-      # so a toolchain problem is reported here and not inside a compile.
+      # `rustup toolchain install` with no toolchain named installs the active
+      # one, which is the one rust-toolchain.toml names, together with its
+      # components. It is spelled out rather than left to happen on the first
+      # cargo call: rustup 1.28.0 removed that automatic install, 1.28.1 put it
+      # back as a default that `RUSTUP_AUTO_INSTALL=0` turns off and 1.29.0
+      # added `rustup set auto-install disable` beside it, so whether a bare
+      # cargo call installs anything is a property of the runner image, not of
+      # this workflow. `rustup show` never installed; it only reports.
       - name: Install the pinned toolchain
-        run: rustup show active-toolchain
+        run: rustup toolchain install --no-self-update
 
       - uses: taiki-e/install-action@v2
         with:
@@ -74,6 +79,14 @@ jobs:
       - name: Dependency policy
         run: cargo deny check
 
+      # A link to an item that is private, renamed or gone still renders; it
+      # just renders as text that goes nowhere, which nobody notices in a
+      # review. Denying rustdoc's warnings is what turns that into a failure.
+      - name: Documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
   coverage:
     name: coverage
     runs-on: ubuntu-26.04
@@ -81,7 +94,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install the pinned toolchain
-        run: rustup show active-toolchain
+        run: rustup toolchain install --no-self-update
 
       # Coverage is the one thing here that needs a component beyond what
       # rust-toolchain.toml installs for everybody, so it is added by the job

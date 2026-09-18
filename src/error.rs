@@ -28,14 +28,15 @@
 // piece at a time, so until the first real caller lands the compiler is right
 // that nothing outside the tests calls it.
 //
-// The attribute is off under `cfg(test)`, where the tests below are callers:
-// an item no test reaches still reports itself, so this does not silence dead
-// code, it only waits for the caller. `#[expect]` cannot say the same - it
-// would go unfulfilled in exactly that build and warn there instead. The lane
-// that writes the first caller deletes this.
+// `expect` rather than `allow`, so this expires by itself: the moment the last
+// item here has a caller the expectation goes unfulfilled, which is a warning,
+// which is a failed gate. The attribute is not applied under `cfg(test)`,
+// where the tests are callers and the expectation could not hold; that is also
+// what keeps this from hiding an item no test reaches, which the test build
+// still reports.
 #![cfg_attr(
     not(test),
-    allow(dead_code, reason = "the lanes that raise these failures are written in later phases")
+    expect(dead_code, reason = "the lanes that raise these failures are written in later phases")
 )]
 
 use std::{
