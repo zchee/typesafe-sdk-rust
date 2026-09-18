@@ -260,3 +260,27 @@ fn a_struct_of_content_fields_carries_the_same_data_through_both_codecs() {
     assert!(ours.contains(r#"{"tone": ["warm", "brief"], "length": {"max": 40}}"#), "{ours}");
     assert!(theirs.contains(r#"{"tone":["warm","brief"],"length":{"max":40}}"#), "{theirs}");
 }
+
+#[test]
+fn text_that_is_not_one_json_value_never_becomes_content() {
+    use serde::de::value::{BorrowedStrDeserializer, Error as ValueError};
+
+    // A deserializer that answers the raw-text request with a string of the
+    // caller's own: spliced into a request body, the first of these would put
+    // a key of their choosing next to the field that holds it.
+    for text in [r#"{"a":1}, "model": "evil""#, "{not json", "hello", ""] {
+        let refused = <Content<'_> as Deserialize>::deserialize(BorrowedStrDeserializer::<
+            ValueError,
+        >::new(text));
+
+        let error = refused.expect_err(text).to_string();
+        assert!(!error.contains("evil"), "the refusal quoted the input: {error}");
+        assert!(!error.contains("not json"), "the refusal quoted the input: {error}");
+    }
+
+    let accepted = <Content<'_> as Deserialize>::deserialize(
+        BorrowedStrDeserializer::<ValueError>::new(r#"{"a":1}"#),
+    )
+    .expect("one complete value is content");
+    assert_eq!(accepted.as_json().map(RawJson::as_str), Some(r#"{"a":1}"#));
+}

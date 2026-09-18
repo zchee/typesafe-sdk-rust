@@ -380,7 +380,7 @@ fn raw_json_round_trips_through_a_value() {
     let point = Point { x: -3, label: "caf\u{e9}\u{2028}\u{1f600}".to_owned() };
 
     let raw = RawJson::from_value(&point).expect("the value encodes");
-    assert_eq!(raw.deserialize::<Point>().expect("the text decodes"), point, "raw text {raw}");
+    assert_eq!(raw.decode::<Point>().expect("the text decodes"), point, "raw text {raw}");
     assert_eq!(raw, RawJson::from_value(&point).expect("encodes again"));
 }
 
@@ -392,7 +392,7 @@ fn raw_json_applies_the_depth_limit_when_it_is_read_back() {
     }
 
     let raw = RawJson::from_value(&value).expect("encoding is not depth limited");
-    let error = raw.deserialize::<IgnoredAny>().expect_err("reading it back is");
+    let error = raw.decode::<IgnoredAny>().expect_err("reading it back is");
     assert_eq!(error.kind(), DecodeErrorKind::TooDeep, "kind of {error}");
 }
 
@@ -696,4 +696,144 @@ fn a_deserializer_that_ignores_the_request_still_yields_the_value() {
     ))
     .expect("a bare map arrives as data");
     assert_eq!(map.as_str(), r#"{"we\"ird":1,"b":2}"#);
+}
+
+// --------------------------------------------- the one-JSON-value invariant
+
+/// Reads one raw capture, which is what a response type does for a field it
+/// keeps as text.
+#[derive(Debug, Deserialize)]
+struct RawRow<'a> {
+    #[serde(borrow, deserialize_with = "deserialize_raw")]
+    value: Cow<'a, str>,
+}
+
+#[test]
+fn text_that_is_not_one_json_value_never_becomes_raw_json() {
+    use serde::de::value::{BorrowedStrDeserializer, Error as ValueError, StrDeserializer};
+
+    // The first of these is the dangerous one: spliced into a request body it
+    // would add a key of the caller's choosing to the enclosing object. The
+    // other two would make the body unparseable.
+    for text in [r#"{"a":1}, "model": "evil""#, "{not json", "hello", "", "  "] {
+        let borrowed =
+            <RawJson as Deserialize>::deserialize(BorrowedStrDeserializer::<ValueError>::new(text));
+        let owned = <RawJson as Deserialize>::deserialize(StrDeserializer::<ValueError>::new(text));
+
+        let error = borrowed.expect_err(text).to_string();
+        assert!(owned.is_err(), "the owned route accepted {text:?}");
+        assert!(!error.contains("evil"), "the refusal quoted the input: {error}");
+        assert!(!error.contains("not json"), "the refusal quoted the input: {error}");
+    }
+
+    // A string that does hold exactly one value is taken at face value, which
+    // is the raw-text protocol this codec relies on.
+    let accepted = <RawJson as Deserialize>::deserialize(
+        BorrowedStrDeserializer::<ValueError>::new(r#"{"a":1}"#),
+    )
+    .expect("one complete value is raw JSON text");
+    assert_eq!(accepted.as_str(), r#"{"a":1}"#);
+}
+
+#[test]
+fn a_raw_capture_past_the_depth_cap_is_refused() {
+    use serde::de::value::{BorrowedStrDeserializer, Error as ValueError};
+
+    let deep = nested_array(MAX_JSON_DEPTH + 1);
+    let at_limit = nested_array(MAX_JSON_DEPTH);
+
+    let error =
+        <RawJson as Deserialize>::deserialize(BorrowedStrDeserializer::<ValueError>::new(&deep))
+            .expect_err("one level past the cap is refused");
+    assert!(error.to_string().contains("nested deeper"), "{error}");
+
+    assert_eq!(
+        <RawJson as Deserialize>::deserialize(BorrowedStrDeserializer::<ValueError>::new(
+            &at_limit
+        ))
+        .expect("the limit itself is fine")
+        .as_str(),
+        at_limit
+    );
+}
+
+#[test]
+fn the_check_leaves_the_borrow_on_the_sdk_decode_path() {
+    let document = br#"{"value":{"label":"ok","weight":2}}"#;
+
+    let row: RawRow<'_> = decode(document).expect("the document decodes");
+
+    assert!(
+        matches!(row.value, Cow::Borrowed(_)),
+        "the raw capture stopped borrowing the response buffer: {:?}",
+        row.value
+    );
+    let captured = row.value.as_ptr().addr();
+    let start = document.as_ptr().addr();
+    assert!(
+        (start..start + document.len()).contains(&captured),
+        "the text must point into the response buffer, not a copy"
+    );
+    assert_eq!(&*row.value, r#"{"label":"ok","weight":2}"#);
+}
+
+// ------------------------------------------------------ non-finite floats
+
+#[test]
+fn a_non_finite_float_encodes_as_null_exactly_as_the_reference_codec_does() {
+    // Pinned rather than asserted as desirable: this codec and `serde_json`
+    // agree on `null`, the upstream Python SDK writes the bare words `NaN` and
+    // `Infinity`, which are not JSON at all, and the plan says both should
+    // refuse. The behaviour is recorded here so that a change to it is a test
+    // failure rather than a surprise on the wire.
+    #[derive(Debug, Serialize)]
+    struct Scores {
+        score: f64,
+        ratio: f32,
+    }
+
+    for (value, expected) in [(f64::NAN, "null"), (f64::INFINITY, "null"), (-f64::INFINITY, "null")]
+    {
+        let ours = RawJson::from_value(&value).expect("a non-finite float encodes");
+        assert_eq!(ours.as_str(), expected);
+        assert_eq!(serde_json::to_string(&value).expect("so it does there"), expected);
+    }
+
+    let scores = Scores { score: f64::NAN, ratio: f32::NEG_INFINITY };
+    assert_eq!(
+        RawJson::from_value(&scores).expect("a struct of them encodes").as_str(),
+        r#"{"score":null,"ratio":null}"#
+    );
+    assert_eq!(
+        serde_json::to_string(&scores).expect("and there too"),
+        r#"{"score":null,"ratio":null}"#
+    );
+
+    // The render path a foreign deserializer takes reaches the same writer.
+    use serde::de::value::{Error as ValueError, F64Deserializer};
+    assert_eq!(
+        <RawJson as Deserialize>::deserialize(F64Deserializer::<ValueError>::new(f64::NAN))
+            .expect("it renders")
+            .as_str(),
+        "null"
+    );
+}
+
+#[test]
+fn an_encode_error_is_a_key_the_writer_cannot_spell_or_a_value_that_refuses() {
+    // The two failures the rustdoc of `EncodeError` names. A non-finite float
+    // is not one of them, which is why it is not mentioned there.
+    let tuple_keys = std::collections::BTreeMap::from([((1_u8, 2_u8), 3_u8)]);
+    let error = RawJson::from_value(&tuple_keys).expect_err("a tuple is not a JSON key");
+    assert!(error.message().contains("key"), "{error}");
+    assert!(serde_json::to_string(&tuple_keys).is_err(), "the reference codec refuses it too");
+
+    struct Refuses;
+    impl Serialize for Refuses {
+        fn serialize<S: Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("this value declines to be encoded"))
+        }
+    }
+    let error = RawJson::from_value(&Refuses).expect_err("the value refuses");
+    assert_eq!(error.message(), "this value declines to be encoded");
 }

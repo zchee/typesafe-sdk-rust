@@ -37,7 +37,9 @@ use std::{
 
 use bytes::Bytes;
 use serde::{
-    Deserialize, Deserializer, Serialize, Serializer, de, ser,
+    Deserialize, Deserializer, Serialize, Serializer, de,
+    de::IgnoredAny,
+    ser,
     ser::{SerializeMap, SerializeSeq, SerializeStruct},
 };
 use thiserror::Error;
@@ -143,8 +145,9 @@ impl DecodeError {
 /// A value could not be encoded as JSON.
 ///
 /// The message comes from the codec's serializer, which reports the failing
-/// step (a non-finite float, or an error returned by the value's own
-/// [`Serialize`] implementation) and never quotes the value.
+/// step - a map key that is not a string, a boolean or a number, or an error
+/// returned by the value's own [`Serialize`] implementation - and never quotes
+/// the value.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("the value could not be encoded as JSON: {message}")]
 #[non_exhaustive]
@@ -189,8 +192,11 @@ thread_local! {
 ///
 /// # Errors
 ///
-/// Returns [`EncodeError`] when the value cannot be represented as JSON, for
-/// example a non-finite float. The buffer may then hold a partial encoding of
+/// Returns [`EncodeError`] when the value cannot be represented as JSON: a
+/// map whose keys are neither strings, booleans nor numbers, or a
+/// [`Serialize`] implementation that returns an error of its own. A non-finite
+/// float is not one of these - it is written as `null`, which is what
+/// `serde_json` does as well. The buffer may then hold a partial encoding of
 /// that value, so a caller that reuses it has to truncate it.
 pub(crate) fn encode_into<T>(buf: &mut Vec<u8>, value: &T) -> Result<(), EncodeError>
 where
@@ -708,6 +714,24 @@ where
     }
 }
 
+/// Rejects text that is not exactly one complete JSON value.
+///
+/// A [`RawJson`] is written into a request body without being read again, so
+/// text carrying a second value would splice that value - a key of the
+/// caller's choosing, say - into the enclosing object, and text that is not
+/// JSON at all would make the whole body unparseable. Every value this codec
+/// captures is one value already; what needs guarding is a string handed over
+/// by a deserializer that answered the raw-text request with whatever the
+/// caller had put in it.
+///
+/// The scan allocates nothing on the accepting path: the depth pre-scan reads
+/// the bytes, and the parser then skips one value and checks that only
+/// whitespace follows.
+fn one_json_value<E: de::Error>(text: &str) -> Result<(), E> {
+    decode::<IgnoredAny>(text.as_bytes()).map_err(de::Error::custom)?;
+    Ok(())
+}
+
 /// Reads the next value as its raw JSON text, without interpreting it.
 ///
 /// This crate's codec answers the request with the text of the value as the
@@ -718,9 +742,13 @@ where
 /// what comes out holds the same data rather than failing.
 ///
 /// A format that neither knows the request nor forwards itself, but answers it
-/// with a bare string, is the one case this cannot serve: a string reaching
-/// the visitor is the raw-text protocol, so it is taken as JSON text and not
-/// as a JSON string. No JSON codec behaves that way.
+/// with a bare string, cannot be told apart from the codec's own raw-text
+/// answer, so the string is read as JSON text rather than as a JSON string.
+/// Such text is checked before it is accepted: one complete JSON value is
+/// taken at face value, and anything else - a second value after the first,
+/// or text that is not JSON - is refused rather than carried into a request
+/// body. No JSON codec behaves that way, so in practice this guards a string
+/// a caller supplied by hand.
 ///
 /// # Errors
 ///
@@ -744,12 +772,19 @@ impl<'de> de::Visitor<'de> for RawTextVisitor {
     }
 
     /// This crate's codec, handing over the raw text of the value.
+    ///
+    /// The check is redundant for that codec, which never hands over anything
+    /// else, and is what holds the invariant for a deserializer that answers
+    /// the raw-text request with a string of the caller's own. The borrow
+    /// survives it.
     fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+        one_json_value(value)?;
         Ok(Cow::Borrowed(value))
     }
 
     /// The same, for text the codec had to rebuild because it holds escapes.
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        one_json_value(value)?;
         Ok(Cow::Owned(value.to_owned()))
     }
 
@@ -1035,9 +1070,16 @@ impl<'de> de::Visitor<'de> for RenderKey<'_> {
 /// It holds whatever value it was built from - an object, an array or a
 /// scalar - as the text the wire carried, so a response field of a shape this
 /// version does not know survives a decode and can be read later with
-/// [`deserialize`](RawJson::deserialize). Two values are equal when their text
+/// [`decode`](RawJson::decode). Two values are equal when their text
 /// is equal, which means equality is textual: `{"a":1}` and `{ "a": 1 }` are
 /// different values.
+///
+/// # Invariant
+///
+/// The text is always exactly one complete JSON value. Nothing builds a
+/// `RawJson` without the codec having established that, because the text is
+/// written into a request body unread: a second value in it would become a
+/// field of the enclosing object.
 ///
 /// # Serialization
 ///
@@ -1082,20 +1124,26 @@ impl RawJson {
 
     /// Decodes the held text into `T`.
     ///
+    /// It is `decode` rather than `deserialize` so that it does not shadow
+    /// [`Deserialize::deserialize`], which a caller reaches for when they read
+    /// a `RawJson` out of a document with a codec of their own.
+    ///
     /// # Errors
     ///
     /// Returns [`DecodeError`] when the text does not have the shape `T`
     /// expects, or when it is nested deeper than the decoder allows - which a
     /// value built by [`from_value`](RawJson::from_value) can be, since
     /// encoding is not depth limited.
-    pub fn deserialize<'de, T>(&'de self) -> Result<T, DecodeError>
+    pub fn decode<'de, T>(&'de self) -> Result<T, DecodeError>
     where
         T: Deserialize<'de>,
     {
         decode(self.text.as_bytes())
     }
 
-    /// Wraps text the caller has already had validated by the codec.
+    /// Wraps text the codec has already established to be one JSON value:
+    /// what [`encode_into`] wrote, or what [`deserialize_raw`] captured and
+    /// checked.
     pub(crate) fn from_text(text: String) -> Self {
         Self { text: text.into_boxed_str() }
     }
