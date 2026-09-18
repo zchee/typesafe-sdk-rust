@@ -185,21 +185,62 @@ fn explicit_settings_are_used_without_consulting_the_environment() {
     assert_eq!(config.timeout(), Duration::from_millis(1500));
 }
 
-/// Upstream `_resolve_env` returns an explicit value whenever it is not
-/// `None`, so an explicit empty or whitespace-only key, or model, is kept
-/// exactly as given rather than trimmed or treated as missing. This pins that
-/// the port does the same: the key then fails at the server, not here.
+/// The message an explicit blank API key fails with.
+const BLANK_KEY: &str = "The API key is empty. \
+    Pass a non-empty api_key or set the TYPESAFE_API_KEY environment variable.";
+
+/// The message an explicit blank default model fails with.
+const BLANK_MODEL: &str = "The default model is empty. \
+    Pass a non-empty default_model or set the TYPESAFE_DEFAULT_MODEL environment variable.";
+
+/// Blank by Python's `str.strip()`: empty, spaces, mixed whitespace, and the
+/// ASCII separators Python counts as whitespace and Rust does not.
+const BLANK: [&str; 5] = ["", " ", " \t\n ", "\u{1c}", "\u{1d}\u{1f} \u{1e}"];
+
+/// Upstream `_resolve_env` keeps any explicit value that is not `None`, so it
+/// sends a blank key as `Bearer `. The port refuses it instead, even with a
+/// usable key in the environment: the caller said which key to use, and it is
+/// no key at all. The message repeats nothing of the value.
 #[test]
-fn explicit_blank_values_are_kept_as_given() {
+fn an_explicit_blank_key_is_a_config_error_even_with_a_key_in_the_environment() {
+    let environment = [("TYPESAFE_API_KEY", "env-key")];
+    for given in BLANK {
+        let error = Config::resolve(Explicit::default().api_key(given), env(&environment))
+            .expect_err("an explicit blank key must not resolve");
+        assert!(matches!(error.kind(), ErrorKind::Config), "{given:?}: {error:?}");
+        assert_eq!(error.to_string(), BLANK_KEY, "{given:?}");
+        assert_eq!(format!("{error:?}"), config_debug(BLANK_KEY), "{given:?}");
+    }
+}
+
+/// The same rule for the default model, which upstream would send as an
+/// empty or whitespace model name.
+#[test]
+fn an_explicit_blank_default_model_is_a_config_error_even_with_one_in_the_environment() {
+    let environment = [("TYPESAFE_DEFAULT_MODEL", "env-model")];
+    for given in BLANK {
+        let explicit = Explicit::default().api_key("test-key").default_model(given);
+        let error = Config::resolve(explicit, env(&environment))
+            .expect_err("an explicit blank model must not resolve");
+        assert!(matches!(error.kind(), ErrorKind::Config), "{given:?}: {error:?}");
+        assert_eq!(error.to_string(), BLANK_MODEL, "{given:?}");
+        assert_eq!(format!("{error:?}"), config_debug(BLANK_MODEL), "{given:?}");
+    }
+}
+
+/// A padded explicit key or model that is not blank is kept byte for byte:
+/// trimming a credential would be a silent repair, and upstream sends both as
+/// given.
+#[test]
+fn a_padded_non_blank_explicit_key_and_model_are_kept_byte_for_byte() {
     let environment = [("TYPESAFE_API_KEY", "env-key"), ("TYPESAFE_DEFAULT_MODEL", "env-model")];
-    let cases =
-        [("", "Bearer ", ""), (" \t ", "Bearer  \t ", " \t "), ("  k  ", "Bearer   k  ", "  k  ")];
-    for (given, header, model) in cases {
+    let cases = [("  k  ", "Bearer   k  "), ("\tk\t", "Bearer \tk\t"), (" a b ", "Bearer  a b ")];
+    for (given, header) in cases {
         let explicit = Explicit::default().api_key(given).default_model(given);
         let config = Config::resolve(explicit, env(&environment))
             .unwrap_or_else(|error| panic!("explicit {given:?} failed to resolve: {error:?}"));
-        assert_eq!(authorization(&config), header, "explicit key {given:?}");
-        assert_eq!(config.default_model(), model, "explicit model {given:?}");
+        assert_eq!(authorization(&config).as_bytes(), header.as_bytes(), "key {given:?}");
+        assert_eq!(config.default_model().as_bytes(), given.as_bytes(), "model {given:?}");
     }
 }
 

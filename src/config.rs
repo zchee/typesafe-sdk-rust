@@ -49,8 +49,8 @@ pub(crate) struct Explicit {
 }
 
 impl Explicit {
-    /// The API key, used as given: an explicit key is neither trimmed nor
-    /// checked for being blank.
+    /// The API key, used as given: an explicit key is not trimmed, and a blank
+    /// one is refused when the configuration is resolved.
     pub(crate) fn api_key(mut self, key: impl Into<SecretString>) -> Self {
         self.api_key = Some(key.into());
         self
@@ -62,7 +62,8 @@ impl Explicit {
         self
     }
 
-    /// The model a request names when the call names none, used as given.
+    /// The model a request names when the call names none, used as given; a
+    /// blank one is refused when the configuration is resolved.
     pub(crate) fn default_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
         self
@@ -102,16 +103,18 @@ impl Config {
     /// `env` looks a variable up by name; the client passes
     /// `|name| std::env::var(name).ok()`. It is consulted only for settings the
     /// caller left unset. A value it returns is trimmed, and a blank one counts
-    /// as unset. An explicit value always wins and is taken as given, blank or
-    /// not - the rule of the Python SDK, where only a missing argument falls
-    /// back to the environment.
+    /// as unset. An explicit value always wins and is taken as given, without
+    /// trimming, as the Python SDK takes it - except that an explicit API key
+    /// or default model that is blank is refused rather than sent, where the
+    /// Python SDK would send it.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error when no
-    /// API key is found, when the key cannot be sent in an HTTP header, when
-    /// the base URL is not an absolute `http` or `https` URL without
-    /// credentials, query or fragment, or when the timeout is zero.
+    /// API key is found, when an explicit API key or default model is blank,
+    /// when the key cannot be sent in an HTTP header, when the base URL is not
+    /// an absolute `http` or `https` URL without credentials, query or
+    /// fragment, or when the timeout is zero.
     pub(crate) fn resolve(
         explicit: Explicit,
         env: impl Fn(&str) -> Option<String>,
@@ -119,6 +122,16 @@ impl Config {
         let Explicit { api_key, base_url, default_model, timeout, default_headers } = explicit;
 
         let api_key = match api_key {
+            // A blank key can only be a mistake, and sending it would turn a
+            // configuration error into an authentication failure at the
+            // server. The message does not repeat the value: whitespace is
+            // still part of what the caller passed as a credential.
+            Some(key) if is_blank(key.expose_secret()) => {
+                return Err(Error::config(format!(
+                    "The API key is empty. \
+                     Pass a non-empty api_key or set the {API_KEY_ENV} environment variable."
+                )));
+            }
             Some(key) => key,
             None => from_env(&env, API_KEY_ENV).map(SecretString::from).ok_or_else(|| {
                 Error::config(format!(
@@ -135,9 +148,17 @@ impl Config {
         base_url.truncate(base_url.trim_end_matches('/').len());
         let endpoints = endpoints(&base_url)?;
 
-        let default_model = default_model
-            .or_else(|| from_env(&env, DEFAULT_MODEL_ENV))
-            .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+        let default_model = match default_model {
+            Some(model) if is_blank(&model) => {
+                return Err(Error::config(format!(
+                    "The default model is empty. \
+                     Pass a non-empty default_model or set the {DEFAULT_MODEL_ENV} \
+                     environment variable."
+                )));
+            }
+            Some(model) => model,
+            None => from_env(&env, DEFAULT_MODEL_ENV).unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+        };
 
         let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
         // A `Duration` cannot be negative, NaN or infinite, so zero is the one
@@ -334,19 +355,26 @@ fn bearer(key: &SecretString) -> Result<HeaderValue, Error> {
     Ok(value)
 }
 
-/// The variable `name` as `env` finds it, trimmed, or `None` when it is unset
-/// or blank.
-///
-/// Trimming follows Python's `str.strip()`, which is what the Python SDK
-/// applies: Unicode whitespace plus the four ASCII separators U+001C to
-/// U+001F, which Python counts as whitespace and Rust's `char::is_whitespace`
-/// does not.
+/// Whether `c` is whitespace to Python's `str.strip()`, which is what the
+/// Python SDK trims with: Unicode whitespace plus the four ASCII separators
+/// U+001C to U+001F, which Python counts as whitespace and Rust's
+/// `char::is_whitespace` does not.
+fn is_python_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+/// Whether `text` is empty once Python's `str.strip()` has trimmed it.
+fn is_blank(text: &str) -> bool {
+    text.chars().all(is_python_space)
+}
+
+/// The variable `name` as `env` finds it, trimmed as [`is_python_space`]
+/// says, or `None` when it is unset or blank.
 fn from_env(env: &impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
-    let is_space = |c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c);
     let mut value = env(name)?;
-    let end = value.trim_end_matches(is_space).len();
+    let end = value.trim_end_matches(is_python_space).len();
     value.truncate(end);
-    let start = value.len() - value.trim_start_matches(is_space).len();
+    let start = value.len() - value.trim_start_matches(is_python_space).len();
     value.drain(..start);
     if value.is_empty() { None } else { Some(value) }
 }
