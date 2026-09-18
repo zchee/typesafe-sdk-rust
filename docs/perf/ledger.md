@@ -633,6 +633,61 @@ slower than the link allows - not the server's window.
 **Keep-alive behaviour is NOT measured here.** Whether the load balancer counts an HTTP/2 PING as activity needs an
 authenticated idle test (plan section 8 step 13), which is out of scope for this task.
 
+## S3 - request compression
+
+Date: 2026-09-19 (the server's clock read Fri, 18 Sep 2026 21:45 GMT). Made with `curl` against the live API **with**
+an API key, taken from the environment variable `TYPESAFE_API_KEY` and passed on stdin, so it appears in no process
+argument, file or output. Two API calls in total. The header name and scheme come from upstream
+`src/typesafe_sdk/_core/transport.py` (`Authorization: Bearer <key>`); the request shape comes from the public
+`https://api.typesafe.ai/openapi.json` (`SystemOneRequest`), and `jev-latest` is the only model name its documentation
+gives.
+
+The control body, 133 bytes, one noul question:
+
+```json
+{"model":"jev-latest","state":"I was charged twice.","questions":{"billing":{"type":"noul","instructions":"Is this about billing?"}}}
+```
+
+```sh
+gzip -9 -n -c small.json > small.json.gz          # 133 -> 123 bytes; gzip -dc gives back the same bytes
+# 1: control, uncompressed
+curl -sS -o c1.body -D c1.hdr -w '%{http_code}\n' -X POST https://api.typesafe.ai/v1/systemone \
+  -H 'Content-Type: application/json' --data-binary @small.json \
+  -H @- <<< "Authorization: Bearer ${TYPESAFE_API_KEY}"
+# 2: probe, the same bytes gzip-compressed
+curl -sS -o c2.body -D c2.hdr -w '%{http_code}\n' -X POST https://api.typesafe.ai/v1/systemone \
+  -H 'Content-Type: application/json' -H 'Content-Encoding: gzip' --data-binary @small.json.gz \
+  -H @- <<< "Authorization: Bearer ${TYPESAFE_API_KEY}"
+```
+
+| # | Request | Bytes sent | Status | `content-type` | `x-envoy-upstream-service-time` | Response body |
+| --- | --- | ---: | ---: | --- | ---: | --- |
+| 1 | uncompressed, no `Content-Encoding` | 133 | **200** | `application/json` | 248 | `{"model":"jev-1.13.0","answers":{"billing":{"type":"noul","noul":0.97}},"usage":{"input_tokens":276,"output_tokens":20}}` |
+| 2 | same bytes, `gzip -9`, `Content-Encoding: gzip` | 123 | **400** | `application/json` | 2 | `{"detail":"There was an error parsing the body"}` |
+
+Both responses came over HTTP/2 from `server: istio-envoy` and carried an `x-typesafe-request-id`
+(`req_01a0b67bb15b7bf897a8b30fe716ec1f` for 1, `req_01a0b67bc5287b93844dc4fd8956daff` for 2). Neither response sent
+an `Accept-Encoding` or any other header naming the encodings the server takes.
+
+The status is **400, not 415**. The server does not say "unsupported encoding": it reports the gzip body as a body it
+cannot parse, in a `detail` string that is not the `{"error_type": ..., "message": ...}` object the 403 in S2a returned.
+Taken with the 2 ms upstream time against 248 ms for the control, this is consistent with the compressed bytes reaching
+the application's body parser as they were sent, with neither the envoy proxy nor the application decoding them. That
+reading is an inference from these two responses; the server's configuration was not inspected.
+
+Step 3 of the brief (a 64 KB `state`, compressed) was **not run**: it applies only when the probe succeeds. The body
+for it had been built - 65,649 bytes, 404 bytes after `gzip -9` - so the saving the feature would have offered on a
+repetitive `state` is known, but no server behaviour at that size was measured.
+
+**Decision (plan section 5, S3 rule: "accepted -> opt-in `compress_requests(min_bytes)` enters Phase 5;
+4xx -> recorded and dropped"): 4xx. Request compression is dropped.** No `compress_requests` knob is added, and the
+client sends request bodies uncompressed.
+
+Not measured here: `deflate`, `br` and `zstd` request encodings (the rule is about gzip, and one 4xx settles it for
+the plan); response compression (`Accept-Encoding` on the response side), which is a separate question; and whether
+the 400 would count as retryable - it is a 4xx the SDK must surface, and it cannot arise once the client never sets
+`Content-Encoding`.
+
 ---
 
 ## AC-P0 - itemized allocation inventory
