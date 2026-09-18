@@ -177,6 +177,12 @@ fn a_detail_list_joins_its_entries_and_drops_the_body_segment() {
     // Entries the shape does not fit are dropped, and the ones that fit still
     // answer.
     assert_eq!(message_of(r#"{"detail":[null,42,{"msg":4},{"msg":"kept"}]}"#), "kept");
+    // A segment that is neither a field name nor an index is left out rather
+    // than guessed at, and the segments around it still form the path.
+    assert_eq!(
+        message_of(r#"{"detail":[{"loc":["body",null,"tone",true],"msg":"bad"}]}"#),
+        "tone: bad"
+    );
 }
 
 #[test]
@@ -220,6 +226,10 @@ fn a_json_string_body_is_its_own_message_and_an_empty_one_leaves_the_status_alon
     let empty = api(400, r#""""#);
     assert_eq!(empty.message(), "");
     assert_eq!(empty.to_string(), "400", "an empty message leaves the status to stand alone");
+
+    // Text that starts like a string and is not one is not JSON at all, so it
+    // is reported as the text it is, whitespace and all.
+    assert_eq!(message_of(r#""unterminated  "#), r#""unterminated  "#);
 }
 
 #[test]
@@ -360,6 +370,15 @@ fn a_failure_renders_as_the_endpoint_the_status_the_message_and_the_request_id()
     );
     assert_eq!(error.request_id(), Some("req-context"));
     assert_eq!(error.endpoint(), Some("POST https://api.example.test/prefix/v1/systemone"));
+    assert_eq!(
+        error.headers().len(),
+        1,
+        "the headers arrive whole, for a caller this type does not serve"
+    );
+    assert_eq!(
+        error.headers().get("x-typesafe-request-id").and_then(|value| value.to_str().ok()),
+        Some("req-context")
+    );
 
     // Each optional part disappears on its own.
     let no_endpoint = ApiError::new(
@@ -418,6 +437,13 @@ fn an_endpoint_drops_the_credentials_the_query_and_the_default_port() {
         format_endpoint(&Method::GET, &uri("http://[::1]:9000/v1/models")),
         "GET http://[::1]:9000/v1/models"
     );
+    // A scheme this crate knows no default port for keeps whatever port it was
+    // given, and a target with no authority at all is just its path.
+    assert_eq!(
+        format_endpoint(&Method::GET, &uri("ftp://example.test:21/models")),
+        "GET ftp://example.test:21/models"
+    );
+    assert_eq!(format_endpoint(&Method::GET, &uri("/v1/models")), "GET /v1/models");
 }
 
 #[test]
@@ -452,6 +478,31 @@ fn nothing_that_could_be_a_secret_reaches_a_debug_rendering() {
     let shown = format!("{wrapped:?}");
     assert!(shown.starts_with("Error { kind: Api(ApiError { status: 401,"), "{shown}");
     assert!(!shown.contains("sk-live-do-not-log-me"), "{shown}");
+
+    // And on the validation error, which reaches the same headers by a
+    // different route and prints a decode failure beside them.
+    let body = Bytes::from_static(br#"{"model":"jev-1","answers":{"spam":{}}}"#);
+    let decode_error = codec::decode::<Fixture>(&body).expect_err("the fixture is missing a field");
+    let invalid = ResponseValidationError::new(
+        status(200),
+        body,
+        headers(&[("authorization", "Bearer sk-live-do-not-log-me"), ("cookie", "session=secret")]),
+        None,
+        decode_error,
+    );
+    let shown = format!("{invalid:?}");
+    for secret in ["sk-live-do-not-log-me", "Bearer", "secret", "authorization", "cookie"] {
+        assert!(!shown.contains(secret), "{secret:?} reached the Debug rendering: {shown}");
+    }
+    assert_eq!(
+        shown,
+        concat!(
+            "ResponseValidationError { status: 200, endpoint: None, request_id: None, ",
+            r#"field_path: "answers.spam.noul", "#,
+            r#"source: DecodeError { detail: Data { path: "answers.spam.noul", line: 1, column: 37 } }, "#,
+            "headers: <2 redacted>, body: <39 bytes> }"
+        )
+    );
 }
 
 // ------------------------------------------------------- the wrapping error
@@ -490,6 +541,18 @@ fn each_kind_renders_and_chains_the_way_its_caller_will_read_it() {
         source.downcast_ref::<std::io::Error>().is_some(),
         "the transport's own type survives the boxing"
     );
+
+    // A kind that carries a sentence of its own shows it, and the cause beside
+    // it, rather than a bare kind name.
+    assert_eq!(
+        format!("{config:?}"),
+        r#"Error { kind: Config, message: "TYPESAFE_API_KEY is not set" }"#
+    );
+    let shown = format!("{connection:?}");
+    let head =
+        r#"Error { kind: Connection, message: "could not reach https://api.typesafe.ai", source: "#;
+    assert!(shown.starts_with(head), "{shown}");
+    assert!(shown.contains("connection refused"), "{shown}");
 
     // An API failure is the failure, so it has no cause underneath it; the
     // sentence is already the whole story.
@@ -531,6 +594,17 @@ fn a_response_that_does_not_fit_names_the_field_and_keeps_the_body() {
         "the body is kept so a caller can recover what the SDK dropped"
     );
     assert_eq!(error.decode_error().kind(), DecodeErrorKind::Data);
+    assert_eq!(error.headers().len(), 1);
+    assert_eq!(error.body_text(), r#"{"model":"jev-1","answers":{"spam":{}}}"#);
+
+    // Reading the body back is how a caller recovers what the SDK's own
+    // response type dropped, including whatever made the decode fail.
+    #[derive(Debug, Deserialize)]
+    struct Recovered<'a> {
+        model: &'a str,
+    }
+    let recovered = error.body_json::<Recovered<'_>>().expect("the rest of the body is readable");
+    assert_eq!(recovered.model, "jev-1");
 
     // The decode failure is the cause, both from the type itself and from the
     // wrapping error, so a chain printer shows the position `Display` omits.
@@ -541,8 +615,10 @@ fn a_response_that_does_not_fit_names_the_field_and_keeps_the_body() {
             .to_string(),
         error.decode_error().to_string()
     );
+    let rendered = error.to_string();
     let wrapped = Error::from(error);
     assert!(matches!(wrapped.kind(), ErrorKind::ResponseValidation(_)));
+    assert_eq!(wrapped.to_string(), rendered, "wrapping does not change the sentence");
     let source =
         wrapped.source().expect("invariant: a validation error always has a decode failure");
     assert!(source.downcast_ref::<DecodeError>().is_some());
