@@ -36,7 +36,7 @@ use serde::{
     ser::{SerializeMap, SerializeSeq},
 };
 use typesafe_sdk::{
-    __internals as sdk, Content,
+    __internals as sdk, Content, DecodeError, DecodeErrorKind,
     models::ModelMetadata,
     response::{Answer, Answers, Usage},
 };
@@ -128,17 +128,33 @@ impl<'de> Visitor<'de> for JsonVisitor {
 
 /// Every way the two codecs are allowed to disagree. Anything not listed here
 /// fails the test.
+///
+/// A disagreement where one codec refuses a document is accepted only when
+/// the refusing codec's own error names the listed cause, so that a document
+/// carrying one of these features cannot hide a refusal for another reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Divergence {
     /// A `\u` escape of half a surrogate pair: `serde_json` refuses it as a
-    /// string, the SDK's codec may not.
+    /// string, the SDK's codec may not. Accepted when `serde_json` says
+    /// `lone leading surrogate in hex escape` or `unexpected end of hex
+    /// escape`.
     LoneSurrogate,
-    /// A number whose magnitude is beyond the largest double, such as `1e400`.
+    /// A number whose magnitude is beyond the largest double, such as `1e400`:
+    /// `serde_json` refuses it, the SDK's codec may not. Accepted when
+    /// `serde_json` says `number out of range`.
     BeyondF64,
     /// An integer written without a fraction or exponent that fits neither
-    /// `u64` nor `i64`.
+    /// `u64` nor `i64`. `serde_json` reads it as a double, and refuses it only
+    /// when the double it rounds to is out of range - which, for a literal
+    /// that parses as a finite double here, happens only at the edge of the
+    /// range. Accepted when `serde_json` says `number out of range`.
     IntegerAboveU64,
-    /// A document nested deeper than the SDK parses at all.
+    /// A document nested deeper than the SDK parses at all. Accepted when the
+    /// SDK's error is [`DecodeErrorKind::TooDeep`].
+    ///
+    /// The SDK's error names only a class of failure, and a syntax error
+    /// could come from any literal, so this is the only cause accepted for a
+    /// document the SDK alone refuses.
     NestingDepth,
     /// A literal negative zero: the SDK's codec reads `-0`, `-0.0` and
     /// `-0.0e5` as positive zero.
@@ -155,23 +171,33 @@ struct Features {
 }
 
 impl Features {
-    /// The listed divergences this document can produce, in the order they
-    /// are tried.
-    fn possible(self) -> Vec<Divergence> {
-        let mut possible = Vec::new();
-        if self.depth > MAX_DEPTH {
-            possible.push(Divergence::NestingDepth);
+    /// The divergence that explains the SDK alone refusing this document: the
+    /// depth cap, when the document crosses it and the SDK says so.
+    fn explain_sdk_refusal(self, error: &DecodeError) -> Option<Divergence> {
+        (self.depth > MAX_DEPTH && error.kind() == DecodeErrorKind::TooDeep)
+            .then_some(Divergence::NestingDepth)
+    }
+
+    /// The divergence that explains `serde_json` alone refusing this document,
+    /// read from the message `serde_json` refused it with.
+    fn explain_reference_refusal(self, error: &serde_json::Error) -> Option<Divergence> {
+        let message = error.to_string();
+        let said = |prefix: &str| message.starts_with(prefix);
+        if self.lone_surrogate
+            && (said("lone leading surrogate in hex escape")
+                || said("unexpected end of hex escape"))
+        {
+            return Some(Divergence::LoneSurrogate);
         }
-        if self.lone_surrogate {
-            possible.push(Divergence::LoneSurrogate);
+        if said("number out of range") {
+            if self.beyond_f64 {
+                return Some(Divergence::BeyondF64);
+            }
+            if self.integer_above_u64 {
+                return Some(Divergence::IntegerAboveU64);
+            }
         }
-        if self.beyond_f64 {
-            possible.push(Divergence::BeyondF64);
-        }
-        if self.integer_above_u64 {
-            possible.push(Divergence::IntegerAboveU64);
-        }
-        possible
+        None
     }
 }
 
@@ -245,7 +271,7 @@ fn without_negative_zero(sdk: &Json, reference: &Json) -> Json {
 fn judge(text: &str, features: Features) -> Result<Option<Divergence>, String> {
     let sdk = sdk::decode::<Json>(text.as_bytes());
     let reference = serde_json::from_str::<Json>(text);
-    match (&sdk, &reference) {
+    let explained = match (&sdk, &reference) {
         (Ok(sdk), Ok(reference)) => {
             let Some((path, left, right)) = first_difference(sdk, reference, &mut String::new())
             else {
@@ -255,19 +281,21 @@ fn judge(text: &str, features: Features) -> Result<Option<Divergence>, String> {
             if first_difference(sdk, &normalized, &mut String::new()).is_none() {
                 return Ok(Some(Divergence::NegativeZeroSign));
             }
-            Err(format!("the codecs disagree at `{path}`: sdk {left:?}, serde_json {right:?}"))
+            return Err(format!(
+                "the codecs disagree at `{path}`: sdk {left:?}, serde_json {right:?}"
+            ));
         }
-        (Err(_), Err(_)) => Ok(None),
-        (Err(_), Ok(_)) | (Ok(_), Err(_)) => {
-            features.possible().first().copied().map(Some).ok_or_else(|| {
-                format!(
-                    "only one codec accepts the document: sdk {:?}, serde_json {:?}",
-                    sdk.as_ref().map(|_| "ok").map_err(ToString::to_string),
-                    reference.as_ref().map(|_| "ok").map_err(ToString::to_string),
-                )
-            })
-        }
-    }
+        (Err(_), Err(_)) => return Ok(None),
+        (Err(refused), Ok(_)) => features.explain_sdk_refusal(refused),
+        (Ok(_), Err(refused)) => features.explain_reference_refusal(refused),
+    };
+    explained.map(Some).ok_or_else(|| {
+        format!(
+            "only one codec accepts the document: sdk {:?}, serde_json {:?}",
+            sdk.as_ref().map(|_| "ok").map_err(ToString::to_string),
+            reference.as_ref().map(|_| "ok").map_err(ToString::to_string),
+        )
+    })
 }
 
 // ---------------------------------------------------- generated documents
@@ -643,6 +671,77 @@ fn only_negative_zero_and_nesting_depth_divergences_occur_today() {
             .to_owned()),
         "a disagreement the document's features do not explain fails the test"
     );
+}
+
+/// A one-sided refusal is accepted only for the cause the refusing codec's
+/// own error names. A document that carries a listed feature cannot excuse a
+/// refusal for another reason: before this check, the first feature the
+/// document carried was taken as the cause without looking at the error.
+#[test]
+fn a_one_sided_refusal_is_accepted_only_for_the_cause_its_error_names() {
+    let too_deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
+    let every_feature =
+        Features { lone_surrogate: true, beyond_f64: true, integer_above_u64: true, depth: 30 };
+    let refused = |features: Features| {
+        format!(
+            "only one codec accepts the document: sdk Err(\"JSON input is nested deeper than the \
+             maximum of 16\"), serde_json Ok(\"ok\") ({features:?})"
+        )
+    };
+
+    // The SDK refuses on depth; only the depth feature explains that.
+    assert_eq!(judge(&too_deep, every_feature), Ok(Some(Divergence::NestingDepth)));
+    for features in [
+        Features { lone_surrogate: true, ..Features::default() },
+        Features { beyond_f64: true, ..Features::default() },
+        Features { integer_above_u64: true, ..Features::default() },
+    ] {
+        assert_eq!(
+            judge(&too_deep, features).map_err(|reason| format!("{reason} ({features:?})")),
+            Err(refused(features)),
+        );
+    }
+
+    // What each codec's error names, taken on its own.
+    let sdk_error = |text: &str| sdk::decode::<Json>(text.as_bytes()).expect_err("the SDK refuses");
+    let reference_error =
+        |text: &str| serde_json::from_str::<Json>(text).expect_err("serde_json refuses");
+    let depth_only = Features { depth: MAX_DEPTH + 1, ..Features::default() };
+
+    assert_eq!(
+        every_feature.explain_sdk_refusal(&sdk_error(&too_deep)),
+        Some(Divergence::NestingDepth)
+    );
+    assert_eq!(Features::default().explain_sdk_refusal(&sdk_error(&too_deep)), None);
+    for syntax in ["[1e400]", "[\"\\ud800\"]", "[1,]"] {
+        let error = sdk_error(syntax);
+        assert_eq!(error.kind(), DecodeErrorKind::Syntax, "document {syntax}");
+        assert_eq!(every_feature.explain_sdk_refusal(&error), None, "document {syntax}");
+    }
+
+    let rows: [(&str, Features, Option<Divergence>); 9] = [
+        ("[\"\\ud800\"]", every_feature, Some(Divergence::LoneSurrogate)),
+        ("[\"\\udc00\"]", every_feature, Some(Divergence::LoneSurrogate)),
+        ("[\"\\ud800\\n\"]", every_feature, Some(Divergence::LoneSurrogate)),
+        ("[\"\\ud800\"]", Features { beyond_f64: true, ..depth_only }, None),
+        ("[1e400]", every_feature, Some(Divergence::BeyondF64)),
+        (
+            "[1e400]",
+            Features { integer_above_u64: true, ..Features::default() },
+            Some(Divergence::IntegerAboveU64),
+        ),
+        ("[1e400]", Features { lone_surrogate: true, ..depth_only }, None),
+        ("[1,]", every_feature, None),
+        ("[\"a\u{1}b\"]", every_feature, None),
+    ];
+    for (text, features, expected) in rows {
+        assert_eq!(
+            features.explain_reference_refusal(&reference_error(text)),
+            expected,
+            "document {text:?}, {features:?}, serde_json said {}",
+            reference_error(text)
+        );
+    }
 }
 
 // ------------------------------------------------------ encoding a state
