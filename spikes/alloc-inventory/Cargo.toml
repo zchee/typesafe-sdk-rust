@@ -1,0 +1,32 @@
+# T0.6: the itemized allocation inventory AC-P0 asks for. Each step of plan
+# section 3.3 is prototyped here and measured on its second identical call, so
+# the budgets AC-P1, AC-P2 and AC-P6 are frozen from numbers rather than from
+# an estimate. Outside the workspace, so the `[workspace]` table below stops
+# cargo's upward walk.
+[workspace]
+
+[package]
+name = "alloc-inventory"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+bytes = "1.12.1"
+dhat = "0.3.3"
+# The S6 winner is measured as the code that won, not as a re-implementation
+# of it.
+encode-buffer = { path = "../encode-buffer" }
+http = "1.5.0"
+http-body-util = "0.1.5"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+sonic-rs = "0.5.10"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"

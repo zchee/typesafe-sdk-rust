@@ -26,6 +26,7 @@ Reproduce everything from the repository root:
 cd spikes/sonic-probe     && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
 cd spikes/encode-buffer   && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
 cd spikes/transport-probe && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
+cd spikes/alloc-inventory  && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
 ```
 
 The binaries land in the shared target directory that `config.dev.toml` names; the commands below write it as
@@ -618,3 +619,151 @@ slower than the link allows - not the server's window.
 
 **Keep-alive behaviour is NOT measured here.** Whether the load balancer counts an HTTP/2 PING as activity needs an
 authenticated idle test (plan section 8 step 13), which is out of scope for this task.
+
+---
+
+## AC-P0 - itemized allocation inventory
+
+Binary: `spikes/alloc-inventory`. Every step of plan section 3.3 prototyped and measured on the **second identical
+call**, after one warm-up pass of the same shape. The body encoder is not re-implemented here: the crate path-depends
+on `spikes/encode-buffer` and measures the S6 winner itself.
+
+```sh
+cd spikes/alloc-inventory && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
+$TARGET/release/alloc-inventory steps
+$TARGET/release/alloc-inventory decode
+$TARGET/release/alloc-inventory verify
+```
+
+### Steps 1 to 5: request assembly
+
+| Step | Item | blocks | bytes |
+| --- | --- | ---: | ---: |
+| 1 | body encode, 1 KB string `state`, S6 winner (`iii-1shot`) | **1** | 1,385 |
+| 2 | retain the body for retry (`Bytes::clone`) | **1** | 24 |
+| 3 | clone the base `HeaderMap` (6 headers) | **2** | 656 |
+| 4 | build the `http::Request` from a pre-parsed `Uri` (headers moved in, not re-cloned) | **0** | 0 |
+| 4a | clone the pre-parsed `Uri` on its own, second time | 0 | 0 |
+| 4b | clone a freshly parsed `Uri`, **first** time | **0** | 0 |
+| 4c | clone that same `Uri`, second time | 0 | 0 |
+| 5 | `BodyExt::collect` + `to_bytes` on a single-frame body | **1** | 128 |
+
+The body was 1,385 bytes and the thread's retained scratch was 6,188 bytes afterwards.
+
+Three of these were open questions and are now settled. Cloning an `http::Uri` is **free even the first time** - unlike
+`Bytes`, it does not pay a shared-header allocation on first clone - so step 4 costs nothing at all once the body's
+own clone is accounted for under step 2. The `HeaderMap` clone costs **2** blocks, which is exactly what AC-P6 assumed.
+`BodyExt::collect` costs **1** block for its frame queue, which is also what AC-P6 assumed.
+
+### Steps 6 to 8: decode
+
+| Step | Representation | blocks | bytes |
+| --- | --- | ---: | ---: |
+| 6 | prototype visitor -> `Vec<(String, Answer)>`, single pass, order independent, pre-sized | **14** | 554 |
+| 7 | naive comparator: `#[serde(tag = "type")]` answers in a `HashMap<String, _>`, maps throughout | **26** | 2,672 |
+| 8 | derived typed struct (`Ticket { spam, tone, quality }`), the `#[derive(QuestionSet)]` shape | **10** | 275 |
+
+The plan's three budget questions, all on the same codec and the same fixture:
+
+| Question | Measured | Verdict |
+| --- | --- | --- |
+| is (6) <= 14 + C blocks, with C = 0 from S1(c)? | 14 <= 14 | **yes, exactly** |
+| is (6) <= 0.7 x (7)? | 14 <= 18.2 (the ratio is 0.54) | **yes** |
+| is (8) < (6)? | 10 < 14 | **yes** |
+
+The prototype's 14 blocks are the plan's own item list, one for one: 1 model `String`, 1 answers `Vec`, 3 question-name
+`String`s, 1 choice `String`, 1 choice-probabilities `Vec`, 2 option-name `String`s, 1 legend `Vec`, 3 legend
+`String`s, 1 score-probabilities `Vec`. `usage`, every `f64`, every score level and every probability key cost nothing:
+levels are parsed from the object key text straight into `u32`.
+
+**Warning for the freeze worker: (6) meets its budget with ZERO headroom.** One extra `String`, one extra `Vec`, one
+`Box` in the answer representation and AC-P2 fails. The 0.7x ratio, by contrast, has room (0.54 measured).
+
+### Correctness of the prototype visitor
+
+```sh
+$TARGET/release/alloc-inventory verify
+```
+
+Decoded twice from a document whose answers, and whose fields within every answer object, are in a different order from
+the fixture, and which carries one extra answer of the unknown type `"prediction"`:
+
+| Check | Result |
+| --- | --- |
+| wire order: sonic-rs result == serde_json result | **true** |
+| shuffled order: sonic-rs result == serde_json result | **true** |
+| shuffled order yields the same answers, compared as sets | **true** |
+| shuffled order yields the same answers, compared in order | false, by design (see below) |
+| `model` and `usage` unchanged | true |
+| answers kept from the shuffled document | `["quality", "tone", "spam"]` |
+| the unknown `"prediction"` answer was dropped | **true** |
+| answer count | 3, for 3 questions asked |
+
+The visitor is order independent in the sense that matters: `type` may arrive after the data fields, and it does in the
+shuffled document, where `probabilities` is read before the answer type is known. The score's probability keys are then
+read as names and converted to levels at dispatch. That path is exercised by the shuffled document and costs nothing in
+the measured case, where `type` comes first.
+
+**A design point the next worker has to decide:** every container keeps **wire order**, so a response whose keys arrive
+in another order produces the same pairs in another order, and two decodes compare unequal as sequences while comparing
+equal as sets. Either the SDK sorts `legend` and the score `probabilities` by level when it builds them - cheap, at
+most ten elements, and it makes equality and `Debug` output stable - or every test that compares answers has to
+normalize first. This is not covered by any current acceptance criterion.
+
+### Proposed frozen budget table
+
+Proposed only. The lead and a verifier freeze it; nothing here is adopted by this spike.
+
+Every number is from the tables above, with the plan's rule applied: tightening is free, loosening needs a ledger entry
+and the user's sign-off. Where a measurement left no headroom, the budget is set at the measurement and said to be
+tight.
+
+**AC-P1 - body encode, second identical call, variant `iii-1shot`**
+
+| Bound | Plan as written | Proposed | Measured |
+| --- | --- | --- | --- |
+| blocks, encode alone | <= 2 | **<= 1** | 1 |
+| blocks, including retaining the body for retry | <= 3 (2 + 1) | **<= 2** | 2 |
+| bytes allocated during the call | <= 1.25 x body + 64 KiB | **<= 1.05 x body + 4 KiB** | 1.00 x body |
+| retained scratch | <= 8x the decayed hint | **<= 8x the decayed hint** (unchanged) | 4.47x - 5.89x |
+
+Carve-out that has to be written into the criterion: a call on which the scratch **shrinks** allocates one extra block
+of at most the decayed hint (measured: 775,406 bytes on call 5 of the mixed sequence). AC-P1 is stated for a repeated
+identical call, where no shrink happens; the shrink is bounded by the retained-scratch rule instead. Without this
+sentence the criterion is ambiguous the first time a test mixes sizes.
+
+**AC-P2 - decode of the 3-answer fixture**
+
+| Bound | Plan as written | Proposed | Measured |
+| --- | --- | --- | --- |
+| blocks | <= 14 + C | **<= 14** (C = 0, measured in S1(c)) | 14, **tight** |
+| bytes | not specified | **<= 700** | 554 |
+| ratio to the naive comparator | <= 0.7x | **<= 0.7x** (unchanged; the ratio depends on serde's version as well as on ours) | 0.54x |
+
+**AC-P3 - derived typed decode** uses fewer blocks than AC-P2: 10 < 14, confirmed.
+
+**AC-P6 - full call through an in-memory service, second identical call, 1 KB string `state`, default retry policy
+(body retained), no per-call headers**
+
+| Item | blocks | bytes |
+| --- | ---: | ---: |
+| body encode (step 1) | 1 | 1,385 |
+| body retention for retry (step 2) | 1 | 24 |
+| `HeaderMap` clone (step 3) | 2 | 656 |
+| request assembly from the pre-parsed `Uri` (step 4) | 0 | 0 |
+| `collect` frame queue (step 5) | 1 | 128 |
+| decode (step 6) | 14 | 554 |
+| **total** | **19** | **2,747** |
+
+Proposed AC-P6 budget: **<= 19 blocks** above the floor of calling the same service directly with a pre-built request,
+for that pinned scenario. The plan's own assumptions inside AC-P6 - "`HeaderMap` clone = 2, frame queue of `collect` =
+1" - are both confirmed rather than assumed.
+
+### Open questions this inventory does not answer
+
+- The floor itself (what an in-memory service costs when called directly with a pre-built request) is not measured
+  here; AC-P6 is a difference, and the subtrahend belongs to the Phase 5 harness.
+- Every number is for a 1 KB string `state`. An object `state` adds the retained scratch of variant `iii-1shot` to the
+  picture but not to the per-call block count; a 1 MB `state` moves only the bytes, not the blocks.
+- `tracing` is off in all of these runs. A subscriber's own allocations are not part of any budget here, which matches
+  AC-P6's wording ("no `tracing` subscriber").
