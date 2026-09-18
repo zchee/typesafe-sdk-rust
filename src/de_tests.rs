@@ -700,13 +700,43 @@ fn the_answer_storage_is_sized_from_the_question_count() {
     ));
     let text = serde_json::to_vec(&body).expect("the body encodes");
 
-    for (questions, capacity) in [(20, 20), (32, 32)] {
+    // The body holds at most this many answers, so no count reserves more.
+    let most = text.len() / MIN_KEPT_ANSWER_BYTES;
+    assert_eq!(MIN_KEPT_ANSWER_BYTES, 27);
+    assert!((20..32).contains(&most), "{} bytes hold at most {most} answers", text.len());
+
+    for (questions, capacity) in [(20, 20), (most, most), (32, most)] {
         let response = decode_as::<Answers>(&text, questions).expect("the body decodes");
         assert_eq!(response.answers().len(), 20);
         assert_eq!(response.answers().capacity(), capacity, "{questions} questions asked");
     }
     let unsized_ = decode_as::<Answers>(&text, 0).expect("the body decodes");
     assert!(unsized_.answers().capacity() >= 20, "{}", unsized_.answers().capacity());
+}
+
+#[test]
+fn a_question_count_larger_than_the_body_can_answer_reserves_nothing_more() {
+    let reference = decode(RESULT);
+    let most = RESULT.len() / MIN_KEPT_ANSWER_BYTES;
+
+    for questions in [usize::MAX, RESULT.len() * 10, most + 1] {
+        let response = decode_as::<Answers>(RESULT, questions)
+            .unwrap_or_else(|error| panic!("{questions} questions asked: {error}"));
+
+        assert_eq!(response.answers(), reference.answers(), "{questions} questions asked");
+        assert_eq!(response.answers().capacity(), most, "{questions} questions asked");
+        let typed = decode_as::<Ticket>(RESULT, questions)
+            .unwrap_or_else(|error| panic!("{questions} questions asked, as a Ticket: {error}"));
+        assert_eq!(Some(&typed.answers().spam), reference.answers().noul("spam"));
+    }
+
+    // Nothing can be answered in a body shorter than one answer.
+    let failure =
+        decode_as::<Answers>(b"{}", usize::MAX).expect_err("an empty object has no model");
+    assert_eq!(
+        failure.to_string(),
+        "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at 'model'. (request_id=req-123)"
+    );
 }
 
 #[test]

@@ -1215,11 +1215,21 @@ where
     }
 }
 
+/// The fewest bytes one answer that an answer set keeps can take in a body:
+/// `"":{"type":"noul","noul":0}`, an empty name and the shortest answer of the
+/// shortest kind, without even the comma that separates it from the next.
+///
+/// A body of `n` bytes therefore holds at most `n / MIN_KEPT_ANSWER_BYTES`
+/// answers, which is what bounds the storage sized from a question count.
+const MIN_KEPT_ANSWER_BYTES: usize = r#""":{"type":"noul","noul":0}"#.len();
+
 /// Decodes the body of a successful System One response.
 ///
 /// `questions` is the number of questions the request asked, which sizes the
-/// answer storage once instead of growing it. `endpoint` names the request in
-/// the error, and is formatted only when there is one.
+/// answer storage once instead of growing it. The count is capped by how many
+/// answers the body can hold, so no count - however large - reserves storage
+/// for answers that cannot be there. `endpoint` names the request in the
+/// error, and is formatted only when there is one.
 ///
 /// # Errors
 ///
@@ -1245,9 +1255,10 @@ pub(crate) fn decode_system_one<A>(
 where
     A: AnswerSet,
 {
+    let expected = questions.min(body.len() / MIN_KEPT_ANSWER_BYTES);
     let meta = ResponseMeta::new(status, headers, body);
     let decoded = {
-        let _expected = ExpectedAnswers::enter(questions);
+        let _expected = ExpectedAnswers::enter(expected);
         codec::decode::<Envelope<A>>(meta.raw_body())
     };
     match decoded {
