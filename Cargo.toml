@@ -106,9 +106,25 @@ name = "typesafe_sdk"
 [features]
 default = ["tracing"]
 tracing = ["dep:tracing"]
+# Exposes `typesafe_sdk::__internals`, the seam the allocation tests and the
+# benchmarks measure through. It carries no semver promise and is never on by
+# default.
+internals = []
 
 [dependencies]
+bytes = { workspace = true }
+serde = { workspace = true }
+# A normal dependency rather than a dev one: the decode failure path uses it to
+# turn a position into a field path, and that path is part of the errors the
+# SDK reports at runtime.
+serde_path_to_error = { workspace = true }
+sonic-rs = { workspace = true }
+thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

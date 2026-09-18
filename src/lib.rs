@@ -21,3 +21,11 @@
 //! [Tokio]: https://docs.rs/tokio
 
 #![forbid(unsafe_code)]
+
+mod codec;
+
+#[cfg(feature = "internals")]
+#[doc(hidden)]
+pub mod __internals;
+
+pub use crate::codec::{DecodeError, DecodeErrorKind, EncodeError, RawJson};
