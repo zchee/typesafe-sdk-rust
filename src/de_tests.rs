@@ -436,19 +436,79 @@ fn members_that_belong_to_another_kind_are_ignored() {
     }
 }
 
+/// A second `type` that differs from the first is refused at `type`, however
+/// the rest of the answer reads: upstream lets the last one win, but an answer
+/// that contradicts itself is malformed. `json!` keeps one of two equal keys,
+/// so the documents are spelled out.
 #[test]
-fn an_answer_that_names_two_types_is_refused() {
-    // `json!` keeps one of two equal keys, so the documents are spelled out.
-    let texts = [
-        r#"{"model":"m","usage":{},"answers":{"x":{"type":"score","probabilities":{"0":1},"type":"choice","choice":"a","confidence":1}}}"#,
-        r#"{"model":"m","usage":{},"answers":{"x":{"type":"choice","probabilities":{"a":1},"type":"score","score":1,"confidence":1,"legend":{}}}}"#,
+fn an_answer_that_names_two_different_types_is_refused_at_its_type() {
+    let answers = [
+        // Every member of the second kind is present: this decoded as a noul.
+        r#"{"x":{"type":"choice","choice":"a","confidence":1,"type":"noul","noul":0.5}}"#,
+        r#"{"x":{"type":"score","probabilities":{"0":1},"type":"choice","choice":"a","confidence":1}}"#,
+        r#"{"x":{"type":"choice","probabilities":{"a":1},"type":"score","score":1,"confidence":1,"legend":{}}}"#,
+        // The data first, then two types.
+        r#"{"x":{"noul":0.5,"type":"noul","type":"choice"}}"#,
+        // A type this version does not know is a type all the same.
+        r#"{"x":{"type":"future","type":"noul","noul":0.5}}"#,
+        r#"{"x":{"type":"noul","noul":0.5,"type":"future"}}"#,
+        r#"{"x":{"type":"future","type":"prediction"}}"#,
     ];
 
-    for text in texts {
+    for answers in answers {
+        let text = around(answers);
         let failure = rejection::<Answers>(text.as_bytes());
-        assert_eq!(failure.field_path(), "answers.x", "body {text}");
+
         assert_eq!(failure.decode_error().kind(), crate::DecodeErrorKind::Data, "body {text}");
+        assert_eq!(failure.field_path(), "answers.x.type", "body {text}");
+        assert_eq!(
+            failure.to_string(),
+            "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at \
+             'answers.x.type'. (request_id=req-123)",
+            "body {text}"
+        );
     }
+}
+
+#[test]
+fn an_answer_that_names_the_same_type_twice_is_read_as_that_type() {
+    let text = around(
+        r#"{"n":{"type":"noul","noul":0.5,"type":"noul"},"f":{"type":"future","type":"future"},"c":{"type":"choice","type":"choice","choice":"a","confidence":1,"probabilities":{"a":1}}}"#,
+    );
+
+    let response = decode(text.as_bytes());
+
+    assert_eq!(response.answers().names().collect::<Vec<_>>(), ["n", "c"]);
+    assert_eq!(response.answers().noul("n"), Some(&NoulAnswer::new(0.5)));
+    assert_eq!(response.answers().choice("c"), Some(&ChoiceAnswer::new("a", 1.0, [("a", 1.0)])));
+}
+
+/// The same rule for a typed field: the first `type` has to be the field's
+/// kind, so a second one that differs is a wrong kind at `type`.
+#[test]
+fn a_typed_answer_that_names_two_types_is_refused_and_one_named_twice_is_not() {
+    let open = result_answers().strip_suffix('}').expect("the answers object closes");
+    let (_, rest) = open.split_once(r#""tone":"#).expect("the fixture has a tone answer");
+    let with_spam = |spam: &str| around(&format!(r#"{{"spam":{spam},"tone":{rest}}}"#));
+
+    for spam in [
+        r#"{"type":"noul","noul":0.5,"type":"choice"}"#,
+        r#"{"noul":0.5,"type":"noul","type":"future"}"#,
+    ] {
+        let text = with_spam(spam);
+        let failure = rejection::<Ticket>(text.as_bytes());
+        assert_eq!(failure.field_path(), "answers.spam.type", "body {text}");
+        assert_eq!(failure.message(), "Invalid response data at 'answers.spam.type'.");
+    }
+
+    let text = with_spam(r#"{"type":"noul","type":"noul","noul":0.5}"#);
+    let typed = decode_as::<Ticket>(text.as_bytes(), 3).expect("one kind named twice decodes");
+    assert_eq!(typed.answers().spam, NoulAnswer::new(0.5));
+
+    let standalone =
+        serde_json::from_str::<NoulAnswer>(r#"{"type":"noul","noul":1,"type":"score"}"#)
+            .map_err(|error| error.to_string());
+    assert_eq!(standalone, Err("expected an answer of type `noul` at line 1 column 38".to_owned()));
 }
 
 #[test]
@@ -1029,7 +1089,10 @@ fn the_expectations_name_what_was_wanted() {
             "an answer object",
         ),
         (&|f| Visitor::expecting(&KeyIn(&[]), f), "an object key"),
-        (&|f| Visitor::expecting(&KindSeed { expected: None }, f), "an answer type name"),
+        (
+            &|f| Visitor::expecting(&KindSeed { expected: None, previous: None }, f),
+            "an answer type name",
+        ),
         (&|f| Visitor::expecting(&TextSeed, f), "a string"),
         (&|f| Visitor::expecting(&LevelSeed, f), "a score level"),
         (&|f| Visitor::expecting(&NamedSeed, f), "an object of option name to probability"),

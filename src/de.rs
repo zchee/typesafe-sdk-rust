@@ -90,6 +90,10 @@ impl AnswerContext {
 ///   including an answer that is not an object at all, or has no `type` - is
 ///   an error at `answers.<field>.type`. A member of the right kind with the
 ///   wrong shape is an error at `answers.<field>.<member>`.
+/// * **Two types.** An answer that names `type` twice with two different
+///   values is an error at `answers.<field>.type`, whichever members it
+///   carries; naming the same type twice is accepted. (Upstream lets the last
+///   `type` win; an answer that contradicts itself is refused here instead.)
 /// * **Missing answer.** A field with no answer is an error at
 ///   `answers.<field>`. The one exception is a response with no `answers`
 ///   member at all: the method is then called with an empty object from
@@ -486,7 +490,8 @@ where
         while let Some(index) = map.next_key_seed(Member::NAMES)? {
             let member = match index {
                 Some(0) => {
-                    seen = Some(map.next_value_seed(KindSeed { expected: T::EXPECTED })?);
+                    let seed = KindSeed { expected: T::EXPECTED, previous: seen.as_ref() };
+                    seen = Some(map.next_value_seed(seed)?);
                     continue;
                 }
                 Some(at) => Member::DATA.get(at - 1).copied(),
@@ -584,12 +589,15 @@ impl Member {
     }
 }
 
-/// Reads an answer's `type`, refusing any other kind when one is expected.
-struct KindSeed {
+/// Reads an answer's `type`, refusing any other kind when one is expected, and
+/// any other type than the one the answer already named.
+struct KindSeed<'s, 'de> {
     expected: Option<Kind>,
+    /// What an earlier `type` member of the same answer said, if one did.
+    previous: Option<&'s Seen<'de>>,
 }
 
-impl<'de> DeserializeSeed<'de> for KindSeed {
+impl<'de> DeserializeSeed<'de> for KindSeed<'_, 'de> {
     type Value = Seen<'de>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Seen<'de>, D::Error>
@@ -600,14 +608,15 @@ impl<'de> DeserializeSeed<'de> for KindSeed {
     }
 }
 
-impl KindSeed {
+impl<'de> KindSeed<'_, 'de> {
     /// Classifies `text`, copying it only for a type this version does not
     /// know, where it is kept to be named in a warning.
-    fn classify<'de, E>(
-        self,
-        text: &str,
-        keep: impl FnOnce() -> Cow<'de, str>,
-    ) -> Result<Seen<'de>, E>
+    ///
+    /// A second `type` that says something else is refused here, while the
+    /// walk is on the member, so the error names `type`. Without this the last
+    /// one would win, as it does upstream, and an answer that contradicts
+    /// itself would be read as whichever kind it named last.
+    fn classify<E>(self, text: &str, keep: impl FnOnce() -> Cow<'de, str>) -> Result<Seen<'de>, E>
     where
         E: de::Error,
     {
@@ -618,16 +627,36 @@ impl KindSeed {
             _ => Seen::Unknown(keep()),
         };
         match (self.expected, &seen) {
-            (Some(expected), Seen::Known(kind)) if *kind == expected => Ok(seen),
-            (Some(expected), _) => {
-                Err(E::custom(format_args!("expected an answer of type `{}`", expected.name())))
+            (Some(expected), Seen::Known(kind)) if *kind != expected => {
+                return Err(wrong_kind(expected));
             }
-            (None, _) => Ok(seen),
+            (Some(expected), Seen::Unknown(_)) => return Err(wrong_kind(expected)),
+            _ => {}
+        }
+        match self.previous {
+            Some(previous) if !previous.is_same(&seen) => Err(mixed_types()),
+            _ => Ok(seen),
         }
     }
 }
 
-impl<'de> Visitor<'de> for KindSeed {
+/// The error for an answer of another kind than the one a field holds.
+fn wrong_kind<E: de::Error>(expected: Kind) -> E {
+    E::custom(format_args!("expected an answer of type `{}`", expected.name()))
+}
+
+impl Seen<'_> {
+    /// Whether two `type` members name the same type.
+    fn is_same(&self, other: &Seen<'_>) -> bool {
+        match (self, other) {
+            (Seen::Known(left), Seen::Known(right)) => left == right,
+            (Seen::Unknown(left), Seen::Unknown(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl<'de> Visitor<'de> for KindSeed<'_, 'de> {
     type Value = Seen<'de>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -758,8 +787,12 @@ impl<'de> Members<'de> {
     }
 }
 
-/// The error for an answer whose `type` changed after its probabilities were
-/// read under the first one, which only a document naming `type` twice does.
+/// The error for an answer that names two different types.
+///
+/// [`KindSeed`] raises it at the second `type`. The two arms of the builders
+/// above that raise it too - probabilities read under one kind and built as
+/// another - cannot be reached past that check; they are there because the
+/// match over what was collected has to cover every state.
 fn mixed_types<E: de::Error>() -> E {
     E::custom("the answer names two different types")
 }
