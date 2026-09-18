@@ -470,6 +470,95 @@ fn a_repeated_question_name_keeps_both_answers_and_finds_the_first() {
     assert_eq!(response.answers().noul("n").map(NoulAnswer::noul), Some(0.1));
 }
 
+// ------------------------------------------------ keys the server chose
+
+/// A response body around `answers`, with each server-chosen key written as a
+/// JSON string by `serde_json`, so that control characters in it arrive as
+/// JSON escapes rather than as raw bytes in this file.
+fn around_keys(answers: &str, keys: &[&str]) -> String {
+    let mut text = answers.to_owned();
+    for (index, key) in keys.iter().enumerate() {
+        let encoded = serde_json::to_string(key).expect("a string encodes");
+        text = text.replace(&format!("@{index}"), &encoded);
+    }
+    around(&text)
+}
+
+/// Asserts the whole rendering of a response-validation failure at `path`.
+fn assert_rendered(failure: &ResponseValidationError, path: &str) {
+    assert_eq!(failure.field_path(), path);
+    assert_eq!(failure.message(), format!("Invalid response data at '{path}'."));
+    assert_eq!(
+        failure.to_string(),
+        format!(
+            "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at '{path}'. \
+             (request_id=req-123)"
+        )
+    );
+    for rendered in [failure.to_string(), format!("{failure:?}")] {
+        assert!(
+            !rendered.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
+            "a control byte reached the text: {rendered:?}"
+        );
+        assert!(!rendered.contains('\u{202e}'), "a bidi override reached the text: {rendered:?}");
+    }
+}
+
+#[test]
+fn a_question_name_the_server_chose_is_echoed_but_made_safe_to_print() {
+    // A plain name is echoed: which question failed is what the path is for.
+    let plain =
+        rejection::<Answers>(br#"{"model":"m","usage":{},"answers":{"SECRETH":{"type":"noul"}}}"#);
+    assert_rendered(&plain, "answers.SECRETH.noul");
+
+    // A name carrying a line break and a terminal colour sequence cannot
+    // break the log line or recolour the terminal it is printed to.
+    let text = around_keys(r#"{@0:{"type":"noul"}}"#, &["x\ny\u{1b}[31mz"]);
+    let injected = rejection::<Answers>(text.as_bytes());
+    assert_rendered(&injected, r"answers.x\ny\u{1b}[31mz.noul");
+
+    // A bidi override is escaped; a printable non-ASCII name is not.
+    let text = around_keys(r#"{@0:{"type":"noul"}}"#, &["ok\u{202e}gnp.exe"]);
+    assert_rendered(&rejection::<Answers>(text.as_bytes()), r"answers.ok\u{202e}gnp.exe.noul");
+    let text = around_keys(r#"{@0:{"type":"noul"}}"#, &["\u{54c1}\u{8cea}"]);
+    assert_rendered(&rejection::<Answers>(text.as_bytes()), "answers.\u{54c1}\u{8cea}.noul");
+
+    // 100 KB of name gives a message of bounded size.
+    let huge = "n".repeat(100_000);
+    let text = around_keys(r#"{@0:{"type":"noul"}}"#, &[&huge]);
+    let failure = rejection::<Answers>(text.as_bytes());
+    assert_rendered(&failure, &format!("answers.{}\u{2026}.noul", "n".repeat(128)));
+    assert!(failure.to_string().len() < 300, "{} bytes", failure.to_string().len());
+}
+
+#[test]
+fn legend_levels_and_choice_options_go_through_the_same_rendering() {
+    let text = around_keys(
+        r#"{"q":{"type":"score","score":1,"confidence":1,"legend":{@0:"x"},"probabilities":{}}}"#,
+        &["\u{1b}[2J7"],
+    );
+    assert_rendered(&rejection::<Answers>(text.as_bytes()), r"answers.q.legend.\u{1b}[2J7");
+
+    let text = around_keys(
+        r#"{"c":{"type":"choice","choice":"a","confidence":1,"probabilities":{@0:"high"}}}"#,
+        &["opt\r\nion\u{2066}"],
+    );
+    assert_rendered(
+        &rejection::<Answers>(text.as_bytes()),
+        r"answers.c.probabilities.opt\r\nion\u{2066}",
+    );
+
+    let long_level = "9".repeat(300);
+    let text = around_keys(
+        r#"{"q":{"type":"score","score":1,"confidence":1,"legend":{@0:"x"},"probabilities":{}}}"#,
+        &[&long_level],
+    );
+    assert_rendered(
+        &rejection::<Answers>(text.as_bytes()),
+        &format!("answers.q.legend.{}\u{2026}", "9".repeat(128)),
+    );
+}
+
 // ------------------------------------------------------------ score levels
 
 #[test]

@@ -5,6 +5,7 @@
 )]
 
 use std::{
+    collections::BTreeMap,
     panic::{self, AssertUnwindSafe},
     thread,
 };
@@ -215,6 +216,191 @@ fn a_decode_error_never_carries_the_input() {
 
         assert!(!rendered.contains(SECRET), "Display leaked the input: {rendered}");
         assert!(!debugged.contains(SECRET), "Debug leaked the input: {debugged}");
+    }
+}
+
+// ------------------------------------------------- keys the input chose
+
+/// Answers keyed by a name the document chose, as a response carries them.
+#[derive(Debug, Deserialize)]
+struct Keyed {
+    answers: BTreeMap<String, Noul>,
+}
+
+/// Three levels of names the document chose.
+#[derive(Debug, Deserialize)]
+struct DeeplyKeyed {
+    answers: BTreeMap<String, BTreeMap<String, BTreeMap<String, Noul>>>,
+}
+
+/// `{"answers":{<key>:{}}}` with `key` written as a JSON string, escapes and
+/// all, so that no raw control character has to appear in this file.
+fn keyed_document(key: &str) -> String {
+    let key = serde_json::to_string(key).expect("a string encodes");
+    format!(r#"{{"answers":{{{key}:{{}}}}}}"#)
+}
+
+/// The path `decode` reports for a document keyed by `key`.
+fn keyed_path(key: &str) -> String {
+    let document = keyed_document(key);
+    let error = decode::<Keyed>(document.as_bytes()).expect_err("the answer has no `noul`");
+    assert_eq!(error.kind(), DecodeErrorKind::Data, "kind of {error}");
+    error.path().to_owned()
+}
+
+/// Asserts that `rendered` holds no byte a terminal or a log reader would act
+/// on: nothing below 0x20, no DEL, and no ESC in particular.
+fn assert_printable(rendered: &str) {
+    assert!(
+        !rendered.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
+        "a control byte reached the text: {rendered:?}"
+    );
+    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}'] {
+        assert!(!rendered.contains(hidden), "{hidden:?} reached the text: {rendered:?}");
+    }
+}
+
+#[test]
+fn a_key_the_document_chose_is_kept_in_the_path() {
+    // Which answer failed is what a caller needs from the path, so a plain
+    // key is echoed exactly as the Python SDK echoes it.
+    assert_eq!(keyed_path("SECRETH"), "answers.SECRETH.noul");
+    // A printable non-ASCII name is kept as it is: "quality" in Japanese.
+    assert_eq!(keyed_path("\u{54c1}\u{8cea}"), "answers.\u{54c1}\u{8cea}.noul");
+    assert_eq!(keyed_path("caf\u{e9} \u{20bb7}"), "answers.caf\u{e9} \u{20bb7}.noul");
+    // A name of 100 characters is below the cap and survives intact.
+    let long_name = "q".repeat(100);
+    assert_eq!(keyed_path(&long_name), format!("answers.{long_name}.noul"));
+    // An empty key still gets its dot, as `serde_path_to_error` prints it.
+    assert_eq!(keyed_path(""), "answers..noul");
+}
+
+#[test]
+fn control_and_format_characters_in_a_key_are_escaped() {
+    let rows = [
+        ("a\nb\u{1b}[31mc", r"answers.a\nb\u{1b}[31mc.noul"),
+        ("tab\there\rcr", r"answers.tab\there\rcr.noul"),
+        ("nul\u{0}del\u{7f}nel\u{85}", r"answers.nul\u{0}del\u{7f}nel\u{85}.noul"),
+        ("safe\u{202e}lmth.exe", r"answers.safe\u{202e}lmth.exe.noul"),
+        ("\u{2066}iso\u{2069}", r"answers.\u{2066}iso\u{2069}.noul"),
+        ("zero\u{200b}width\u{200f}", r"answers.zero\u{200b}width\u{200f}.noul"),
+        ("\u{feff}bom", r"answers.\u{feff}bom.noul"),
+        ("line\u{2028}para\u{2029}", r"answers.line\u{2028}para\u{2029}.noul"),
+        ("tag\u{e0041}", r"answers.tag\u{e0041}.noul"),
+    ];
+
+    for (key, expected) in rows {
+        let document = keyed_document(key);
+        let error = decode::<Keyed>(document.as_bytes()).expect_err("the answer has no `noul`");
+
+        assert_eq!(error.path(), expected, "key {key:?}");
+        assert_eq!(
+            error.to_string(),
+            format!("unexpected JSON value at `{expected}`, line 1 column {}", error.column()),
+            "key {key:?}"
+        );
+        assert_printable(&error.to_string());
+        assert_printable(&format!("{error:?}"));
+    }
+}
+
+#[test]
+fn a_long_key_is_cut_at_the_segment_cap_without_splitting_a_character() {
+    let cut = |kept: &str| format!("answers.{kept}\u{2026}.noul");
+
+    // 100 KB of key gives a path of 142 characters.
+    let huge = "k".repeat(100_000);
+    let path = keyed_path(&huge);
+    assert_eq!(path, cut(&"k".repeat(MAX_PATH_SEGMENT_CHARS)));
+    assert_eq!(path.chars().count(), "answers.".len() + MAX_PATH_SEGMENT_CHARS + 1 + ".noul".len());
+    let error = decode::<Keyed>(keyed_document(&huge).as_bytes()).expect_err("no `noul`");
+    assert!(error.to_string().len() < 200, "{} bytes: {error}", error.to_string().len());
+
+    // Exactly at the cap is not cut; one more character is.
+    let at_cap = "k".repeat(MAX_PATH_SEGMENT_CHARS);
+    assert_eq!(keyed_path(&at_cap), format!("answers.{at_cap}.noul"));
+    assert_eq!(keyed_path(&format!("{at_cap}k")), cut(&at_cap));
+
+    // The cap counts characters, not bytes: three bytes each here.
+    let wide = "\u{65e5}".repeat(MAX_PATH_SEGMENT_CHARS + 50);
+    assert_eq!(keyed_path(&wide), cut(&"\u{65e5}".repeat(MAX_PATH_SEGMENT_CHARS)));
+
+    // It counts the escaped text, and an escape that would cross it is left
+    // out whole rather than cut in half.
+    let before = "k".repeat(MAX_PATH_SEGMENT_CHARS - 3);
+    assert_eq!(keyed_path(&format!("{before}\u{1b}tail")), cut(&before));
+    let room = "k".repeat(MAX_PATH_SEGMENT_CHARS - 6);
+    assert_eq!(keyed_path(&format!("{room}\u{1b}")), format!(r"answers.{room}\u{{1b}}.noul"));
+}
+
+#[test]
+fn a_path_of_many_long_keys_is_cut_at_the_path_cap() {
+    let key = |letter: &str| letter.repeat(200);
+    let document =
+        format!(r#"{{"answers":{{"{}":{{"{}":{{"{}":{{}}}}}}}}}}"#, key("a"), key("b"), key("c"));
+
+    let error = decode::<DeeplyKeyed>(document.as_bytes()).expect_err("no `noul`");
+
+    // 8 + 129 + 1 + 129 + 1 characters come before the third key, which
+    // leaves it 52 of the 320 before the path is cut.
+    let expected = format!(
+        "answers.{}\u{2026}.{}\u{2026}.{}\u{2026}",
+        "a".repeat(MAX_PATH_SEGMENT_CHARS),
+        "b".repeat(MAX_PATH_SEGMENT_CHARS),
+        "c".repeat(52)
+    );
+    assert_eq!(error.path(), expected);
+    assert_eq!(error.path().chars().count(), MAX_PATH_CHARS + 1);
+}
+
+#[test]
+fn an_ordinary_path_renders_exactly_as_serde_path_to_error_prints_it() {
+    let rows: [(&[u8], &str); 4] = [
+        (br#"{"answers":{"spam":{},"tone":{"confidence":0.9}}}"#, "answers.spam.noul"),
+        (
+            br#"{"answers":{"spam":{"noul":0.98},"tone":{"confidence":"high"}}}"#,
+            "answers.tone.confidence",
+        ),
+        (br#"[]"#, "."),
+        (br#"{"answers":[]}"#, "answers"),
+    ];
+    for (document, expected) in rows {
+        let error = decode::<Envelope>(document).expect_err("the document does not fit");
+        assert_eq!(error.path(), expected, "{}", String::from_utf8_lossy(document));
+    }
+
+    let models = decode::<ModelList>(br#"{"models":[{"name":"jev-latest"},{"name":123}]}"#)
+        .expect_err("the second name is a number");
+    assert_eq!(models.path(), "models[1].name");
+    let top_level = decode::<Vec<Model>>(br#"[{"name":"a"},{}]"#).expect_err("no name");
+    assert_eq!(top_level.path(), "[1].name");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// For any printable key, the rendering is byte for byte the text
+    /// `serde_path_to_error` itself prints for the same failure.
+    #[test]
+    fn a_printable_path_is_unchanged_by_the_rendering(
+        outer in r"[\p{L}\p{N}\p{P}\p{S} ]{0,40}",
+        inner in r"[\p{L}\p{N}\p{P}\p{S} ]{0,40}",
+        index in 0_usize..3,
+    ) {
+        let elements = std::iter::repeat_n("{}".to_owned(), index)
+            .chain([format!(r#"{{{}:{{}}}}"#, serde_json::to_string(&inner).expect("encodes"))])
+            .collect::<Vec<_>>()
+            .join(",");
+        let document =
+            format!(r#"{{{}:[{elements}]}}"#, serde_json::to_string(&outer).expect("encodes"));
+        type Target = BTreeMap<String, Vec<BTreeMap<String, Noul>>>;
+
+        let error = decode::<Target>(document.as_bytes()).expect_err("no `noul`");
+        let mut deserializer = sonic_rs::Deserializer::from_slice(document.as_bytes());
+        let tracked = serde_path_to_error::deserialize::<_, Target>(&mut deserializer)
+            .expect_err("no `noul`");
+
+        prop_assert_eq!(error.path(), format!("{}.noul", tracked.path()), "document {}", document);
     }
 }
 

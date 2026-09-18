@@ -893,8 +893,9 @@ impl Visitor<'_> for LevelSeed {
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<u32, E> {
-        // The message does not quote the key: an error's text is kept out of
-        // reach of the body it came from.
+        // The message does not quote the key. The key still reaches the error
+        // as the last name of its field path, which the codec renders with
+        // control and format characters escaped and its length capped.
         value.parse().map_err(|_| E::custom("a score level is a non-negative integer"))
     }
 

@@ -32,7 +32,7 @@
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    fmt,
+    fmt::{self, Write as _},
 };
 
 use bytes::Bytes;
@@ -134,6 +134,13 @@ impl DecodeError {
     ///
     /// The path of the document root is `.`, and it is empty when the failure
     /// carries no path at all.
+    ///
+    /// A name in the path may be an object key the input chose, so it is
+    /// rendered safe to print: a control character or a format character that
+    /// reorders or hides text is written as a Rust escape (`\n`, `\u{1b}`,
+    /// `\u{202e}`), and printable text, non-ASCII included, is kept as it is.
+    /// Each name is cut at 128 characters and the whole path at 320, counted
+    /// after escaping, and a cut is marked with U+2026.
     #[must_use]
     pub fn path(&self) -> &str {
         match &self.detail {
@@ -397,17 +404,152 @@ where
     // type-mismatch message quotes the offending value - but the field name in
     // it comes from the target type, so appending it is safe and gives a
     // missing and a wrongly typed field the same shape of path.
-    let mut path = tracked.path().to_string();
-    if let Some(field) = missing_field_name(&inner.to_string()) {
-        if path == "." {
-            path = field.to_owned();
-        } else {
-            path.push('.');
-            path.push_str(field);
+    let message = inner.to_string();
+    let path = render_path(tracked.path(), missing_field_name(&message));
+
+    DecodeError { detail: Detail::Data { path: path.into_boxed_str(), line, column } }
+}
+
+/// The most characters one name in a field path is rendered with before it is
+/// cut and marked with an ellipsis.
+///
+/// A name in a path can be a key the server chose - a question name, a legend
+/// level, a choice option - so it is bounded like any other server text in an
+/// error. The bound is well above any name a caller would give a question.
+const MAX_PATH_SEGMENT_CHARS: usize = 128;
+
+/// The most characters a whole field path is rendered with before it is cut
+/// and marked with an ellipsis.
+///
+/// It holds the deepest path the response schema has,
+/// `answers.<name>.probabilities.<option>`, with both names at their own cap.
+const MAX_PATH_CHARS: usize = 320;
+
+/// Renders a field path the way `serde_path_to_error` does - dotted names,
+/// bracketed indices, `.` for the root - with every name made safe to print.
+///
+/// A name keeps its printable text, non-ASCII included. A control character,
+/// or a format character that reorders or hides the text around it, is
+/// written as a Rust escape (`\n`, `\r`, `\t`, or `\u{1b}` for the others), so
+/// that a key cannot break a log line, recolour a terminal or disguise itself.
+/// Each name is capped at [`MAX_PATH_SEGMENT_CHARS`] characters and the whole
+/// path at [`MAX_PATH_CHARS`], counted after escaping; a cut never splits a
+/// character or an escape, and is marked with U+2026.
+fn render_path(path: &serde_path_to_error::Path, missing: Option<&str>) -> String {
+    use serde_path_to_error::Segment;
+
+    let mut out = PathText::default();
+    // A name is preceded by a dot unless it starts the path; an index never
+    // is. Whether it starts the path cannot be read off the text, because a
+    // key may be the empty string.
+    let mut first = true;
+    for segment in path {
+        match segment {
+            Segment::Seq { index } => out.fixed(&format!("[{index}]")),
+            Segment::Map { key } | Segment::Enum { variant: key } => {
+                if !first {
+                    out.fixed(".");
+                }
+                out.name(key);
+            }
+            Segment::Unknown => out.fixed(if first { "?" } else { ".?" }),
+        }
+        first = false;
+    }
+    match missing {
+        Some(field) => {
+            if !first {
+                out.fixed(".");
+            }
+            out.name(field);
+        }
+        None if first => out.fixed("."),
+        None => {}
+    }
+    out.text
+}
+
+/// A field path being rendered, with the count of characters written so far.
+#[derive(Default)]
+struct PathText {
+    text: String,
+    chars: usize,
+    /// Set once the whole-path cap is reached; nothing is written after it.
+    full: bool,
+}
+
+impl PathText {
+    /// Text that comes from the path's structure rather than from a name.
+    fn fixed(&mut self, text: &str) {
+        self.put(&text, text.chars().count());
+    }
+
+    /// One name, escaped and capped.
+    fn name(&mut self, name: &str) {
+        let mut written = 0;
+        for character in name.chars() {
+            // Rust lets a binding be declared here and assigned in only one
+            // arm, so each escape lives long enough to be borrowed below.
+            let short;
+            let code;
+            let (shown, len): (&dyn fmt::Display, usize) = match character {
+                '\n' | '\r' | '\t' => {
+                    short = character.escape_default();
+                    (&short, short.len())
+                }
+                _ if character.is_control() || hides_text(character) => {
+                    code = character.escape_unicode();
+                    (&code, code.len())
+                }
+                _ => (&character, 1),
+            };
+            if written + len > MAX_PATH_SEGMENT_CHARS {
+                self.put(&'\u{2026}', 1);
+                return;
+            }
+            if !self.put(shown, len) {
+                return;
+            }
+            written += len;
         }
     }
 
-    DecodeError { detail: Detail::Data { path: path.into_boxed_str(), line, column } }
+    /// Appends `piece`, which renders as `len` characters, whole - or, when
+    /// it would cross the whole-path cap, the ellipsis instead, after which
+    /// nothing more is written. Returns whether `piece` was written.
+    fn put(&mut self, piece: &dyn fmt::Display, len: usize) -> bool {
+        if self.full {
+            return false;
+        }
+        if self.chars + len > MAX_PATH_CHARS {
+            self.text.push('\u{2026}');
+            self.full = true;
+            return false;
+        }
+        write!(self.text, "{piece}").expect("invariant: writing to a String cannot fail");
+        self.chars += len;
+        true
+    }
+}
+
+/// Whether `character` is a Unicode format character that reorders, joins or
+/// hides the text around it: the bidirectional embeddings, overrides and
+/// isolates, the zero-width characters, the byte-order mark, the line and
+/// paragraph separators, the interlinear annotation marks and the invisible
+/// tag characters. `char::is_control` covers none of them.
+fn hides_text(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{061c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0000}'..='\u{e007f}'
+    )
 }
 
 /// Extracts `noul` from ``missing field `noul` at line 1 column 101``.
