@@ -91,6 +91,11 @@ enum Detail {
     Syntax { line: usize, column: usize },
     #[error("unexpected JSON value at `{path}`, line {line} column {column}")]
     Data { path: Box<str>, line: usize, column: usize },
+    /// The document does not have the shape the type expects, and the codec
+    /// could say neither where nor why. Rendering an empty path as ``at ` ` ``
+    /// would say less than saying nothing.
+    #[error("the JSON document does not have the expected shape")]
+    Opaque,
 }
 
 impl DecodeError {
@@ -100,7 +105,7 @@ impl DecodeError {
         match self.detail {
             Detail::TooDeep => DecodeErrorKind::TooDeep,
             Detail::Syntax { .. } => DecodeErrorKind::Syntax,
-            Detail::Data { .. } => DecodeErrorKind::Data,
+            Detail::Data { .. } | Detail::Opaque => DecodeErrorKind::Data,
         }
     }
 
@@ -109,7 +114,7 @@ impl DecodeError {
     #[must_use]
     pub fn line(&self) -> usize {
         match self.detail {
-            Detail::TooDeep => 0,
+            Detail::TooDeep | Detail::Opaque => 0,
             Detail::Syntax { line, .. } | Detail::Data { line, .. } => line,
         }
     }
@@ -119,7 +124,7 @@ impl DecodeError {
     #[must_use]
     pub fn column(&self) -> usize {
         match self.detail {
-            Detail::TooDeep => 0,
+            Detail::TooDeep | Detail::Opaque => 0,
             Detail::Syntax { column, .. } | Detail::Data { column, .. } => column,
         }
     }
@@ -132,7 +137,7 @@ impl DecodeError {
     #[must_use]
     pub fn path(&self) -> &str {
         match &self.detail {
-            Detail::TooDeep | Detail::Syntax { .. } => "",
+            Detail::TooDeep | Detail::Syntax { .. } | Detail::Opaque => "",
             Detail::Data { path, .. } => path,
         }
     }
@@ -353,11 +358,24 @@ where
     T: Deserialize<'de>,
 {
     let mut deserializer = sonic_rs::Deserializer::from_slice(bytes);
-    let Err(tracked) = serde_path_to_error::deserialize::<_, T>(&mut deserializer) else {
-        // Both passes read the same bytes with the same type, so this is
-        // unreachable in practice; reporting a shapeless data error is still
-        // better than claiming success the caller cannot use.
-        return DecodeError { detail: Detail::Data { path: Box::from(""), line: 0, column: 0 } };
+    let tracked = match serde_path_to_error::deserialize::<_, T>(&mut deserializer) {
+        Err(tracked) => tracked,
+        // The tracked pass reads one value and stops there; unlike the first
+        // pass it never looks at what follows it. So a document with anything
+        // but whitespace after its value parses here and failed there, and
+        // asking the deserializer to finish is the only way to get the
+        // position of the byte the first pass tripped on.
+        Ok(_) => {
+            return match deserializer.end() {
+                Err(trailing) => DecodeError {
+                    detail: Detail::Syntax { line: trailing.line(), column: trailing.column() },
+                },
+                // Both passes read the same bytes with the same type and
+                // disagreed on whether they parse at all. Nothing about the
+                // input can be reported beyond that disagreement.
+                Ok(()) => DecodeError { detail: Detail::Opaque },
+            };
+        }
     };
 
     let inner = tracked.inner();

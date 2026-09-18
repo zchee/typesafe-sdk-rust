@@ -268,12 +268,18 @@ fn text_that_is_not_one_json_value_never_becomes_content() {
     // A deserializer that answers the raw-text request with a string of the
     // caller's own: spliced into a request body, the first of these would put
     // a key of their choosing next to the field that holds it.
-    for text in [r#"{"a":1}, "model": "evil""#, "{not json", "hello", ""] {
+    for (text, expected) in [
+        (r#"{"a":1}, "model": "evil""#, "invalid JSON syntax at line 1 column 8"),
+        ("{not json", "invalid JSON syntax at line 1 column 2"),
+        ("hello", "invalid JSON syntax at line 1 column 1"),
+        ("", "invalid JSON syntax at line 1 column 1"),
+    ] {
         let refused = <Content<'_> as Deserialize>::deserialize(BorrowedStrDeserializer::<
             ValueError,
         >::new(text));
 
         let error = refused.expect_err(text).to_string();
+        assert!(error.contains(expected), "{text:?} was refused as {error}");
         assert!(!error.contains("evil"), "the refusal quoted the input: {error}");
         assert!(!error.contains("not json"), "the refusal quoted the input: {error}");
     }

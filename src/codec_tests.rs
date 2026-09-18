@@ -714,14 +714,26 @@ fn text_that_is_not_one_json_value_never_becomes_raw_json() {
 
     // The first of these is the dangerous one: spliced into a request body it
     // would add a key of the caller's choosing to the enclosing object. The
-    // other two would make the body unparseable.
-    for text in [r#"{"a":1}, "model": "evil""#, "{not json", "hello", "", "  "] {
+    // others would make the body unparseable. The refusal that reaches the
+    // caller is a `serde` error carrying the rendered `DecodeError`, so the
+    // kind is asserted through what it renders as.
+    for (text, expected) in [
+        (r#"{"a":1}, "model": "evil""#, "invalid JSON syntax at line 1 column 8"),
+        ("{not json", "invalid JSON syntax at line 1 column 2"),
+        ("hello", "invalid JSON syntax at line 1 column 1"),
+        ("", "invalid JSON syntax at line 1 column 1"),
+        ("  ", "invalid JSON syntax at line 1 column 2"),
+    ] {
         let borrowed =
             <RawJson as Deserialize>::deserialize(BorrowedStrDeserializer::<ValueError>::new(text));
         let owned = <RawJson as Deserialize>::deserialize(StrDeserializer::<ValueError>::new(text));
 
         let error = borrowed.expect_err(text).to_string();
-        assert!(owned.is_err(), "the owned route accepted {text:?}");
+        assert!(error.contains(expected), "{text:?} was refused as {error}");
+        assert!(
+            owned.expect_err(text).to_string().contains(expected),
+            "the owned route refused {text:?} differently"
+        );
         assert!(!error.contains("evil"), "the refusal quoted the input: {error}");
         assert!(!error.contains("not json"), "the refusal quoted the input: {error}");
     }
@@ -836,4 +848,47 @@ fn an_encode_error_is_a_key_the_writer_cannot_spell_or_a_value_that_refuses() {
     }
     let error = RawJson::from_value(&Refuses).expect_err("the value refuses");
     assert_eq!(error.message(), "this value declines to be encoded");
+}
+
+#[test]
+fn bytes_after_the_value_are_a_syntax_error_at_the_byte_that_follows_it() {
+    // The failure path deserializes a second time to build the field path, and
+    // that pass stops at the end of the value rather than at the end of the
+    // input. A document with anything behind its value parses on that pass and
+    // failed on the first, so the position has to come from finishing the
+    // deserializer, not from the pass itself.
+    let trailing_number = decode::<u64>(b"1 2").expect_err("a second value is not one value");
+    assert_eq!(trailing_number.kind(), DecodeErrorKind::Syntax, "{trailing_number}");
+    assert_eq!(trailing_number.line(), 1);
+    assert_eq!(trailing_number.column(), 3, "the column points at the second value");
+    assert_eq!(trailing_number.path(), "");
+
+    let injected = decode::<IgnoredAny>(br#"{"a":1}, "model": "evil""#)
+        .expect_err("a key behind the value is not one value");
+    assert_eq!(injected.kind(), DecodeErrorKind::Syntax, "{injected}");
+    assert_eq!(injected.line(), 1);
+    assert_eq!(injected.column(), 8, "the column points at the comma");
+    assert!(!injected.to_string().contains("evil"), "the error quoted the input: {injected}");
+
+    let after_a_struct =
+        decode::<Envelope>(br#"{"answers":{"spam":{"noul":0.9},"tone":{"confidence":0.4}}}x"#)
+            .expect_err("a stray byte is not whitespace");
+    assert_eq!(after_a_struct.kind(), DecodeErrorKind::Syntax, "{after_a_struct}");
+    assert_eq!(after_a_struct.line(), 1);
+    assert_eq!(after_a_struct.column(), 60, "the column points at the stray byte");
+}
+
+#[test]
+fn a_data_error_without_a_path_says_so_rather_than_printing_an_empty_one() {
+    // Reached only when the two decode passes disagree about whether the
+    // document parses at all, which no input produces today; the rendering is
+    // asserted here because it is what a caller would see if one did.
+    let opaque = DecodeError { detail: Detail::Opaque };
+
+    assert_eq!(opaque.kind(), DecodeErrorKind::Data);
+    assert_eq!(opaque.path(), "");
+    assert_eq!(opaque.line(), 0);
+    assert_eq!(opaque.column(), 0);
+    assert_eq!(opaque.to_string(), "the JSON document does not have the expected shape");
+    assert!(!opaque.to_string().contains("``"), "an empty path must not be printed");
 }
