@@ -290,3 +290,60 @@ fn text_that_is_not_one_json_value_never_becomes_content() {
     .expect("one complete value is content");
     assert_eq!(accepted.as_json().map(RawJson::as_str), Some(r#"{"a":1}"#));
 }
+
+/// Each conversion builds the text shape, equal to `Content::text` of the
+/// same text, and a borrowed input stays borrowed.
+#[test]
+fn text_converts_into_the_text_shape_and_keeps_its_borrow() {
+    let source = String::from("payments or invoices");
+
+    let from_str = Content::from(source.as_str());
+    let from_string = Content::from(source.clone());
+    let from_borrowed = Content::from(Cow::Borrowed(source.as_str()));
+    let from_owned = Content::from(Cow::<str>::Owned(source.clone()));
+
+    for (case, content) in [
+        ("&str", &from_str),
+        ("String", &from_string),
+        ("Cow::Borrowed", &from_borrowed),
+        ("Cow::Owned", &from_owned),
+    ] {
+        assert_eq!(*content, Content::text(source.as_str()), "{case}");
+        assert_eq!(content.as_text(), Some("payments or invoices"), "{case}");
+        assert_eq!(content.as_json(), None, "{case}");
+    }
+
+    for (case, content) in [("&str", &from_str), ("Cow::Borrowed", &from_borrowed)] {
+        assert!(
+            matches!(content.repr, Repr::Text(Cow::Borrowed(_))),
+            "{case} stays borrowed: {content:?}"
+        );
+        let text = content.as_text().expect("text");
+        assert!(std::ptr::eq(text, source.as_str()), "{case} points into the source");
+    }
+    for (case, content) in [("String", &from_string), ("Cow::Owned", &from_owned)] {
+        assert!(matches!(content.repr, Repr::Text(Cow::Owned(_))), "{case} is owned: {content:?}");
+    }
+}
+
+/// A converted `String` that needs escaping comes back as the same string
+/// through this codec and through `serde_json`.
+#[test]
+fn a_converted_string_round_trips_through_both_codecs() {
+    let text = String::from("quote \" backslash \\ newline \n tab \t nul \u{0000} earth \u{1F30D}");
+    let content = Content::from(text.clone());
+
+    let ours = encoded(&content);
+    assert_eq!(
+        ours,
+        r#""quote \" backslash \\ newline \n tab \t nul \u0000 earth "#.to_owned() + "\u{1F30D}\""
+    );
+    assert_eq!(codec::decode::<String>(ours.as_bytes()).expect("decodes"), text);
+
+    let theirs = serde_json::to_string(&content).expect("serde_json encodes text");
+    assert_eq!(serde_json::from_str::<String>(&theirs).expect("serde_json decodes"), text);
+    assert_eq!(
+        serde_json::from_str::<Content<'_>>(&theirs).expect("reads back as content"),
+        content
+    );
+}
