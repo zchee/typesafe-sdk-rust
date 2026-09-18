@@ -207,10 +207,15 @@ impl AnswerSet for Ticket {
                 let (mut spam, mut tone, mut quality) = (None, None, None);
                 while let Some(field) = map.next_key::<TicketField>()? {
                     match field {
-                        TicketField::Spam => spam = Some(map.next_value()?),
-                        TicketField::Tone => tone = Some(map.next_value()?),
-                        TicketField::Quality => quality = Some(map.next_value()?),
-                        TicketField::Other => {
+                        TicketField::Spam if spam.is_none() => spam = Some(map.next_value()?),
+                        TicketField::Tone if tone.is_none() => tone = Some(map.next_value()?),
+                        TicketField::Quality if quality.is_none() => {
+                            quality = Some(map.next_value()?);
+                        }
+                        // An answer the struct has no field for, or a later
+                        // answer to a question already read: the first answer
+                        // of a name is the one kept.
+                        _ => {
                             map.next_value::<IgnoredAny>()?;
                         }
                     }

@@ -46,6 +46,10 @@ use crate::{
 ///
 /// It is a struct rather than a bare count so that the decoder can pass more
 /// along later without changing the signature of [`AnswerSet`].
+///
+/// Everything in it is a hint for sizing storage. An implementation may use it
+/// or ignore it - a struct with one field per question has nothing to size -
+/// and it never changes what is decoded or whether decoding succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AnswerContext {
     expected_answers: usize,
@@ -58,7 +62,10 @@ impl AnswerContext {
     }
 
     /// How many questions the request asked, and so how many answers a
-    /// complete response carries. Zero when unknown.
+    /// complete response carries, capped at the number of answers the body is
+    /// long enough to hold. Zero when unknown.
+    ///
+    /// It is a capacity hint: a response may carry fewer answers or more.
     #[must_use]
     pub fn expected_answers(&self) -> usize {
         self.expected_answers
@@ -84,16 +91,35 @@ impl AnswerContext {
 ///   question name. Anything else (an array, a string, `null`) is an error at
 ///   `answers`.
 /// * **Order.** The members of that object may arrive in any order, and inside
-///   one answer `type` may arrive after the members it governs. An
-///   implementation must not depend on either order.
+///   one answer `type` may arrive after the members it governs. What a
+///   successful decode yields does not depend on either order; which path a
+///   failure names can, as the next two rules say.
 /// * **Wrong kind.** An answer whose `type` is not the kind the field holds -
 ///   including an answer that is not an object at all, or has no `type` - is
-///   an error at `answers.<field>.type`. A member of the right kind with the
-///   wrong shape is an error at `answers.<field>.<member>`.
+///   an error at `answers.<field>.type` whenever `type` comes before the
+///   members of the field's kind, which is the order the API writes. A typed
+///   field knows its kind before `type` arrives and reads those members as
+///   they come, so when a misshaped member of the field's kind precedes a
+///   wrong `type`, the error is reported at that member,
+///   `answers.<field>.<member>`.
+/// * **Wrong shape.** A member of the right kind with the wrong shape is an
+///   error at `answers.<field>.<member>` when the kind is known as the member
+///   arrives: always for a typed field, and for [`Answers`] when `type` came
+///   first. [`Answers`] holds a member that arrives before `type` as raw text
+///   and checks it once the type is known, after the walk has left it, so it
+///   reports that failure at `answers.<field>`.
 /// * **Two types.** An answer that names `type` twice with two different
 ///   values is an error at `answers.<field>.type`, whichever members it
 ///   carries; naming the same type twice is accepted. (Upstream lets the last
 ///   `type` win; an answer that contradicts itself is refused here instead.)
+/// * **Repeated answer.** When the object names one question twice, the first
+///   answer is the one the set holds. A struct keeps its field's first answer
+///   and skips a later answer of the same name unread, as it skips an extra
+///   answer, so the later one's kind and shape do not matter. [`Answers`]
+///   keeps every answer it reads, in wire order, and every lookup returns the
+///   first of them; it reads a later answer like any other, so one of the
+///   wrong shape is still an error there. A body both accept gives both the
+///   same answer.
 /// * **Missing answer.** A field with no answer is an error at
 ///   `answers.<field>`. The one exception is a response with no `answers`
 ///   member at all: the method is then called with an empty object from
@@ -105,6 +131,8 @@ impl AnswerContext {
 /// * **Allocation.** Nothing is allocated beyond the storage of the fields
 ///   themselves: keys are matched where they lie, never copied into a
 ///   `String`, and no intermediate map or value tree is built.
+/// * **Context.** The [`AnswerContext`] is a sizing hint. An implementation may
+///   use it or ignore it, and the result is the same either way.
 ///
 /// A type that does not implement the trait is refused where a response of it
 /// is asked for:
@@ -184,10 +212,15 @@ impl AnswerContext {
 ///                 let (mut spam, mut tone, mut quality) = (None, None, None);
 ///                 while let Some(field) = map.next_key::<Field>()? {
 ///                     match field {
-///                         Field::Spam => spam = Some(map.next_value()?),
-///                         Field::Tone => tone = Some(map.next_value()?),
-///                         Field::Quality => quality = Some(map.next_value()?),
-///                         Field::Other => {
+///                         Field::Spam if spam.is_none() => spam = Some(map.next_value()?),
+///                         Field::Tone if tone.is_none() => tone = Some(map.next_value()?),
+///                         Field::Quality if quality.is_none() => {
+///                             quality = Some(map.next_value()?);
+///                         }
+///                         // An answer the struct has no field for, or a
+///                         // later answer to a question already read: the
+///                         // first answer of a name is the one kept.
+///                         _ => {
 ///                             map.next_value::<IgnoredAny>()?;
 ///                         }
 ///                     }

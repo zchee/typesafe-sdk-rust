@@ -885,10 +885,15 @@ impl AnswerSet for Ticket {
                 let (mut spam, mut tone, mut quality) = (None, None, None);
                 while let Some(field) = map.next_key::<TicketField>()? {
                     match field {
-                        TicketField::Spam => spam = Some(map.next_value()?),
-                        TicketField::Tone => tone = Some(map.next_value()?),
-                        TicketField::Quality => quality = Some(map.next_value()?),
-                        TicketField::Other => {
+                        TicketField::Spam if spam.is_none() => spam = Some(map.next_value()?),
+                        TicketField::Tone if tone.is_none() => tone = Some(map.next_value()?),
+                        TicketField::Quality if quality.is_none() => {
+                            quality = Some(map.next_value()?);
+                        }
+                        // An answer the struct has no field for, or a later
+                        // answer to a question already read: the first answer
+                        // of a name is the one kept.
+                        _ => {
                             map.next_value::<IgnoredAny>()?;
                         }
                     }
@@ -995,6 +1000,75 @@ fn a_struct_answer_set_keeps_the_answer_set_contract() {
     for answers in ["[]", "null", r#""answers""#] {
         let text = around(answers);
         assert_eq!(rejection::<Ticket>(text.as_bytes()).field_path(), "answers", "body {text}");
+    }
+}
+
+/// A question named twice: the first answer is the one both kinds of answer
+/// set hold, so they agree on every body both accept.
+#[test]
+fn a_repeated_question_gives_the_first_answer_to_both_kinds_of_answer_set() {
+    let open = result_answers().strip_suffix('}').expect("the answers object closes");
+    let with_later_spam = |later: &str| around(&format!(r#"{open},"spam":{later}}}"#));
+
+    // The same kind again, and another kind: both sets keep the first.
+    for later in [
+        r#"{"type":"noul","noul":0.7}"#,
+        r#"{"type":"choice","choice":"a","confidence":1,"probabilities":{"a":1}}"#,
+    ] {
+        let text = with_later_spam(later);
+        let runtime = decode_as::<Answers>(text.as_bytes(), 3).expect("the runtime set decodes");
+        let typed = decode_as::<Ticket>(text.as_bytes(), 3).expect("the struct set decodes");
+
+        assert_eq!(runtime.answers().len(), 4, "body {text}");
+        assert_eq!(runtime.answers().noul("spam"), Some(&NoulAnswer::new(0.98)), "body {text}");
+        assert_eq!(typed.answers().spam, NoulAnswer::new(0.98), "body {text}");
+        assert_eq!(runtime.answers().noul("spam"), Some(&typed.answers().spam), "body {text}");
+    }
+
+    // A struct skips the later answer unread, so its shape does not matter
+    // there; the runtime set reads every answer, so it is still an error.
+    let text = with_later_spam(r#"{"type":"noul","noul":"high"}"#);
+    let typed = decode_as::<Ticket>(text.as_bytes(), 3).expect("the later answer is skipped");
+    assert_eq!(typed.answers().spam, NoulAnswer::new(0.98));
+    let failure = rejection::<Answers>(text.as_bytes());
+    assert_eq!(failure.field_path(), "answers.spam.noul");
+    assert_eq!(failure.message(), "Invalid response data at 'answers.spam.noul'.");
+}
+
+/// With `type` first, a wrong kind is reported at `type`; a typed field reads
+/// the members of its own kind as they come, so a misshaped one ahead of a
+/// wrong `type` is reported at the member instead.
+#[test]
+fn where_a_typed_field_reports_a_wrong_kind_depends_on_what_comes_first() {
+    let open = result_answers().strip_suffix('}').expect("the answers object closes");
+    let (_, rest) = open.split_once(r#""tone":"#).expect("the fixture has a tone answer");
+    let rows = [
+        (r#"{"type":"choice","noul":"x"}"#, "answers.spam.type"),
+        (r#"{"type":"choice","noul":0.5}"#, "answers.spam.type"),
+        (r#"{"noul":0.5,"type":"choice"}"#, "answers.spam.type"),
+        (r#"{"noul":"x","type":"choice"}"#, "answers.spam.noul"),
+        (r#"{"noul":"x","type":"future"}"#, "answers.spam.noul"),
+    ];
+
+    for (spam, path) in rows {
+        let text = around(&format!(r#"{{"spam":{spam},"tone":{rest}}}"#));
+        let failure = rejection::<Ticket>(text.as_bytes());
+        assert_eq!(failure.field_path(), path, "body {text}");
+        assert_eq!(failure.message(), format!("Invalid response data at '{path}'."), "body {text}");
+    }
+}
+
+/// The context is a sizing hint: no count changes what either set decodes.
+#[test]
+fn the_expected_answer_count_never_changes_the_result() {
+    let runtime = decode(RESULT);
+    let typed = decode_as::<Ticket>(RESULT, 3).expect("the fixture decodes as a Ticket");
+
+    for questions in [0, 1, 2, 3, 4, 1_000, usize::MAX] {
+        let answers = decode_as::<Answers>(RESULT, questions).expect("the fixture decodes");
+        assert_eq!(answers.answers(), runtime.answers(), "{questions} questions asked");
+        let ticket = decode_as::<Ticket>(RESULT, questions).expect("the fixture decodes");
+        assert_eq!(ticket.answers(), typed.answers(), "{questions} questions asked");
     }
 }
 
