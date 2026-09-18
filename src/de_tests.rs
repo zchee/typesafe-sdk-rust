@@ -303,6 +303,20 @@ fn a_future_type_may_reuse_a_member_name_with_another_shape_before_naming_itself
     assert_eq!(response.answers().noul("spam").map(NoulAnswer::noul), Some(0.25));
 }
 
+/// The order the API writes answers in: `type` first. Every member after an
+/// unknown type is skipped unread, whatever its name.
+#[test]
+fn a_future_type_named_first_is_skipped_whatever_its_members_look_like() {
+    let text = around(
+        r#"{"later":{"type":"future","noul":"high","choice":3,"confidence":[],"legend":[1,2],"probabilities":null,"score":{}},"spam":{"type":"noul","noul":0.25}}"#,
+    );
+
+    let response = decode(text.as_bytes());
+
+    assert_eq!(response.answers().names().collect::<Vec<_>>(), ["spam"]);
+    assert_eq!(response.answers().noul("spam").map(NoulAnswer::noul), Some(0.25));
+}
+
 #[test]
 fn members_held_before_the_type_decode_as_that_type() {
     let body = with_answers(json!({
