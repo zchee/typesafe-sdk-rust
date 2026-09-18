@@ -4,6 +4,10 @@
 # excluding them keeps `cargo build` at the root from compiling the whole
 # dependency graph twice with different feature unions.
 members = [".", "crates/test-support"]
+# Naming the default set explicitly is what keeps a crate whose tests need a
+# live API key out of a bare `cargo test` and out of CI: such a crate is added
+# to `members` and left out here, so no command has to remember to exclude it.
+default-members = [".", "crates/test-support"]
 exclude = ["spikes"]
 # Resolver 3 is the edition-2024 default; stating it silences the warning that
 # a virtual workspace manifest has no edition to infer it from.

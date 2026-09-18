@@ -1,0 +1,17 @@
+# actionlint checks `runs-on` against a table of runner labels compiled into
+# the binary, and that table is behind the images this repository targets: the
+# build here (HEAD-011a6d1) knows `windows-2025` but stops at `ubuntu-24.04`
+# and `macos-26`, so `ubuntu-26.04` and `xcode-27` come back as unknown labels.
+#
+# Declaring them here is actionlint's own mechanism for labels it does not
+# know. The key says "self-hosted", which these are not; there is no other key
+# for it, and the alternative is either a lint this repository always fails or
+# a `runs-on` that is not the one it is required to use.
+#
+# Remove an entry once a released actionlint knows the label. Nothing here
+# makes a label real: if a job cannot find a runner, it is this file that has
+# to be checked first.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - xcode-27

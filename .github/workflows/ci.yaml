@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run tells nobody anything, so the newest push on a branch
+# cancels the ones it replaced. `main` is exempt: its runs are the record of
+# what the branch was in, and cancelling one would leave a commit unverified.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # A test that fails on a runner cannot be re-run under a debugger, so the
+  # backtrace has to be in the log the first time.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The whole gate, on each supported platform. The steps share one job rather
+  # than being split into several because they share a target directory:
+  # splitting them would compile the crate once per step instead of once per
+  # platform, and buy no parallelism that matters.
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # A failure on one platform is worth seeing beside the other two: whether
+      # a break is platform-specific is the first question asked about it.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, xcode-27, windows-2025]
+    steps:
+      - uses: actions/checkout@v7
+
+      # rust-toolchain.toml names the version and its components; touching
+      # rustup at all is what makes it install them before the first build,
+      # so a toolchain problem is reported here and not inside a compile.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-hack,cargo-deny
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # No `--workspace`: this one runs code. A crate whose tests need a live
+      # API key is a workspace member and not a default member, so the default
+      # selection is the one that can never reach it.
+      - name: Tests
+        run: cargo nextest run --all-features
+
+      - name: Doctests
+        run: cargo test --doc --all-features
+
+      # Every combination of features, not just none and all: a feature that
+      # only compiles because another one happens to be on is a break for the
+      # caller who enables it alone. `--no-dev-deps` is what exposes it -
+      # a feature a dev-dependency enables hides a missing one in the real
+      # dependencies.
+      - name: Feature combinations
+        run: cargo hack check --workspace --feature-powerset --no-dev-deps
+
+      - name: Dependency policy
+        run: cargo deny check
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain
+
+      # Coverage is the one thing here that needs a component beyond what
+      # rust-toolchain.toml installs for everybody, so it is added by the job
+      # that needs it rather than by every developer's first build.
+      - name: Install the coverage instrumentation
+        run: rustup component add llvm-tools-preview
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+
+      # The threshold covers the published crate only: the test-support server
+      # is exercised by the tests that use it, and counting it would let its
+      # lines pay for lines of the SDK that nothing reaches.
+      - name: Line coverage
+        run: cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85
+
+  hygiene:
+    name: text hygiene
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # Nothing else in the toolchain looks for these: a NUL byte made git
+      # treat a text file as binary once already, and an invisible character
+      # survives every formatter this repository runs.
+      - name: Invisible and control characters
+        run: python3 .github/scripts/text-hygiene.py
