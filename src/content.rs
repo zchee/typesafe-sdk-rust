@@ -144,6 +144,35 @@ impl<'a> Content<'a> {
     }
 }
 
+/// Builds the text shape, borrowing `text`; the same as [`Content::text`].
+///
+/// A caller who wants the JSON shape of a value calls [`Content::json`].
+impl<'a> From<&'a str> for Content<'a> {
+    fn from(text: &'a str) -> Self {
+        Self::text(text)
+    }
+}
+
+/// Builds the text shape, taking ownership of `text`; the same as
+/// [`Content::text`].
+///
+/// A caller who wants the JSON shape of a value calls [`Content::json`].
+impl From<String> for Content<'_> {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+/// Builds the text shape, borrowing or owning exactly as `text` does; the
+/// same as [`Content::text`].
+///
+/// A caller who wants the JSON shape of a value calls [`Content::json`].
+impl<'a> From<Cow<'a, str>> for Content<'a> {
+    fn from(text: Cow<'a, str>) -> Self {
+        Self::text(text)
+    }
+}
+
 /// Turns the raw text of a JSON string, quotes and all, into its value.
 ///
 /// Text without a backslash is the input minus its two quotes, so the common
