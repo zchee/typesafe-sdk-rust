@@ -448,3 +448,252 @@ proptest! {
         prop_assert_eq!(reparsed, text);
     }
 }
+
+// ------------------------------------------------- raw JSON, other codecs
+
+/// A response-shaped value with a raw field, which is the shape a user gets
+/// when they serialize a response with a codec of their own.
+#[derive(Debug, Deserialize, Serialize)]
+struct Envelope2 {
+    name: String,
+    raw: RawJson,
+}
+
+/// The four numbers the transcode has to carry without changing their value:
+/// an exponent far from 1, a decimal fraction no binary float holds exactly,
+/// and both integer extremes, which do not fit in an `f64`.
+#[derive(Debug, PartialEq, Deserialize, Serialize)]
+struct Numbers {
+    tiny: f64,
+    tenth: f64,
+    largest: u64,
+    smallest: i64,
+}
+
+const NUMBERS: &str =
+    r#"{"tiny":1e-7,"tenth":0.1,"largest":18446744073709551615,"smallest":-9223372036854775808}"#;
+
+/// Encodes with this crate's codec, which is the serializer the SDK uses.
+fn sdk_encoded<T: Serialize + ?Sized>(value: &T) -> String {
+    let mut buffer = Vec::new();
+    encode_into(&mut buffer, value).expect("the value encodes");
+    String::from_utf8(buffer).expect("the codec emits UTF-8")
+}
+
+#[test]
+fn another_codec_gets_json_data_and_never_the_splice_token() {
+    let document = br#"{"name":"legend","raw":{"b":[1,{"c":"caf\u00e9"}],"a":null}}"#;
+    let envelope: Envelope2 = decode(document).expect("the document decodes");
+
+    let foreign = serde_json::to_string(&envelope).expect("another codec writes it as data");
+
+    assert!(
+        !foreign.contains("$sonic_rs"),
+        "a private protocol of this codec reached another one: {foreign}"
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&foreign).expect("the output is JSON"),
+        serde_json::json!({"name": "legend", "raw": {"b": [1, {"c": "caf\u{e9}"}], "a": null}}),
+        "transcoded as {foreign}"
+    );
+}
+
+#[test]
+fn the_same_value_splices_verbatim_through_this_codec() {
+    // The exact bytes, spacing and key order of the raw field survive, which
+    // is what the other codec is allowed to re-render and this one is not.
+    let document = br#"{"name":"legend","raw":{ "b":[1, 2],"a":-0.0 }}"#;
+    let envelope: Envelope2 = decode(document).expect("the document decodes");
+
+    assert_eq!(sdk_encoded(&envelope), r#"{"name":"legend","raw":{ "b":[1, 2],"a":-0.0 }}"#);
+}
+
+#[test]
+fn a_raw_value_round_trips_through_another_codec_with_the_same_data() {
+    for text in [
+        r#"{"label":"ok","weight":2,"tags":["a","b"],"none":null,"flag":true}"#,
+        r#"[1,[2,[3,[]]],{"k":"v"}]"#,
+        r#""a \"quoted\" caf\u00e9""#,
+        "17",
+    ] {
+        let original = RawJson::from_text(text.to_owned());
+
+        let written = serde_json::to_string(&original).expect("it writes as data");
+        let read_back: RawJson = serde_json::from_str(&written).expect("it reads back");
+
+        assert!(!written.contains("$sonic_rs"), "token leaked for {text}: {written}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(read_back.as_str())
+                .expect("the text is JSON"),
+            serde_json::from_str::<serde_json::Value>(text).expect("so is the original"),
+            "{text} came back as {read_back}"
+        );
+    }
+}
+
+#[test]
+fn numbers_keep_their_value_across_the_transcode() {
+    let raw = RawJson::from_text(NUMBERS.to_owned());
+    let expected = Numbers { tiny: 1e-7, tenth: 0.1, largest: u64::MAX, smallest: i64::MIN };
+
+    let written = serde_json::to_string(&raw).expect("it writes as data");
+    let decoded: Numbers = serde_json::from_str(&written).expect("the numbers read back");
+
+    assert_eq!(decoded.tiny.to_bits(), expected.tiny.to_bits(), "written as {written}");
+    assert_eq!(decoded.tenth.to_bits(), expected.tenth.to_bits(), "written as {written}");
+    assert_eq!(decoded.largest, u64::MAX, "written as {written}");
+    assert_eq!(decoded.smallest, i64::MIN, "written as {written}");
+
+    // The same value through this codec is not re-rendered at all.
+    assert_eq!(sdk_encoded(&raw), NUMBERS);
+}
+
+#[test]
+fn a_negative_zero_loses_its_sign_on_the_transcode_path_only() {
+    // The recorded divergence of this codec, now reachable one step further
+    // out: the transcode reads the number with this parser, so a literal
+    // negative zero comes out positive. The splice never reads it.
+    let raw = RawJson::from_text("-0.0".to_owned());
+
+    assert_eq!(serde_json::to_string(&raw).expect("it writes as data"), "0.0");
+    assert_eq!(sdk_encoded(&raw), "-0.0");
+}
+
+#[test]
+fn a_value_too_deep_to_transcode_is_refused_rather_than_aborting() {
+    let at_limit = RawJson::from_text(nested_array(MAX_JSON_DEPTH));
+    let over_limit = RawJson::from_text(nested_array(MAX_JSON_DEPTH + 1));
+    // Far past any stack: the splice path must not read this, and the
+    // transcode path must reject it on the byte scan rather than recurse.
+    let absurd = RawJson::from_text(nested_array(100_000));
+
+    let outcomes = on_worker_stack(move || {
+        (
+            serde_json::to_string(&at_limit).expect("the limit itself transcodes"),
+            serde_json::to_string(&over_limit).map(|_| ()).map_err(|error| error.to_string()),
+            serde_json::to_string(&absurd).map(|_| ()).map_err(|error| error.to_string()),
+            sdk_encoded(&absurd),
+        )
+    });
+
+    assert_eq!(outcomes.0, nested_array(MAX_JSON_DEPTH));
+    assert!(outcomes.1.is_err(), "one level past the cap must be refused: {outcomes:?}");
+    assert!(outcomes.2.is_err(), "100,000 levels must be refused: {outcomes:?}");
+    assert_eq!(outcomes.3, nested_array(100_000), "the splice never reads the text");
+}
+
+#[test]
+fn a_document_too_deep_to_render_is_refused_by_the_other_codec_path() {
+    // Under the other codec's own recursion limit, so the cap that bites here
+    // is this crate's.
+    let document = nested_array(MAX_JSON_DEPTH + 1);
+
+    let error = serde_json::from_str::<RawJson>(&document).expect_err("the document is too deep");
+
+    assert!(
+        error.to_string().contains("nested deeper"),
+        "the depth cap has to be the reason: {error}"
+    );
+    assert_eq!(
+        serde_json::from_str::<RawJson>(&nested_array(MAX_JSON_DEPTH))
+            .expect("the limit itself is fine")
+            .as_str(),
+        nested_array(MAX_JSON_DEPTH)
+    );
+}
+
+/// A writer that gives up part way, so that an error raised by the other
+/// codec has to travel back out through the parser driving the transcode.
+struct ShortWriter {
+    remaining: usize,
+}
+
+impl std::io::Write for ShortWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(std::io::Error::other("the sink is full"));
+        }
+        let taken = buf.len().min(self.remaining);
+        self.remaining -= taken;
+        Ok(taken)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_failure_in_the_other_codec_is_reported_and_carries_no_input() {
+    const SECRET: &str = "pentachlorophenol-42";
+    let raw = RawJson::from_text(format!(r#"{{"nested":[{{"state":"{SECRET}"}}]}}"#));
+
+    let error = serde_json::to_writer(ShortWriter { remaining: 4 }, &raw)
+        .expect_err("the sink refuses the value");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("the sink is full"), "the writer's reason is kept: {rendered}");
+    assert!(!rendered.contains(SECRET), "the failure leaked the text: {rendered}");
+}
+
+#[test]
+fn a_wrapper_around_this_codec_forwards_the_splice() {
+    // `serde_path_to_error::Serializer` is not this crate's serializer, but it
+    // passes every call through to the one it wraps. Whether a splice happens
+    // is decided by the encoder that is running, not by the type in hand, so
+    // the raw text reaches this codec and is written out unchanged.
+    let raw = RawJson::from_text(r#"{ "b":[1, 2],"a":-0.0 }"#.to_owned());
+
+    let mut track = serde_path_to_error::Track::new();
+    let mut buffer = Vec::new();
+    {
+        let _inside = EncoderMark::enter();
+        let mut codec = sonic_rs::Serializer::new(&mut buffer);
+        raw.serialize(serde_path_to_error::Serializer::new(&mut codec, &mut track))
+            .expect("the wrapper forwards the splice");
+    }
+    assert_eq!(
+        String::from_utf8(buffer).expect("the codec emits UTF-8"),
+        r#"{ "b":[1, 2],"a":-0.0 }"#
+    );
+
+    // The same wrapper outside the SDK's encoder gets data instead, which is
+    // what a caller assembling a serializer of their own sees.
+    let mut track = serde_path_to_error::Track::new();
+    let mut buffer = Vec::new();
+    let mut codec = sonic_rs::Serializer::new(&mut buffer);
+    raw.serialize(serde_path_to_error::Serializer::new(&mut codec, &mut track))
+        .expect("outside the encoder it transcodes");
+    assert_eq!(String::from_utf8(buffer).expect("the codec emits UTF-8"), r#"{"b":[1,2],"a":0.0}"#);
+}
+
+#[test]
+fn a_deserializer_that_ignores_the_request_still_yields_the_value() {
+    // These forward every request to `deserialize_any`, so the value arrives
+    // at the visitor directly instead of through the newtype struct. It is the
+    // route a non-self-describing format takes.
+    use serde::de::{
+        IntoDeserializer,
+        value::{Error as ValueError, MapDeserializer, SeqDeserializer, U64Deserializer},
+    };
+
+    // Spelled through the trait: the inherent `RawJson::deserialize` would
+    // shadow it.
+    let number = <RawJson as Deserialize>::deserialize(U64Deserializer::<ValueError>::new(
+        9_007_199_254_740_993,
+    ))
+    .expect("a bare number arrives as data");
+    assert_eq!(number.as_str(), "9007199254740993");
+
+    let sequence = <RawJson as Deserialize>::deserialize(SeqDeserializer::<_, ValueError>::new(
+        [1_u64, 2, 3].into_iter(),
+    ))
+    .expect("a bare sequence arrives as data");
+    assert_eq!(sequence.as_str(), "[1,2,3]");
+
+    let map = <RawJson as Deserialize>::deserialize(MapDeserializer::<_, ValueError>::new(
+        [("we\"ird", 1_u64), ("b", 2)].into_iter().map(|(k, v)| (k, v.into_deserializer())),
+    ))
+    .expect("a bare map arrives as data");
+    assert_eq!(map.as_str(), r#"{"we\"ird":1,"b":2}"#);
+}

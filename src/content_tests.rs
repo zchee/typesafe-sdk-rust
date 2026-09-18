@@ -180,3 +180,83 @@ fn text_is_escaped_on_the_way_out() {
 
     assert_eq!(encoded(&content), "\"a \\\"quoted\\\" \\\\ caf\u{e9}\"");
 }
+
+// ------------------------------------------------------ through other codecs
+
+/// The shape a question has on the wire: several content fields side by side,
+/// which is what a caller serializes when they dump a request or a response
+/// with a codec of their own.
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct Fields<'a> {
+    #[serde(borrow)]
+    instructions: Content<'a>,
+    #[serde(borrow)]
+    criteria: Content<'a>,
+    #[serde(borrow)]
+    label: Content<'a>,
+}
+
+#[test]
+fn every_shape_round_trips_through_another_codec() {
+    for (document, data) in [
+        (&br#"{"value":"neutral or polite"}"#[..], serde_json::json!("neutral or polite")),
+        (
+            &br#"{"value":{"label":"ok","weight":2,"sub":{"deep":[1,2]}}}"#[..],
+            serde_json::json!({"label": "ok", "weight": 2, "sub": {"deep": [1, 2]}}),
+        ),
+        (
+            &br#"{"value":["great","best",{"n":3}]}"#[..],
+            serde_json::json!(["great", "best", {"n": 3}]),
+        ),
+        (
+            &br#"{"value":"caf\u00e9 \"quoted\" \\"}"#[..],
+            serde_json::json!("caf\u{e9} \"quoted\" \\"),
+        ),
+    ] {
+        let decoded = row(document).expect("valid content");
+
+        let written = serde_json::to_string(&decoded.value).expect("another codec writes it");
+        assert!(!written.contains("$sonic_rs"), "token leaked: {written}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&written).expect("the output is JSON"),
+            data,
+            "from {}",
+            String::from_utf8_lossy(document)
+        );
+
+        let read_back: Content<'_> =
+            serde_json::from_str(&written).expect("another codec reads it back");
+        assert_eq!(
+            serde_json::to_value(&read_back).expect("it is JSON"),
+            data,
+            "round trip of {}",
+            String::from_utf8_lossy(document)
+        );
+    }
+}
+
+#[test]
+fn a_struct_of_content_fields_carries_the_same_data_through_both_codecs() {
+    let document = br#"{
+        "instructions": "rank the replies",
+        "criteria": {"tone": ["warm", "brief"], "length": {"max": 40}},
+        "label": ["a", "b"]
+    }"#;
+    let fields: Fields<'_> = codec::decode(document).expect("the question decodes");
+
+    let mut buffer = Vec::new();
+    codec::encode_into(&mut buffer, &fields).expect("this codec writes it");
+    let ours = String::from_utf8(buffer).expect("the codec emits UTF-8");
+    let theirs = serde_json::to_string(&fields).expect("another codec writes it");
+
+    assert!(!theirs.contains("$sonic_rs"), "token leaked: {theirs}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&ours).expect("our output is JSON"),
+        serde_json::from_str::<serde_json::Value>(&theirs).expect("theirs is too"),
+        "this codec wrote {ours}, the other wrote {theirs}"
+    );
+    // The difference between them is spelling, not data: this codec splices
+    // the wire text back in, spaces and all.
+    assert!(ours.contains(r#"{"tone": ["warm", "brief"], "length": {"max": 40}}"#), "{ours}");
+    assert!(theirs.contains(r#"{"tone":["warm","brief"],"length":{"max":40}}"#), "{theirs}");
+}

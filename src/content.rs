@@ -40,6 +40,10 @@ pub enum ContentError {
 /// request can be built from a `&str` the caller already has without copying
 /// it.
 ///
+/// Text is written out as a JSON string by any serializer. A JSON object or
+/// array is spliced in byte for byte by the SDK and written out as data by
+/// every other serializer, which is described on [`RawJson`].
+///
 /// ```
 /// use typesafe_sdk::Content;
 ///

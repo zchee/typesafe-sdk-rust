@@ -4,7 +4,7 @@
 //! appears in any signature outside it, so replacing the codec is a change to
 //! this file alone.
 //!
-//! Three things here are not what a plain `serde_json` wrapper would do:
+//! Four things here are not what a plain `serde_json` wrapper would do:
 //!
 //! * **The encode buffer is retained per thread.** Before every string write
 //!   the codec reserves `len * 6 + 35` bytes, so a buffer sized to the final
@@ -22,12 +22,12 @@
 //!   type-mismatch messages quote the offending value; a `state` may carry
 //!   personal data, so [`DecodeError`] keeps only a kind, a position and a
 //!   field path.
-
-// `#[expect]` cannot be used for these: with the `internals` feature the
-// wrappers in `crate::__internals` do reach every item below, so an
-// expectation would be unfulfilled - and therefore warn - in exactly the
-// configuration where the items are used.
-#![cfg_attr(not(feature = "internals"), allow(dead_code))]
+//! * **Raw JSON has a path for this codec and a path for every other one.**
+//!   Splicing text in unchanged, and capturing it on the way back, are both
+//!   protocols private to this codec. [`RawJson`] is public and users will
+//!   hand it to a codec of their own, so it also knows how to write itself out
+//!   as ordinary data and to read ordinary data back. See [`serialize_raw`]
+//!   and [`deserialize_raw`].
 
 use std::{
     borrow::Cow,
@@ -36,7 +36,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer, de, ser,
+    ser::{SerializeMap, SerializeSeq, SerializeStruct},
+};
 use thiserror::Error;
 
 /// The deepest JSON nesting this crate will parse.
@@ -193,6 +196,9 @@ pub(crate) fn encode_into<T>(buf: &mut Vec<u8>, value: &T) -> Result<(), EncodeE
 where
     T: Serialize + ?Sized,
 {
+    // The mark is what tells `RawJson` that the serializer about to run is
+    // this crate's own, and so that raw text may be spliced in verbatim.
+    let _inside = EncoderMark::enter();
     sonic_rs::to_writer(&mut *buf, value).map_err(EncodeError::from_codec)
 }
 
@@ -217,6 +223,11 @@ pub(crate) fn write_json_string(buf: &mut Vec<u8>, text: &str) {
 /// # Errors
 ///
 /// Returns whatever `fill` returns.
+// The first in-crate caller is the request builder, which is not written yet;
+// until then only the `internals` wrappers reach this. `#[expect]` is the wrong
+// tool, because with that feature on the item IS used and the expectation would
+// go unfulfilled - and therefore warn - in exactly that configuration.
+#[cfg_attr(not(feature = "internals"), allow(dead_code))]
 pub(crate) fn encode_body<F>(fill: F) -> Result<Bytes, EncodeError>
 where
     F: FnOnce(&mut Vec<u8>) -> Result<(), EncodeError>,
@@ -379,40 +390,644 @@ fn missing_field_name(message: &str) -> Option<&str> {
 
 // ------------------------------------------------------------- raw JSON
 
-/// Reads the next value as its raw JSON text, without interpreting it.
+/// The struct name sonic-rs reads as "the one field below is JSON text
+/// already, write it out unchanged".
 ///
-/// The text is borrowed from the input whenever the codec can do so, and owned
-/// when it cannot - which is the case for a string that contains escape
-/// sequences.
-///
-/// # Errors
-///
-/// Returns the deserializer's own error. Note that the raw capture relies on a
-/// protocol private to this codec: another deserializer, `serde_json` for
-/// instance, reports an unexpected newtype struct instead.
-pub(crate) fn deserialize_raw<'de, D>(deserializer: D) -> Result<Cow<'de, str>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    sonic_rs::LazyValue::deserialize(deserializer).map(|value| value.as_raw_cow())
+/// The constant is private to that crate, so the name is spelled out here
+/// rather than reached by serializing a `sonic_rs::LazyValue`: building one of
+/// those needs a parse of the text, and the parser has no recursion limit, so
+/// that would put a process abort on the outbound path for a deeply nested
+/// value. Should a later sonic-rs rename the token, the splice degrades into
+/// an ordinary one-field object and the round-trip tests fail on it.
+const SPLICE_TOKEN: &str = "$sonic_rs::LazyValue";
+
+thread_local! {
+    /// How many [`encode_into`] calls this thread is inside.
+    ///
+    /// A counter rather than a flag, because a `Serialize` implementation the
+    /// encoder reaches may encode a value of its own.
+    static INSIDE_SDK_ENCODER: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Writes raw JSON text through `serializer` verbatim.
+/// Marks this thread as being inside the SDK's serializer while it lives.
+///
+/// serde offers no way to ask a `Serializer` which implementation it is, and
+/// the verbatim splice below is a protocol only this crate's codec
+/// understands. The mark is therefore set where the codec's serializer is
+/// built - [`encode_into`], the single place in the crate that builds one -
+/// and read by [`serialize_raw`].
+struct EncoderMark;
+
+impl EncoderMark {
+    fn enter() -> Self {
+        INSIDE_SDK_ENCODER.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+
+    /// Whether the value being serialized on this thread is on its way into
+    /// the SDK's own encoder.
+    fn is_set() -> bool {
+        INSIDE_SDK_ENCODER.with(|depth| depth.get() > 0)
+    }
+}
+
+impl Drop for EncoderMark {
+    fn drop(&mut self) {
+        INSIDE_SDK_ENCODER.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Writes raw JSON text through `serializer`.
+///
+/// Inside this crate's encoder the text is spliced in byte for byte. Through
+/// any other serializer it is streamed out as ordinary JSON data instead, so
+/// that a value which travels through, say, `serde_json` carries the data it
+/// holds rather than a protocol this crate's codec invented.
 ///
 /// # Errors
 ///
-/// Returns the serializer's own error.
+/// Returns the serializer's own error, and a too-deep error when a value on
+/// the transcoding path is nested deeper than [`MAX_JSON_DEPTH`].
 fn serialize_raw<S>(text: &str, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    // The raw value has to be handed to the codec as its own lazy type for the
-    // text to be spliced in rather than re-encoded, and that type can only be
-    // built by parsing. The parse is a skip over the text: it allocates
-    // nothing and validates what the constructors already guaranteed.
-    let lazy = sonic_rs::from_str::<sonic_rs::LazyValue<'_>>(text)
-        .map_err(|error| serde::ser::Error::custom(EncodeError::from_codec(error)))?;
-    lazy.serialize(serializer)
+    if EncoderMark::is_set() { splice(text, serializer) } else { transcode(text, serializer) }
+}
+
+/// Hands `text` to this crate's codec for a verbatim splice.
+///
+/// Nothing parses the text here: a `RawJson` only ever holds text the codec
+/// produced or captured, so the splice writes bytes the codec has already
+/// accepted once.
+fn splice<S>(text: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut raw = serializer.serialize_struct(SPLICE_TOKEN, 1)?;
+    raw.serialize_field(SPLICE_TOKEN, text)?;
+    raw.end()
+}
+
+/// Streams the JSON value in `text` into a serializer that is not this crate's
+/// codec.
+///
+/// Nothing is buffered and no value tree is built: every value read out of
+/// `text` is handed straight to `serializer`. The data is preserved; its
+/// spelling is not, because the target serializer chooses its own number
+/// format and drops the insignificant whitespace the text may carry.
+///
+/// # Errors
+///
+/// Returns a too-deep error when `text` is nested deeper than
+/// [`MAX_JSON_DEPTH`], and otherwise whatever `serializer` returns.
+fn transcode<S>(text: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    // Both the transcode and the parser driving it descend one stack frame per
+    // nesting level. The cap the decode path uses bounds that recursion, which
+    // is what stops a `RawJson` built by `RawJson::from_value` from an
+    // arbitrarily deep value from overflowing the stack here; the splice path
+    // above does not read the text at all and so needs no cap.
+    check_depth(text.as_bytes()).map_err(ser::Error::custom)?;
+
+    let mut source = sonic_rs::Deserializer::from_slice(text.as_bytes());
+    Transcoder::new(&mut source).serialize(serializer)
+}
+
+/// The prefix that marks a serializer error on its way out through the
+/// deserializer driving a transcode.
+const REFUSED: &str = "the JSON writer refused a value: ";
+
+/// Wraps a serializer error so that it survives the trip out through the
+/// deserializer. The two halves of a transcode share no error type, so the
+/// message is all that can cross.
+fn writer_refused<E, D>(error: E) -> D
+where
+    E: fmt::Display,
+    D: de::Error,
+{
+    de::Error::custom(format_args!("{REFUSED}{error}"))
+}
+
+/// Turns the error a transcode comes back with into a serializer error.
+///
+/// Only a message [`writer_refused`] marked is passed on. Anything else was
+/// raised by the parser, whose `Display` embeds an excerpt of what it was
+/// reading, and the text of a `RawJson` may be application data.
+fn transcode_failed<E, S>(error: E) -> S
+where
+    E: fmt::Display,
+    S: ser::Error,
+{
+    let rendered = error.to_string();
+    match rendered.split_once(REFUSED) {
+        Some((_, message)) => ser::Error::custom(message),
+        None => ser::Error::custom("the stored JSON text could not be read back"),
+    }
+}
+
+/// A `Serialize` that writes whatever one deserializer yields.
+///
+/// serde drives serializing from the value side and deserializing from the
+/// visitor side, so a transcode has to hand the serializer something that
+/// implements `Serialize` and pulls from a deserializer when it is asked to
+/// write. That single call consumes the deserializer, which is why it sits in
+/// a `RefCell<Option<_>>` rather than being held by value.
+struct Transcoder<D> {
+    source: RefCell<Option<D>>,
+}
+
+impl<D> Transcoder<D> {
+    fn new(source: D) -> Self {
+        Self { source: RefCell::new(Some(source)) }
+    }
+}
+
+impl<'de, D> Serialize for Transcoder<D>
+where
+    D: Deserializer<'de>,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let Some(source) = self.source.borrow_mut().take() else {
+            return Err(ser::Error::custom("a raw JSON value can be written only once"));
+        };
+        source.deserialize_any(TranscodeVisitor { serializer }).map_err(transcode_failed)
+    }
+}
+
+/// Hands every value it is shown straight to `serializer`.
+struct TranscodeVisitor<S> {
+    serializer: S,
+}
+
+impl<'de, S> de::Visitor<'de> for TranscodeVisitor<S>
+where
+    S: Serializer,
+{
+    type Value = S::Ok;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any JSON value")
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        self.serializer.serialize_bool(value).map_err(writer_refused)
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        self.serializer.serialize_i64(value).map_err(writer_refused)
+    }
+
+    fn visit_i128<E: de::Error>(self, value: i128) -> Result<Self::Value, E> {
+        self.serializer.serialize_i128(value).map_err(writer_refused)
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        self.serializer.serialize_u64(value).map_err(writer_refused)
+    }
+
+    fn visit_u128<E: de::Error>(self, value: u128) -> Result<Self::Value, E> {
+        self.serializer.serialize_u128(value).map_err(writer_refused)
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        self.serializer.serialize_f64(value).map_err(writer_refused)
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        self.serializer.serialize_str(value).map_err(writer_refused)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.serializer.serialize_unit().map_err(writer_refused)
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.serializer.serialize_none().map_err(writer_refused)
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        let mut sequence =
+            self.serializer.serialize_seq(access.size_hint()).map_err(writer_refused)?;
+        while access.next_element_seed(TranscodeElement { sequence: &mut sequence })?.is_some() {}
+        sequence.end().map_err(writer_refused)
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::MapAccess<'de>,
+    {
+        let mut map = self.serializer.serialize_map(access.size_hint()).map_err(writer_refused)?;
+        loop {
+            let key = access.next_key_seed(TranscodeKey { map: &mut map })?;
+            if key.is_none() {
+                break;
+            }
+            access.next_value_seed(TranscodeValue { map: &mut map })?;
+        }
+        map.end().map_err(writer_refused)
+    }
+}
+
+/// Writes the element the deserializer is positioned on into `sequence`.
+struct TranscodeElement<'s, S> {
+    sequence: &'s mut S,
+}
+
+impl<'de, S> de::DeserializeSeed<'de> for TranscodeElement<'_, S>
+where
+    S: SerializeSeq,
+{
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.sequence.serialize_element(&Transcoder::new(deserializer)).map_err(writer_refused)
+    }
+}
+
+/// Writes the key the deserializer is positioned on into `map`.
+struct TranscodeKey<'s, S> {
+    map: &'s mut S,
+}
+
+impl<'de, S> de::DeserializeSeed<'de> for TranscodeKey<'_, S>
+where
+    S: SerializeMap,
+{
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.map.serialize_key(&Transcoder::new(deserializer)).map_err(writer_refused)
+    }
+}
+
+/// Writes the value the deserializer is positioned on into `map`.
+struct TranscodeValue<'s, S> {
+    map: &'s mut S,
+}
+
+impl<'de, S> de::DeserializeSeed<'de> for TranscodeValue<'_, S>
+where
+    S: SerializeMap,
+{
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.map.serialize_value(&Transcoder::new(deserializer)).map_err(writer_refused)
+    }
+}
+
+/// Reads the next value as its raw JSON text, without interpreting it.
+///
+/// This crate's codec answers the request with the text of the value as the
+/// wire carried it, borrowed from the input whenever it can be - which it
+/// cannot when the value is a string holding escape sequences. Any other
+/// deserializer does not know the request and passes itself on instead; the
+/// value is then read as ordinary JSON and rendered back to compact text, so
+/// what comes out holds the same data rather than failing.
+///
+/// A format that neither knows the request nor forwards itself, but answers it
+/// with a bare string, is the one case this cannot serve: a string reaching
+/// the visitor is the raw-text protocol, so it is taken as JSON text and not
+/// as a JSON string. No JSON codec behaves that way.
+///
+/// # Errors
+///
+/// Returns the deserializer's own error, and a too-deep error when a document
+/// read through a foreign deserializer nests deeper than [`MAX_JSON_DEPTH`].
+pub(crate) fn deserialize_raw<'de, D>(deserializer: D) -> Result<Cow<'de, str>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserializer.deserialize_newtype_struct(SPLICE_TOKEN, RawTextVisitor)
+}
+
+/// The two ways a value arrives at [`deserialize_raw`].
+struct RawTextVisitor;
+
+impl<'de> de::Visitor<'de> for RawTextVisitor {
+    type Value = Cow<'de, str>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any JSON value")
+    }
+
+    /// This crate's codec, handing over the raw text of the value.
+    fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(Cow::Borrowed(value))
+    }
+
+    /// The same, for text the codec had to rebuild because it holds escapes.
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Cow::Owned(value.to_owned()))
+    }
+
+    /// Any other deserializer: it does not know the request above, so it hands
+    /// itself over and the value is read as data.
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut out = Vec::new();
+        deserializer.deserialize_any(Render { out: &mut out, depth: 0 })?;
+        Ok(Cow::Owned(rendered_text(out)))
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(Cow::Borrowed(if value { "true" } else { "false" }))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        render_scalar(&value)
+    }
+
+    fn visit_i128<E: de::Error>(self, value: i128) -> Result<Self::Value, E> {
+        render_scalar(&value)
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        render_scalar(&value)
+    }
+
+    fn visit_u128<E: de::Error>(self, value: u128) -> Result<Self::Value, E> {
+        render_scalar(&value)
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        render_scalar(&value)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Cow::Borrowed("null"))
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        Ok(Cow::Borrowed("null"))
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.visit_newtype_struct(deserializer)
+    }
+
+    fn visit_seq<A>(self, access: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        let mut out = Vec::new();
+        de::Visitor::visit_seq(Render { out: &mut out, depth: 0 }, access)?;
+        Ok(Cow::Owned(rendered_text(out)))
+    }
+
+    fn visit_map<A>(self, access: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::MapAccess<'de>,
+    {
+        let mut out = Vec::new();
+        de::Visitor::visit_map(Render { out: &mut out, depth: 0 }, access)?;
+        Ok(Cow::Owned(rendered_text(out)))
+    }
+}
+
+/// Encodes one scalar on its own, for a value that reached
+/// [`RawTextVisitor`] without any surrounding structure.
+fn render_scalar<'de, T, E>(value: &T) -> Result<Cow<'de, str>, E>
+where
+    T: Serialize + ?Sized,
+    E: de::Error,
+{
+    let mut out = Vec::new();
+    encode_into(&mut out, value).map_err(de::Error::custom)?;
+    Ok(Cow::Owned(rendered_text(out)))
+}
+
+/// The bytes a render wrote, as text.
+fn rendered_text(out: Vec<u8>) -> String {
+    String::from_utf8(out).expect("invariant: the renderer emits UTF-8")
+}
+
+/// Writes one JSON value, read from a deserializer that is not this crate's
+/// codec, into `out` as compact JSON text.
+///
+/// It is both the seed that a container hands to its elements and the visitor
+/// that writes them, so a nested document costs one stack frame per level and
+/// no intermediate value.
+struct Render<'b> {
+    out: &'b mut Vec<u8>,
+    depth: usize,
+}
+
+/// The depth one level in, or a too-deep error at the cap.
+fn one_level_in<E: de::Error>(depth: usize) -> Result<usize, E> {
+    if depth >= MAX_JSON_DEPTH {
+        return Err(de::Error::custom(DecodeError::too_deep()));
+    }
+    Ok(depth + 1)
+}
+
+impl<'de> de::DeserializeSeed<'de> for Render<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> de::Visitor<'de> for Render<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any JSON value")
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        self.out.extend_from_slice(if value { b"true" } else { b"false" });
+        Ok(())
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        encode_into(self.out, &value).map_err(de::Error::custom)
+    }
+
+    fn visit_i128<E: de::Error>(self, value: i128) -> Result<Self::Value, E> {
+        encode_into(self.out, &value).map_err(de::Error::custom)
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        encode_into(self.out, &value).map_err(de::Error::custom)
+    }
+
+    fn visit_u128<E: de::Error>(self, value: u128) -> Result<Self::Value, E> {
+        encode_into(self.out, &value).map_err(de::Error::custom)
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        encode_into(self.out, &value).map_err(de::Error::custom)
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        write_json_string(self.out, value);
+        Ok(())
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.out.extend_from_slice(b"null");
+        Ok(())
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+        self.out.extend_from_slice(b"null");
+        Ok(())
+    }
+
+    fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_newtype_struct<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+
+    fn visit_seq<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::SeqAccess<'de>,
+    {
+        let inner = one_level_in(self.depth)?;
+        let out = self.out;
+        out.push(b'[');
+        let mut first = true;
+        loop {
+            let element = RenderElement { out: &mut *out, depth: inner, first };
+            if access.next_element_seed(element)?.is_none() {
+                break;
+            }
+            first = false;
+        }
+        out.push(b']');
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::MapAccess<'de>,
+    {
+        let inner = one_level_in(self.depth)?;
+        let out = self.out;
+        out.push(b'{');
+        let mut first = true;
+        loop {
+            let key = RenderKey { out: &mut *out, first };
+            if access.next_key_seed(key)?.is_none() {
+                break;
+            }
+            out.push(b':');
+            access.next_value_seed(Render { out: &mut *out, depth: inner })?;
+            first = false;
+        }
+        out.push(b'}');
+        Ok(())
+    }
+}
+
+/// One element of an array, with the comma that precedes it.
+///
+/// The separator is written here rather than in the loop because whether there
+/// is another element is only known once the deserializer has been asked for
+/// it, and asking is what renders it.
+struct RenderElement<'b> {
+    out: &'b mut Vec<u8>,
+    depth: usize,
+    first: bool,
+}
+
+impl<'de> de::DeserializeSeed<'de> for RenderElement<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if !self.first {
+            self.out.push(b',');
+        }
+        deserializer.deserialize_any(Render { out: self.out, depth: self.depth })
+    }
+}
+
+/// One key of an object, with the comma that precedes it. A JSON key is always
+/// a string, so anything else is a type error rather than a rendered value.
+struct RenderKey<'b> {
+    out: &'b mut Vec<u8>,
+    first: bool,
+}
+
+impl<'de> de::DeserializeSeed<'de> for RenderKey<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if !self.first {
+            self.out.push(b',');
+        }
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> de::Visitor<'de> for RenderKey<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object key")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        write_json_string(self.out, value);
+        Ok(())
+    }
 }
 
 /// An owned piece of JSON text that travels through the SDK unchanged.
@@ -426,11 +1041,19 @@ where
 ///
 /// # Serialization
 ///
-/// The text is spliced into the output verbatim when this crate's codec is the
-/// serializer, which is the case for everything the SDK sends. Handing a
-/// `RawJson` to another serializer, `serde_json` for instance, yields a
-/// single-field object instead, because the verbatim splice is a protocol
-/// private to the codec; use [`as_str`](RawJson::as_str) in that case.
+/// Inside the SDK the text is spliced into the request body byte for byte:
+/// key order, spacing and the exact spelling of every number are what the
+/// caller or the server wrote. Through any other serializer - `serde_json`,
+/// for instance - the value is written out as ordinary JSON data instead, so
+/// the data survives while its spelling may not: numbers are re-rendered by
+/// that serializer and insignificant whitespace is dropped.
+///
+/// Which of the two happens is decided by whether the SDK's own encoder is
+/// running on this thread, not by the type of the serializer, because serde
+/// offers no way to ask a serializer what it is. A `RawJson` handed to a
+/// foreign serializer from inside a caller's own `Serialize` implementation
+/// while the SDK is encoding a request is therefore spliced rather than
+/// transcoded; use [`as_str`](RawJson::as_str) there.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RawJson {
     text: Box<str>,
