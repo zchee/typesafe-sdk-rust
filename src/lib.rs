@@ -22,9 +22,20 @@
 
 #![forbid(unsafe_code)]
 
+pub mod client;
 mod codec;
+pub mod config;
+pub mod constants;
 pub mod content;
+pub mod de;
 pub mod error;
+pub mod models;
+pub mod question;
+pub mod request;
+pub mod response;
+pub mod retry;
+pub mod telemetry;
+pub mod transport;
 
 #[cfg(feature = "internals")]
 #[doc(hidden)]

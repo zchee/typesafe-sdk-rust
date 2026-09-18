@@ -117,6 +117,10 @@ http = { workspace = true }
 # Used only to read `Retry-After` when a server answers it with an HTTP date
 # rather than a count of seconds.
 httpdate = { workspace = true }
+# Held for the client's API key: it is kept as a secret until the one place
+# that turns it into an `Authorization` header value, so no formatting of a
+# client or its configuration can print it.
+secrecy = { workspace = true }
 serde = { workspace = true }
 # A normal dependency rather than a dev one: the decode failure path uses it to
 # turn a position into a field path, and that path is part of the errors the
