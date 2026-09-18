@@ -19,3 +19,11 @@ target
 
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
+
+# Local environment files hold credentials such as TYPESAFE_API_KEY. The
+# repository is public, so they are kept out here rather than left to each
+# contributor's global ignore file. An example file with placeholder values is
+# the one exception.
+.env
+.env.*
+!.env.example
