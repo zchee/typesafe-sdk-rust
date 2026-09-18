@@ -72,3 +72,36 @@ pub fn scratch_hint() -> usize {
 pub fn reset_scratch() {
     codec::reset_scratch();
 }
+
+/// See `codec::decode`: the decoder every response goes through, for
+/// comparing a type of the test's own on the same codec.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] when the input is nested too deeply, is not valid
+/// JSON, or does not have the shape `T` expects.
+pub fn decode<'de, T>(bytes: &'de [u8]) -> Result<T, DecodeError>
+where
+    T: serde::Deserialize<'de>,
+{
+    codec::decode(bytes)
+}
+
+/// See `de::decode_system_one`: the response decoder whose allocation
+/// behaviour the decode budget is stated on.
+///
+/// # Errors
+///
+/// Returns a response-validation [`Error`](crate::Error) when the body does
+/// not decode.
+pub fn decode_system_one<A>(
+    body: Bytes,
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+    questions: usize,
+) -> Result<crate::response::SystemOneResponse<A>, crate::Error>
+where
+    A: crate::de::AnswerSet,
+{
+    crate::de::decode_system_one(body, status, headers, questions, None)
+}
