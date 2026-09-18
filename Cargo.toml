@@ -123,8 +123,16 @@ thiserror = { workspace = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
+dhat = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
+
+# dhat allows one profiler per process, so an allocation scenario gets a test
+# binary of its own rather than a test function in a shared one.
+[[test]]
+name = "alloc_encode"
+path = "tests/alloc_encode.rs"
+required-features = ["internals"]
 
 [lints]
 workspace = true
