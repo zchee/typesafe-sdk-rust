@@ -1,0 +1,71 @@
+# cargo-deny policy for the workspace and for the spike crates under spikes/.
+#
+# Run at the workspace root for the SDK graph, and with
+# `--manifest-path spikes/deps-probe/Cargo.toml` for the full runtime graph
+# before the SDK's own dependency list catches up with it.
+
+[graph]
+# Restricting the graph to the supported triples keeps platform-only crates
+# out of the license and advisory verdict. Notably it drops the wasm-only
+# webpki-root-certs (CDLA-Permissive-2.0), which is not a license this project
+# accepts and which no supported target pulls in.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+all-features = true
+
+[advisories]
+# A yanked release is a maintainer telling downstreams not to use it, so it
+# fails rather than warns. Vulnerability and unsound advisories are denied
+# unconditionally by cargo-deny 0.20 and have no key here.
+yanked = "deny"
+unmaintained = "all"
+ignore = []
+
+[licenses]
+# Permissive licenses with no source-disclosure or patent-retaliation terms.
+# Anything outside this list is a decision for the repository owner, so the
+# list is never widened to make a check pass.
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = []
+# The allow list is a policy statement, not an inventory of what the current
+# lock file happens to contain, so a listed license nothing uses today is not
+# a finding.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# The workspace's own unpublished members (test-support, spikes) carry the
+# same license as the SDK, so there is nothing to skip.
+ignore = false
+
+[bans]
+# Two versions of one crate is a graph smell, not a policy violation: it costs
+# compile time and binary size, and the fix is usually upstream.
+multiple-versions = "warn"
+# Every dependency in this project is pinned to a concrete minimum version.
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
