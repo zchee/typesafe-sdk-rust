@@ -426,6 +426,76 @@ proptest! {
     }
 }
 
+/// Every class of document `decode` treats differently, each through `decode`
+/// and through `decode_seed` with serde's own stateless seed.
+#[test]
+fn a_seeded_decode_accepts_and_refuses_exactly_what_decode_does() {
+    let mut too_deep = "[".repeat(MAX_JSON_DEPTH + 1);
+    too_deep.push_str(&"]".repeat(MAX_JSON_DEPTH + 1));
+    let documents: [(&str, &[u8]); 9] = [
+        ("fits", br#"{"answers":{"spam":{"noul":0.98},"tone":{"confidence":0.9}}}"#),
+        ("missing field", br#"{"answers":{"spam":{},"tone":{"confidence":0.9}}}"#),
+        ("wrong type", br#"{"answers":{"spam":{"noul":0.98},"tone":{"confidence":"x"}}}"#),
+        ("syntax", br#"{"answers":}"#),
+        ("trailing value", br#"{"answers":{"spam":{"noul":1},"tone":{"confidence":1}}} 7"#),
+        ("trailing space", b"{\"answers\":{\"spam\":{\"noul\":1},\"tone\":{\"confidence\":1}}} \n"),
+        // A byte that is not UTF-8 inside a string no reader looks at: only
+        // the codec's own final check sees it.
+        (
+            "bad utf-8 in a skipped string",
+            b"{\"answers\":{\"spam\":{\"noul\":1,\"x\":\"\xff\"},\"tone\":{\"confidence\":1}}}",
+        ),
+        ("bad utf-8 outside a string", b"{\"answers\":\xff}"),
+        ("too deep", too_deep.as_bytes()),
+    ];
+
+    for (label, document) in documents {
+        let plain = decode::<Envelope>(document).map(|envelope| format!("{envelope:?}"));
+        let seeded =
+            decode_seed(document, PhantomData::<Envelope>).map(|envelope| format!("{envelope:?}"));
+        assert_eq!(seeded, plain, "{label}");
+    }
+    for (label, document) in documents {
+        let outcome = decode_seed(document, PhantomData::<Envelope>).map_err(|error| error.kind());
+        let expected = match label {
+            "fits" | "trailing space" => Ok(()),
+            "missing field" | "wrong type" => Err(DecodeErrorKind::Data),
+            "too deep" => Err(DecodeErrorKind::TooDeep),
+            _ => Err(DecodeErrorKind::Syntax),
+        };
+        assert_eq!(outcome.map(drop), expected, "{label}");
+    }
+}
+
+/// A seed that requires a member named by its own state.
+#[derive(Clone, Copy)]
+struct Requires(&'static str);
+
+impl<'de> DeserializeSeed<'de> for Requires {
+    type Value = u64;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let members = BTreeMap::<String, u64>::deserialize(deserializer)?;
+        members.get(self.0).copied().ok_or_else(|| de::Error::missing_field(self.0))
+    }
+}
+
+#[test]
+fn a_seed_carries_its_state_into_the_decode_and_into_the_failure_pass() {
+    assert_eq!(decode_seed(br#"{"a":1,"b":2}"#, Requires("b")), Ok(2));
+
+    // The path names the member the seed's state asked for, so the second,
+    // path-tracking pass was driven by the same state as the first. The error
+    // is raised after the parser has finished, so it has no position.
+    let error = decode_seed(br#"{"a":1}"#, Requires("wanted")).expect_err("no `wanted`");
+    assert_eq!(error.kind(), DecodeErrorKind::Data);
+    assert_eq!(error.path(), "wanted");
+    assert_eq!(error.to_string(), "unexpected JSON value at `wanted`, line 0 column 0");
+}
+
 #[test]
 fn a_syntax_error_keeps_its_position() {
     let error = decode::<Envelope>(br#"{"answers":}"#).expect_err("the value is missing");

@@ -33,12 +33,13 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     fmt::{self, Write as _},
+    marker::PhantomData,
 };
 
 use bytes::Bytes;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer, de,
-    de::IgnoredAny,
+    de::{DeserializeSeed, IgnoredAny},
     ser,
     ser::{SerializeMap, SerializeSeq, SerializeStruct},
 };
@@ -362,37 +363,72 @@ where
     T: Deserialize<'de>,
 {
     check_depth(bytes)?;
-    sonic_rs::from_slice::<T>(bytes).map_err(|_| describe_failure::<T>(bytes))
+    // `PhantomData<T>` is serde's own seed for "decode a `T`", which is what
+    // lets the failure pass below serve this function and `decode_seed` alike.
+    sonic_rs::from_slice::<T>(bytes).map_err(|_| describe_failure(bytes, PhantomData::<T>))
+}
+
+/// Decodes `bytes` through `seed`, a decoder that carries state of its own -
+/// how many answers to make room for, for instance - which a type's
+/// `Deserialize` cannot receive.
+///
+/// Everything else is [`decode`]: the same depth pre-scan, one pass on
+/// success that accepts exactly what `decode` accepts, and on failure the same
+/// second, path-tracking pass. That second pass needs the seed again, which is
+/// why it is `Clone`: a seed is consumed by the pass it drives.
+///
+/// # Errors
+///
+/// Returns [`DecodeError`] when the input is nested too deeply, is not valid
+/// JSON, or does not have the shape the seed expects.
+pub(crate) fn decode_seed<'de, S>(bytes: &'de [u8], seed: S) -> Result<S::Value, DecodeError>
+where
+    S: DeserializeSeed<'de> + Clone,
+{
+    check_depth(bytes)?;
+    // The codec's entry point for a type runs three checks its deserializer
+    // does not run on its own: the value is followed by nothing but
+    // whitespace, which `end` checks, and the whole input is UTF-8 - also the
+    // bytes of a string a skipped value held, which no string read ever
+    // looks at. That last check is not reachable from outside the codec, so
+    // it is made here, before the parse.
+    let decoded = std::str::from_utf8(bytes).ok().and_then(|_| {
+        let mut deserializer = sonic_rs::Deserializer::from_slice(bytes);
+        let value = seed.clone().deserialize(&mut deserializer).ok()?;
+        deserializer.end().ok().map(|()| value)
+    });
+    decoded.ok_or_else(|| describe_failure(bytes, seed))
 }
 
 /// Re-runs a failed decode with path tracking and turns the result into a
 /// [`DecodeError`] that carries no part of the input.
-fn describe_failure<'de, T>(bytes: &'de [u8]) -> DecodeError
+fn describe_failure<'de, S>(bytes: &'de [u8], seed: S) -> DecodeError
 where
-    T: Deserialize<'de>,
+    S: DeserializeSeed<'de>,
 {
     let mut deserializer = sonic_rs::Deserializer::from_slice(bytes);
-    let tracked = match serde_path_to_error::deserialize::<_, T>(&mut deserializer) {
-        Err(tracked) => tracked,
+    let mut track = serde_path_to_error::Track::new();
+    let failure = seed
+        .deserialize(serde_path_to_error::Deserializer::new(&mut deserializer, &mut track))
+        .err();
+    let Some(inner) = failure else {
         // The tracked pass reads one value and stops there; unlike the first
         // pass it never looks at what follows it. So a document with anything
         // but whitespace after its value parses here and failed there, and
         // asking the deserializer to finish is the only way to get the
         // position of the byte the first pass tripped on.
-        Ok(_) => {
-            return match deserializer.end() {
-                Err(trailing) => DecodeError {
-                    detail: Detail::Syntax { line: trailing.line(), column: trailing.column() },
-                },
-                // Both passes read the same bytes with the same type and
-                // disagreed on whether they parse at all. Nothing about the
-                // input can be reported beyond that disagreement.
-                Ok(()) => DecodeError { detail: Detail::Opaque },
-            };
-        }
+        return match deserializer.end() {
+            Err(trailing) => DecodeError {
+                detail: Detail::Syntax { line: trailing.line(), column: trailing.column() },
+            },
+            // Both passes read the same bytes with the same type and
+            // disagreed on whether they parse at all. Nothing about the
+            // input can be reported beyond that disagreement.
+            Ok(()) => DecodeError { detail: Detail::Opaque },
+        };
     };
+    let path = track.path();
 
-    let inner = tracked.inner();
     let line = inner.line();
     let column = inner.column();
     let category = inner.classify();
@@ -407,7 +443,7 @@ where
     // it comes from the target type, so appending it is safe and gives a
     // missing and a wrongly typed field the same shape of path.
     let message = inner.to_string();
-    let path = render_path(tracked.path(), missing_field_name(&message));
+    let path = render_path(&path, missing_field_name(&message));
 
     DecodeError { detail: Detail::Data { path: path.into_boxed_str(), line, column } }
 }

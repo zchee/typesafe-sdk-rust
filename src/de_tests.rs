@@ -799,22 +799,61 @@ fn a_question_count_larger_than_the_body_can_answer_reserves_nothing_more() {
     );
 }
 
-#[test]
-fn the_question_count_is_scoped_to_one_decode() {
-    assert_eq!(EXPECTED_ANSWERS.get(), 0);
+/// An answer set that keeps nothing but the context it was handed, and runs a
+/// whole decode of its own while it reads - as a set that decoded a nested
+/// document might - keeping the capacity that decode sized `Answers` to.
+#[derive(Debug, PartialEq)]
+struct ContextProbe {
+    expected: usize,
+    nested: usize,
+}
+
+impl AnswerSet for ContextProbe {
+    fn deserialize_answers<'de, D>(
+        deserializer: D,
+        context: AnswerContext,
+    ) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
     {
-        let _outer = ExpectedAnswers::enter(7);
-        {
-            let _inner = ExpectedAnswers::enter(3);
-            assert_eq!(EXPECTED_ANSWERS.get(), 3);
-        }
-        assert_eq!(EXPECTED_ANSWERS.get(), 7);
-        decode(RESULT);
-        assert_eq!(EXPECTED_ANSWERS.get(), 7, "a decode puts the enclosing count back");
+        deserializer.deserialize_any(IgnoredAny)?;
+        let nested = decode_as::<Answers>(br#"{"model":"m","usage":{},"answers":{}}"#, 1)
+            .map_or(usize::MAX, |response| response.answers().capacity());
+        Ok(Self { expected: context.expected_answers(), nested })
     }
-    assert_eq!(EXPECTED_ANSWERS.get(), 0);
-    assert!(rejection::<Answers>(b"{}").field_path() == "model");
-    assert_eq!(EXPECTED_ANSWERS.get(), 0, "a failed decode puts it back too");
+}
+
+#[test]
+fn the_question_count_reaches_the_answer_set_as_an_argument_of_its_own_decode() {
+    // `min(questions, body / 27)`: the fixture is long enough for 13.
+    let most = RESULT.len() / MIN_KEPT_ANSWER_BYTES;
+    for (questions, expected) in [(0, 0), (2, 2), (3, 3), (usize::MAX, most)] {
+        let response = decode_as::<ContextProbe>(RESULT, questions)
+            .unwrap_or_else(|error| panic!("{questions} questions asked: {error}"));
+        // A decode run while this one is reading sees its own count, and
+        // leaves this one's alone: the count is not state of the thread.
+        assert_eq!(
+            *response.answers(),
+            ContextProbe { expected, nested: 1 },
+            "{questions} questions asked"
+        );
+    }
+}
+
+#[test]
+fn the_question_count_reaches_the_failure_pass_too() {
+    // The failing decode is run a second time to find the path; that pass
+    // gets the same count, so `Answers` is sized the same way and the error
+    // is the one the first pass hit.
+    let body = br#"{"model":"m","usage":{},"answers":{"spam":{"type":"noul"}}}"#;
+    for questions in [0, 1, 3, usize::MAX] {
+        let failure = decode_as::<Answers>(body, questions).expect_err("no `noul`");
+        assert_eq!(
+            failure.to_string(),
+            "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at 'answers.spam.noul'. (request_id=req-123)",
+            "{questions} questions asked"
+        );
+    }
 }
 
 // ---------------------------------------------------- typed answer sets
@@ -955,9 +994,31 @@ fn a_struct_answer_set_reports_a_missing_or_mistyped_answer_by_name() {
         "answers.spam.noul",
         "a typed answer knows its kind before `type` arrives, so nothing is held"
     );
+}
 
+/// A response with no `answers` member at all: the member is what is
+/// missing, for a set of any shape, and a set that can be empty is.
+#[test]
+fn a_response_without_answers_is_empty_for_a_map_and_missing_answers_for_a_struct() {
     let without_answers = br#"{"model":"m","usage":{}}"#;
-    assert_eq!(rejection::<Ticket>(without_answers).field_path(), "spam");
+
+    let map = decode_as::<Answers>(without_answers, 3).expect("`Answers` can be empty");
+    assert!(map.answers().is_empty(), "{:?}", map.answers());
+    assert_eq!(map.model(), "m");
+
+    let failure = rejection::<Ticket>(without_answers);
+    assert_eq!(failure.field_path(), "answers");
+    assert_eq!(failure.message(), "Invalid response data at 'answers'.");
+    assert_eq!(
+        failure.to_string(),
+        "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at 'answers'. (request_id=req-123)"
+    );
+    assert_eq!(failure.decode_error().kind(), codec::DecodeErrorKind::Data);
+
+    // `answers` placed anywhere, or `null`, is not the missing case.
+    let late = br#"{"model":"m","usage":{},"answers":null}"#;
+    assert_eq!(rejection::<Ticket>(late).field_path(), "answers");
+    assert_eq!(rejection::<Answers>(late).field_path(), "answers");
 }
 
 /// Every clause of the `AnswerSet` contract, held against the struct set.

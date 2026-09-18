@@ -21,7 +21,7 @@
 //! into: [`Answers`] reads them into a lookup by name, and a question set
 //! declared as a struct reads each answer straight into its field.
 
-use std::{borrow::Cow, cell::Cell, fmt, marker::PhantomData};
+use std::{borrow::Cow, fmt, marker::PhantomData};
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri};
@@ -92,8 +92,10 @@ impl AnswerContext {
 ///   `answers`.
 /// * **Order.** The members of that object may arrive in any order, and inside
 ///   one answer `type` may arrive after the members it governs. What a
-///   successful decode yields does not depend on either order; which path a
-///   failure names can, as the next two rules say.
+///   successful decode yields does not depend on either order, except which of
+///   two answers with one name is kept: the first in wire order, as the
+///   repeated-answer rule says. Which path a failure names can depend on
+///   order, as the next two rules say.
 /// * **Wrong kind.** An answer whose `type` is not the kind the field holds -
 ///   including an answer that is not an object at all, or has no `type` - is
 ///   an error at `answers.<field>.type` whenever `type` comes before the
@@ -121,9 +123,11 @@ impl AnswerContext {
 ///   wrong shape is still an error there. A body both accept gives both the
 ///   same answer.
 /// * **Missing answer.** A field with no answer is an error at
-///   `answers.<field>`. The one exception is a response with no `answers`
-///   member at all: the method is then called with an empty object from
-///   outside that member, so the error is at `<field>`.
+///   `answers.<field>`. A response with no `answers` member at all is an
+///   error at `answers` for every set that cannot be empty: the method is
+///   then called with an empty object, and whatever it fails with is reported
+///   as the missing member. A set that can be empty, as [`Answers`] can,
+///   decodes to its empty value.
 /// * **Extra answers.** An answer the type has no field for is skipped unread,
 ///   whatever its kind or shape, and is never an error. It stays in the raw
 ///   body. [`Answers`] keeps every answer of a kind this version models and
@@ -247,8 +251,9 @@ pub trait AnswerSet: Sized {
     /// Reads the `answers` object of a response.
     ///
     /// When a response carries no `answers` member at all, this is called with
-    /// a deserializer of an empty object, so an implementation reports its
-    /// required answers as missing in the usual way.
+    /// a deserializer of an empty object. An implementation that holds
+    /// required answers fails there in the usual way, and the decoder reports
+    /// that failure as the missing `answers` member.
     ///
     /// # Errors
     ///
@@ -1159,34 +1164,6 @@ impl<'de> Visitor<'de> for UsageVisitor {
     }
 }
 
-thread_local! {
-    /// The question count of the decode running on this thread.
-    ///
-    /// The codec decodes through `Deserialize` alone - there is no way to hand
-    /// it a seed - and it decodes twice on failure, the second time to find
-    /// the field path. A value set around the call reaches both passes, which
-    /// a seed would not.
-    static EXPECTED_ANSWERS: Cell<usize> = const { Cell::new(0) };
-}
-
-/// Sets this thread's expected answer count for as long as it lives, and puts
-/// the previous one back afterwards.
-struct ExpectedAnswers {
-    previous: usize,
-}
-
-impl ExpectedAnswers {
-    fn enter(count: usize) -> Self {
-        Self { previous: EXPECTED_ANSWERS.replace(count) }
-    }
-}
-
-impl Drop for ExpectedAnswers {
-    fn drop(&mut self) {
-        EXPECTED_ANSWERS.set(self.previous);
-    }
-}
-
 /// The top level of a System One response.
 struct Envelope<A> {
     model: String,
@@ -1194,16 +1171,39 @@ struct Envelope<A> {
     answers: A,
 }
 
-impl<'de, A> Deserialize<'de> for Envelope<A>
+/// Reads a System One response, handing the answer set what the decoder knows
+/// about the answers before it reads them.
+///
+/// A seed rather than a `Deserialize` implementation, because the context is
+/// per call - the number of questions this request asked - and
+/// `Deserialize` has nowhere to receive it.
+struct EnvelopeSeed<A> {
+    context: AnswerContext,
+    answers: PhantomData<fn() -> A>,
+}
+
+// Written out rather than derived: a derive would ask for `A: Clone` and
+// `A: Copy`, and the seed holds no `A` to copy.
+impl<A> Clone for EnvelopeSeed<A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<A> Copy for EnvelopeSeed<A> {}
+
+impl<'de, A> DeserializeSeed<'de> for EnvelopeSeed<A>
 where
     A: AnswerSet,
 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    type Value = Envelope<A>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Envelope<A>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let context = AnswerContext::new(EXPECTED_ANSWERS.get());
-        deserializer.deserialize_map(EnvelopeVisitor { context, answers: PhantomData })
+        deserializer
+            .deserialize_map(EnvelopeVisitor { context: self.context, answers: PhantomData })
     }
 }
 
@@ -1250,12 +1250,17 @@ where
         let usage = usage.ok_or_else(|| de::Error::missing_field("usage"))?;
         let answers = match answers {
             Some(answers) => answers,
-            // The API always sends `answers`; without it, the answer set
-            // decides whether "no answers" is a valid value for it.
+            // The API always sends `answers`. Without it, the answer set
+            // decides whether "no answers" is a value it can hold: `Answers`
+            // is then empty, as the Python SDK's default makes it. A set that
+            // requires answers fails, and it fails at `answers` - whatever
+            // the set would have named, the member that is not there is the
+            // one to report, and a set of any shape reports the same path.
             None => A::deserialize_answers(
-                de::value::MapDeserializer::new(std::iter::empty::<(&str, &str)>()),
+                de::value::MapDeserializer::<_, M::Error>::new(std::iter::empty::<(&str, &str)>()),
                 self.context,
-            )?,
+            )
+            .map_err(|_| de::Error::missing_field("answers"))?,
         };
         Ok(Envelope { model, usage, answers })
     }
@@ -1321,12 +1326,10 @@ pub(crate) fn decode_system_one<A>(
 where
     A: AnswerSet,
 {
-    let expected = questions.min(body.len() / MIN_KEPT_ANSWER_BYTES);
+    let context = AnswerContext::new(questions.min(body.len() / MIN_KEPT_ANSWER_BYTES));
     let meta = ResponseMeta::new(status, headers, body);
-    let decoded = {
-        let _expected = ExpectedAnswers::enter(expected);
-        codec::decode::<Envelope<A>>(meta.raw_body())
-    };
+    let decoded =
+        codec::decode_seed(meta.raw_body(), EnvelopeSeed::<A> { context, answers: PhantomData });
     match decoded {
         Ok(Envelope { model, usage, answers }) => {
             Ok(SystemOneResponse::from_parts(model, usage, answers, meta))
