@@ -1,0 +1,59 @@
+# Spikes S2a (TLS, ALPN and extra roots), S2b (cold fan-out connection count)
+# and S4 (the server's HTTP/2 SETTINGS). Outside the workspace, so the
+# `[workspace]` table below stops cargo's upward walk.
+#
+# `h2` is a spike-only dependency and must NOT enter the workspace: it is
+# already in the graph transitively through hyper, and S4 needs it directly to
+# read the settings hyper does not surface.
+[workspace]
+
+[package]
+name = "transport-probe"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+bytes = "1.12.1"
+h2 = "0.4.19"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["client", "http1", "http2"] }
+hyper-rustls = { version = "0.27.9", default-features = false, features = [
+    "http1",
+    "http2",
+    "tls12",
+    "aws-lc-rs",
+] }
+hyper-util = { version = "0.1.20", features = [
+    "client-legacy",
+    "http1",
+    "http2",
+    "tokio",
+] }
+rustls = "0.23.45"
+rustls-platform-verifier = "0.7.0"
+# The package is `typesafe-sdk-rust-test-support`; its `[lib] name` is
+# `test_support`, which is how the code below refers to it.
+typesafe-sdk-rust-test-support = { path = "../../crates/test-support" }
+tokio = { version = "1.53.1", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "time",
+] }
+tower-service = "0.3.3"
+tokio-rustls = { version = "0.26.5", default-features = false, features = [
+    "aws_lc_rs",
+    "logging",
+    "tls12",
+] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"

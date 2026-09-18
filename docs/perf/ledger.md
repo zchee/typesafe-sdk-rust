@@ -14,7 +14,7 @@ answer. Results that contradict the plan are marked **Contradicts the plan** and
 | RUSTFLAGS | **cleared** on every invocation (`env -u RUSTFLAGS`); the login shell exports nightly-only `-Z` options and `-C target-cpu=apple-m3`, neither of which may influence a measurement |
 | cargo config | `--config ~/.config/rust/config.dev.toml`, which only redirects `build.target-dir`; no profile overrides |
 | Date | 2026-09-19 |
-| Crates measured | sonic-rs 0.5.10, serde_json 1.0.151 (`float_roundtrip`), serde_path_to_error 0.1.20, dhat 0.3.3, bytes 1.12.1, json-escape-simd 3.1.2, divan 0.1.21 |
+| Crates measured | sonic-rs 0.5.10, serde_json 1.0.151 (`float_roundtrip`), serde_path_to_error 0.1.20, dhat 0.3.3, bytes 1.12.1, json-escape-simd 3.1.2, divan 0.1.21, hyper 1.11.1, hyper-util 0.1.20, hyper-rustls 0.27.9, rustls 0.23.45, rustls-platform-verifier 0.7.0, tokio-rustls 0.26.5, h2 0.4.19 |
 
 Measurement rules followed: no benchmark ran in parallel with another benchmark or with a build; no `RUSTFLAGS` and no
 `target-cpu`; allocation numbers are taken on the **second identical call**, after one warm-up call of the same shape;
@@ -23,11 +23,12 @@ every dhat scenario is its own process, because dhat attributes the whole proces
 Reproduce everything from the repository root:
 
 ```sh
-cd spikes/sonic-probe   && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
-cd spikes/encode-buffer && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
+cd spikes/sonic-probe     && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
+cd spikes/encode-buffer   && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
+cd spikes/transport-probe && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
 ```
 
-Both binaries land in the shared target directory that `config.dev.toml` names; the commands below write it as
+The binaries land in the shared target directory that `config.dev.toml` names; the commands below write it as
 `$TARGET/release/<name>`.
 
 ---
@@ -487,3 +488,133 @@ and it is a cheaper experiment than either variant here.
 **No variant failed the bounds for reasons that implicate D2.** sonic-rs' 6x reservation is fully absorbed by a
 retained scratch plus an exact copy, so the escalation clause of AC-P1 ("if no sonic-rs based variant meets these
 bounds, execution STOPS") is not triggered.
+
+---
+
+## S2a - TLS, ALPN and extra roots
+
+Binary: `spikes/transport-probe`. The live endpoint is contacted **without an API key**; 403 is the expected answer and
+no credential is read, set or sent anywhere in this crate.
+
+```sh
+cd spikes/transport-probe && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
+$TARGET/release/transport-probe s2a
+```
+
+The client is built the way the SDK will build it: hyper-util legacy `Client` over a hyper-rustls connector
+(`default-features = false`, features `http1`, `http2`, `tls12`, `aws-lc-rs`) with a `rustls::ClientConfig` of this
+crate's own, `builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))`, the platform verifier,
+and `alpn_protocols` left **empty**.
+
+| # | Case | Result |
+| --- | --- | --- |
+| 1 | `GET https://api.typesafe.ai/v1/models`, no `Authorization`, plain platform verifier | status **403**, version **HTTP/2.0** |
+| 3 | loopback TLS TestServer, **no** extra root | handshake refused: `invalid peer certificate: Other(OtherError("“rcgen self signed cert” certificate is not trusted: -67843"))`; the server accepted the TCP connection (+1) and the client dropped it |
+| 2 | loopback TLS TestServer, extra root = the server's certificate | status **200**, version **HTTP/2.0**, 1 connection |
+| 2 | the SAME extra-roots config against the live API | status **403**, version **HTTP/2.0** |
+
+Response headers of the unauthenticated live call, verbatim:
+
+```
+content-length: 118
+content-type: application/json
+date: Fri, 18 Sep 2026 19:06:33 GMT
+server: istio-envoy
+x-envoy-upstream-service-time: 7
+x-typesafe-request-id: req_01a0b5e9ce0b7e9394746c6818917706
+```
+
+Body: `{"detail":{"error_type":"authentication_error","message":"Must supply an API key! Check your request and try again."}}`
+
+**Decision:** the configuration works. ALPN negotiates h2 against both the live API and the loopback server;
+`Verifier::new_with_extra_roots` ADDS to the operating system store rather than replacing it, which is what
+`ClientBuilder::add_root_certificate` needs; and a client that has not added the root is refused, so the negative case
+is a real check and not a silent pass.
+
+**Stated explicitly: this proves `add_root_certificate` on macOS only. Linux and Windows remain unproven until CI can
+run them**, and rustls-platform-verifier takes a different code path on each (`src/verification/apple.rs`,
+`.../linux.rs`, `.../windows.rs`). The Phase 0 exit gate says "CI green on 3 OSes"; push is not authorized in this run,
+so that part of the gate cannot be closed here.
+
+Two facts worth carrying into Phase 2: the request-id header is spelled **`x-typesafe-request-id`**, and the 403 body
+matches AC-F4's expected `error_type` and message exactly, so that criterion is confirmed against the live server
+rather than against the documentation.
+
+## S2b - cold fan-out connection count
+
+```sh
+$TARGET/release/transport-probe s2b
+```
+
+64 concurrent `GET` requests against the HTTP/2 + TLS TestServer, 10 repetitions, each repetition on a **brand-new**
+client. The base URL is an IP literal, so no second socket is raced across resolved addresses. Connections are counted
+twice independently: by the server at accept time, and inside the client by a connector wrapper whose counter goes up
+when a stream is produced and down when it is dropped. The two counts agree in every row.
+
+| Case | warm | min | median | max | client opened | live 1 s later |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| A: `Auto` (`enable_http1().enable_http2()`, pool default) | no | **64** | **64** | **64** | 64 | 1 |
+| A: `Auto` | yes | 0 | 0 | 0 | 1 | 1 |
+| B: `http2_only(true)`, ALPN h2 only | no | **1** | **1** | **1** | 1 | 1 |
+| B: `http2_only(true)` | yes | 0 | 0 | 0 | 1 | 1 |
+
+min/median/max are the connections the server accepted for the 64-way fan-out itself; "warm = yes" means one request
+completed first, and then the 64 opened **zero** new connections in both modes. 2,580 requests were served in total
+across the four cases.
+
+**Decision (plan section 5, S2b rule: "if `http2_only` yields 1 and `Auto` yields > 1, the default for `https` base
+URLs is `Http2Only`, with `Auto` as the documented knob"): the rule fires exactly. `Http2Only` is the default for
+`https` base URLs; `Auto` is the documented knob for HTTP/1.1-only proxies; `http://` base URLs always use `Auto`.**
+
+Two details for Phase 2. Under `Auto` the pool does collapse to a single connection afterwards - 64 opened, 1 alive a
+second later - so the cost is 64 TLS handshakes on the cold path, not 64 connections held. And AC-P4(c) is already
+visible here: after one warm-up request, 64 concurrent calls open zero new connections under either mode, which is why
+`warm_up()` is worth documenting before a fan-out even once `Http2Only` is the default.
+
+## S4 - the server's HTTP/2 SETTINGS
+
+```sh
+$TARGET/release/transport-probe s4
+```
+
+Read twice from `api.typesafe.ai:443`, with no credential. First by writing the HTTP/2 preface by hand and decoding the
+server's first SETTINGS frame off the TLS stream, which gives every parameter; then through the `h2` crate, which is
+what hyper's HTTP/2 client uses underneath.
+
+ALPN negotiated `h2` on both connections.
+
+| Parameter | Value |
+| --- | ---: |
+| `SETTINGS_HEADER_TABLE_SIZE` | 4,096 |
+| `SETTINGS_ENABLE_CONNECT_PROTOCOL` | 0 |
+| `SETTINGS_MAX_CONCURRENT_STREAMS` | **1,024** |
+| `SETTINGS_INITIAL_WINDOW_SIZE` | **16,777,216** (16 MiB) |
+| `SETTINGS_MAX_FRAME_SIZE` | not sent, so the protocol default 16,384 applies |
+| `SETTINGS_MAX_HEADER_LIST_SIZE` | not sent, so unlimited |
+
+Immediately after its SETTINGS the server sent a connection-level `WINDOW_UPDATE` on stream 0 of **+25,100,289**, which
+takes the connection send window to 25,165,824 bytes (24 MiB) from the protocol default of 65,535.
+
+Through `h2`:
+
+| Reading | Value |
+| --- | ---: |
+| `Connection::max_concurrent_send_streams()` | 1,024 |
+| first `poll_capacity` grant on a fresh stream, after `reserve_capacity(16 MiB)` | **409,600** |
+| `SendStream::capacity()` after that grant | 409,600 |
+
+**Decision (plan section 5, S4 rule): neither branch of the rule fires, and nothing changes client-side.**
+`SETTINGS_INITIAL_WINDOW_SIZE` is 16 MiB, far above the 1 MiB threshold, so there is no upload ceiling to document -
+and it is the server's receive window in any case, which a client must not try to raise.
+`SETTINGS_MAX_CONCURRENT_STREAMS` is 1,024, far above 100, so there is no fan-out limit to document either: the SDK's
+own concurrency will be the binding constraint long before the server's.
+
+One finding that is not in the plan's rule and matters for a large `state`: the 409,600-byte first grant is **not** the
+server's window. It is `h2`'s own client-side send buffer cap, `proto::DEFAULT_MAX_SEND_BUFFER_SIZE = 1024 * 400`
+(h2 0.4.19 `src/proto/mod.rs:47`), settable through `h2::client::Builder::max_send_buffer_size`. A multi-megabyte body
+is therefore written in 400 KiB instalments as capacity is released, regardless of the 16 MiB the server advertises.
+That is correct behaviour and needs no change, but it is the number to look at if a large upload is ever found to be
+slower than the link allows - not the server's window.
+
+**Keep-alive behaviour is NOT measured here.** Whether the load balancer counts an HTTP/2 PING as activity needs an
+authenticated idle test (plan section 8 step 13), which is out of scope for this task.
