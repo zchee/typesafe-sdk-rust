@@ -1405,6 +1405,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "dhat",
+ "http",
+ "httpdate",
  "proptest",
  "serde",
  "serde_json",

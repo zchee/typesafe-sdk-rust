@@ -24,6 +24,7 @@
 
 mod codec;
 pub mod content;
+pub mod error;
 
 #[cfg(feature = "internals")]
 #[doc(hidden)]
@@ -32,4 +33,5 @@ pub mod __internals;
 pub use crate::{
     codec::{DecodeError, DecodeErrorKind, EncodeError, RawJson},
     content::{Content, ContentError},
+    error::{ApiError, ApiErrorKind, Error, ErrorKind, ResponseValidationError},
 };

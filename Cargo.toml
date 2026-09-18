@@ -113,6 +113,10 @@ internals = []
 
 [dependencies]
 bytes = { workspace = true }
+http = { workspace = true }
+# Used only to read `Retry-After` when a server answers it with an HTTP date
+# rather than a count of seconds.
+httpdate = { workspace = true }
 serde = { workspace = true }
 # A normal dependency rather than a dev one: the decode failure path uses it to
 # turn a position into a field path, and that path is part of the errors the
