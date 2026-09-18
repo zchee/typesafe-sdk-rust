@@ -191,10 +191,13 @@ is what `cargo test`, `cargo nextest` and `cargo fuzz` produce - the skip path c
 survives only **24 levels on a default 2 MiB tokio worker thread**. A fuzz target seeded with a 100,000-deep array, as
 plan section 7 R12 prescribes, will abort immediately in a debug build; so will any test that decodes a document more
 than ~24 deep on a worker thread. The depth cap has to be low enough to be enforced before sonic sees the bytes in
-every profile, and the alloc/fuzz harnesses need either a release profile or an explicit larger stack. Suggested cap:
-128, matching serde_json's own limit, enforced by the pre-scan; it is 5x below the dev-profile 8 MiB main-thread
-ceiling of 97 and far below every release ceiling, but note that 128 still exceeds the dev-profile 2 MiB worker
-ceiling of 24, so the pre-scan is what protects that case, not the cap value.
+every profile, and the alloc/fuzz harnesses need either a release profile or an explicit larger stack.
+
+**Cap decided: `MAX_JSON_DEPTH = 16`**, enforced by the pre-scan in `codec.rs`. 16 sits below the lowest ceiling in the
+tables above - the 24 levels an unoptimized skip path survives on a 2 MiB tokio worker - so the depth the SDK accepts is
+itself within reach of every profile, and the pre-scan's position ahead of sonic-rs is a second line of defence rather
+than the only one. serde_json's limit of 128 was the obvious value to borrow and is rejected for that reason: it exceeds
+the 24-level ceiling, so a body between 25 and 128 deep would pass the cap and still abort a dev-profile worker.
 
 ### S1(e) appending into a non-empty `Vec<u8>`
 
