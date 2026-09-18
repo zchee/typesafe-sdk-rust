@@ -1,14 +1,23 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Async Rust SDK for the [TypeSafe AI](https://typesafe.ai) API.
+//!
+//! The crate is published as `typesafe-sdk-rust` because `typesafe-sdk` is
+//! already taken on crates.io; the library it builds is `typesafe_sdk`, so
+//! callers write `use typesafe_sdk::...`.
+//!
+//! # Runtime requirements
+//!
+//! Every network operation is `async` and expects a [Tokio] runtime whose
+//! **time driver is enabled** (`#[tokio::main]`, or a `Builder` with
+//! `enable_time()` / `enable_all()`). Per-attempt deadlines and HTTP/2
+//! keep-alive both arm timers, and Tokio panics when a timer is created on a
+//! runtime without that driver.
+//!
+//! # Safety
+//!
+//! The crate is `#![forbid(unsafe_code)]`. Dependencies that use `unsafe`
+//! internally are confined to single modules so that swapping one out is a
+//! local change.
+//!
+//! [Tokio]: https://docs.rs/tokio
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+#![forbid(unsafe_code)]
