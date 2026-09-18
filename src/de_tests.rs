@@ -776,6 +776,49 @@ fn a_struct_answer_set_reports_a_missing_or_mistyped_answer_by_name() {
     assert_eq!(rejection::<Ticket>(without_answers).field_path(), "spam");
 }
 
+/// Every clause of the `AnswerSet` contract, held against the struct set.
+#[test]
+fn a_struct_answer_set_keeps_the_answer_set_contract() {
+    let result = result_answers();
+    let open = result.strip_suffix('}').expect("the answers object closes");
+
+    // Extra answers are skipped unread, whatever their kind or shape.
+    let extras = format!(
+        r#"{open},"extra":[1,2],"stranger":{{"type":"noul","noul":"not a number"}},"odd":{{"type":"future","legend":7}}}}"#
+    );
+    let typed =
+        decode_as::<Ticket>(around(&extras).as_bytes(), 3).expect("extra answers are skipped");
+    assert_eq!(
+        typed.answers(),
+        decode_as::<Ticket>(RESULT, 3).expect("the fixture decodes").answers()
+    );
+
+    // Answers in another order, and `type` after the data inside each one.
+    let shuffled = around(
+        r#"{"quality":{"legend":{"2":"great","0":"bad","1":"ok"},"probabilities":{"2":0.8,"0":0.1,"1":0.1},"confidence":0.8,"score":1.7,"type":"score"},"tone":{"probabilities":{"friendly":0.9,"hostile":0.1},"confidence":0.9,"choice":"friendly","type":"choice"},"spam":{"noul":0.98,"type":"noul"}}"#,
+    );
+    let reordered = decode_as::<Ticket>(shuffled.as_bytes(), 3).expect("any order decodes");
+    assert_eq!(reordered.answers(), typed.answers());
+
+    // Wrong kind, named after the data; a wrong shape names the member.
+    let rows = [
+        (r#"{"noul":0.5,"type":"choice"}"#, "answers.spam.type"),
+        (r#""spam""#, "answers.spam.type"),
+        (r#"{"type":"noul","noul":[]}"#, "answers.spam.noul"),
+    ];
+    for (spam, path) in rows {
+        let (_, rest) = open.split_once(r#""tone":"#).expect("the fixture has a tone answer");
+        let text = around(&format!(r#"{{"spam":{spam},"tone":{rest}}}"#));
+        assert_eq!(rejection::<Ticket>(text.as_bytes()).field_path(), path, "body {text}");
+    }
+
+    // The input is one object.
+    for answers in ["[]", "null", r#""answers""#] {
+        let text = around(answers);
+        assert_eq!(rejection::<Ticket>(text.as_bytes()).field_path(), "answers", "body {text}");
+    }
+}
+
 // ------------------------------------------------ standalone deserializing
 
 #[test]

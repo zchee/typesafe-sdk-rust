@@ -74,6 +74,45 @@ impl AnswerContext {
 /// [`ChoiceAnswer`] or [`ScoreAnswer`], whose `Deserialize` implementations
 /// are the same single-pass readers [`Answers`] uses, fixed to one kind.
 ///
+/// # Contract
+///
+/// Every implementation, written by hand or generated, keeps these rules;
+/// [`Answers`] and the struct example below keep them, and the tests of this
+/// module hold both to them.
+///
+/// * **Input.** The deserializer yields exactly one JSON object, keyed by
+///   question name. Anything else (an array, a string, `null`) is an error at
+///   `answers`.
+/// * **Order.** The members of that object may arrive in any order, and inside
+///   one answer `type` may arrive after the members it governs. An
+///   implementation must not depend on either order.
+/// * **Wrong kind.** An answer whose `type` is not the kind the field holds -
+///   including an answer that is not an object at all, or has no `type` - is
+///   an error at `answers.<field>.type`. A member of the right kind with the
+///   wrong shape is an error at `answers.<field>.<member>`.
+/// * **Missing answer.** A field with no answer is an error at
+///   `answers.<field>`. The one exception is a response with no `answers`
+///   member at all: the method is then called with an empty object from
+///   outside that member, so the error is at `<field>`.
+/// * **Extra answers.** An answer the type has no field for is skipped unread,
+///   whatever its kind or shape, and is never an error. It stays in the raw
+///   body. [`Answers`] keeps every answer of a kind this version models and
+///   skips the others the same way.
+/// * **Allocation.** Nothing is allocated beyond the storage of the fields
+///   themselves: keys are matched where they lie, never copied into a
+///   `String`, and no intermediate map or value tree is built.
+///
+/// A type that does not implement the trait is refused where a response of it
+/// is asked for:
+///
+/// ```compile_fail,E0277
+/// use typesafe_sdk::de::AnswerSet;
+///
+/// fn decode_into<A: AnswerSet>() {}
+///
+/// decode_into::<String>();
+/// ```
+///
 /// An implementation for a struct of three answers looks like this. The key
 /// is matched by a field identifier whose visitor only compares the text, so
 /// a key written with escapes works and no key is copied:
@@ -161,6 +200,12 @@ impl AnswerContext {
 ///     }
 /// }
 /// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be decoded as the answers of a response",
+    label = "not a set of answers",
+    note = "use `Answers` to look answers up by question name, or implement `AnswerSet` for a \
+            struct with one field per question (a later release derives it)"
+)]
 pub trait AnswerSet: Sized {
     /// Reads the `answers` object of a response.
     ///
