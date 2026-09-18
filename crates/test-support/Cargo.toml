@@ -1,0 +1,37 @@
+# Test infrastructure for the workspace: a real HTTP server on loopback.
+# `publish = false` because it must never reach crates.io, and it deliberately
+# does NOT depend on the main crate: a cycle there would give the main crate's
+# own unit tests two copies of `typesafe_sdk` whose types do not unify.
+[package]
+name = "typesafe-sdk-rust-test-support"
+version = "0.1.0"
+description = "Loopback HTTP/1.1, h2c and HTTP/2-over-TLS server used by the typesafe-sdk-rust tests"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "test_support"
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["server"] }
+hyper-util = { workspace = true, features = ["server"] }
+rcgen.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+# `macros` is a real dependency of the library, not only of its tests: the
+# accept and connection loops use `tokio::select!`.
+tokio = { workspace = true, features = ["io-util", "macros", "net", "sync"] }
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+hyper-rustls.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true
