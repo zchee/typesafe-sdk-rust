@@ -23,9 +23,13 @@
 #![forbid(unsafe_code)]
 
 mod codec;
+pub mod content;
 
 #[cfg(feature = "internals")]
 #[doc(hidden)]
 pub mod __internals;
 
-pub use crate::codec::{DecodeError, DecodeErrorKind, EncodeError, RawJson};
+pub use crate::{
+    codec::{DecodeError, DecodeErrorKind, EncodeError, RawJson},
+    content::{Content, ContentError},
+};
