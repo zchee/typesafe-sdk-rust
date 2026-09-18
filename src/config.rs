@@ -9,7 +9,7 @@
 //!
 //! An explicit setting wins over the environment, an environment value is
 //! trimmed, a blank one counts as unset, a trailing slash comes off the base
-//! URL, and a deadline must be finite and above zero.
+//! URL, and a deadline must be above zero when there is one.
 
 // Nothing builds a client yet, so nothing outside the tests resolves a
 // configuration. `expect` rather than `allow`, so the attribute turns into a
@@ -23,18 +23,18 @@
     )
 )]
 
-use std::{fmt, time::Duration};
+use std::{ffi::OsString, fmt, time::Duration};
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Uri, uri::PathAndQuery};
+use http::{HeaderMap, HeaderValue, Method, Uri, uri::PathAndQuery};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     constants::{
-        API_KEY_ENV, BASE_URL_ENV, DEFAULT_BASE_URL, DEFAULT_MODEL, DEFAULT_MODEL_ENV,
-        DEFAULT_TIMEOUT, MODELS_PATH, SYSTEM_ONE_PATH,
+        API_KEY_ENV, BASE_URL_ENV, DEFAULT_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MODEL,
+        DEFAULT_MODEL_ENV, DEFAULT_TIMEOUT, MODELS_PATH, SYSTEM_ONE_PATH,
     },
-    error::Error,
+    error::{Error, format_endpoint},
 };
 
 /// The settings a caller passed explicitly. Anything left unset falls back to
@@ -44,8 +44,10 @@ pub(crate) struct Explicit {
     api_key: Option<SecretString>,
     base_url: Option<String>,
     default_model: Option<String>,
-    timeout: Option<Duration>,
+    /// `None` leaves the default; `Some(None)` asks for no deadline at all.
+    timeout: Option<Option<Duration>>,
     default_headers: HeaderMap,
+    max_response_bytes: Option<usize>,
 }
 
 impl Explicit {
@@ -71,7 +73,19 @@ impl Explicit {
 
     /// The deadline of each attempt.
     pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
+        self.timeout = Some(Some(timeout));
+        self
+    }
+
+    /// No deadline on any attempt.
+    pub(crate) fn no_timeout(mut self) -> Self {
+        self.timeout = Some(None);
+        self
+    }
+
+    /// The largest response body a request reads.
+    pub(crate) fn max_response_bytes(mut self, limit: usize) -> Self {
+        self.max_response_bytes = Some(limit);
         self
     }
 
@@ -90,23 +104,24 @@ impl Explicit {
 /// the default headers.
 pub(crate) struct Config {
     authorization: HeaderValue,
-    base_url: Box<str>,
     endpoints: Endpoints,
     default_model: Box<str>,
-    timeout: Duration,
+    timeout: Option<Duration>,
     default_headers: HeaderMap,
+    max_response_bytes: usize,
 }
 
 impl Config {
     /// Resolves the settings from what the caller passed and what `env` finds.
     ///
     /// `env` looks a variable up by name; the client passes
-    /// `|name| std::env::var(name).ok()`. It is consulted only for settings the
-    /// caller left unset. A value it returns is trimmed, and a blank one counts
-    /// as unset. An explicit value always wins and is taken as given, without
-    /// trimming, as the Python SDK takes it - except that an explicit API key
-    /// or default model that is blank is refused rather than sent, where the
-    /// Python SDK would send it.
+    /// `std::env::var_os`. It is consulted only for settings the caller left
+    /// unset. A value it returns is trimmed, and a blank one counts as unset;
+    /// one that is not UTF-8 is refused, by the name of the variable. An
+    /// explicit value always wins and is taken as given, without trimming, as
+    /// the Python SDK takes it - except that an explicit API key or default
+    /// model that is blank is refused rather than sent, where the Python SDK
+    /// would send it.
     ///
     /// # Errors
     ///
@@ -114,12 +129,23 @@ impl Config {
     /// API key is found, when an explicit API key or default model is blank,
     /// when the key cannot be sent in an HTTP header, when the base URL is not
     /// an absolute `http` or `https` URL without credentials, query or
-    /// fragment, or when the timeout is zero.
-    pub(crate) fn resolve(
+    /// fragment, when the timeout or the response size limit is zero, or when
+    /// a variable `env` reads is not UTF-8.
+    pub(crate) fn resolve<V>(
         explicit: Explicit,
-        env: impl Fn(&str) -> Option<String>,
-    ) -> Result<Self, Error> {
-        let Explicit { api_key, base_url, default_model, timeout, default_headers } = explicit;
+        env: impl Fn(&str) -> Option<V>,
+    ) -> Result<Self, Error>
+    where
+        V: Into<OsString>,
+    {
+        let Explicit {
+            api_key,
+            base_url,
+            default_model,
+            timeout,
+            default_headers,
+            max_response_bytes,
+        } = explicit;
 
         let api_key = match api_key {
             // A blank key can only be a mistake, and sending it would turn a
@@ -133,7 +159,7 @@ impl Config {
                 )));
             }
             Some(key) => key,
-            None => from_env(&env, API_KEY_ENV).map(SecretString::from).ok_or_else(|| {
+            None => from_env(&env, API_KEY_ENV)?.map(SecretString::from).ok_or_else(|| {
                 Error::config(format!(
                     "No API key was provided. \
                      Pass api_key or set the {API_KEY_ENV} environment variable."
@@ -142,9 +168,11 @@ impl Config {
         };
         let authorization = bearer(&api_key)?;
 
-        let mut base_url = base_url
-            .or_else(|| from_env(&env, BASE_URL_ENV))
-            .unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
+        let base_url = match base_url {
+            Some(url) => Some(url),
+            None => from_env(&env, BASE_URL_ENV)?,
+        };
+        let mut base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         base_url.truncate(base_url.trim_end_matches('/').len());
         let endpoints = endpoints(&base_url)?;
 
@@ -157,23 +185,31 @@ impl Config {
                 )));
             }
             Some(model) => model,
-            None => from_env(&env, DEFAULT_MODEL_ENV).unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
+            None => from_env(&env, DEFAULT_MODEL_ENV)?.unwrap_or_else(|| DEFAULT_MODEL.to_owned()),
         };
 
-        let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT);
+        let timeout = timeout.unwrap_or(Some(DEFAULT_TIMEOUT));
         // A `Duration` cannot be negative, NaN or infinite, so zero is the one
-        // unusable deadline left to refuse.
-        if timeout.is_zero() {
-            return Err(Error::config("timeout must be a positive, finite number of seconds."));
+        // unusable deadline left to refuse. No deadline at all is asked for
+        // by name, never by a sentinel value.
+        if timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(Error::config(ZERO_TIMEOUT));
+        }
+
+        let max_response_bytes = max_response_bytes.unwrap_or(DEFAULT_MAX_RESPONSE_BYTES);
+        if max_response_bytes == 0 {
+            return Err(Error::config(
+                "max_response_bytes must be at least 1: every response carries a body.",
+            ));
         }
 
         Ok(Self {
             authorization,
-            base_url: base_url.into_boxed_str(),
             endpoints,
             default_model: default_model.into_boxed_str(),
             timeout,
             default_headers,
+            max_response_bytes,
         })
     }
 
@@ -182,11 +218,6 @@ impl Config {
     /// HTTP/2 header compression tables.
     pub(crate) fn authorization(&self) -> &HeaderValue {
         &self.authorization
-    }
-
-    /// The API root, without trailing slashes.
-    pub(crate) fn base_url(&self) -> &str {
-        &self.base_url
     }
 
     /// The two endpoint URLs, parsed once.
@@ -199,9 +230,14 @@ impl Config {
         &self.default_model
     }
 
-    /// The deadline of each attempt.
-    pub(crate) fn timeout(&self) -> Duration {
+    /// The deadline of each attempt, or `None` for no deadline.
+    pub(crate) fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+
+    /// The largest response body a request reads, in bytes.
+    pub(crate) fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
     }
 
     /// The caller's default headers, as given.
@@ -214,13 +250,17 @@ impl fmt::Debug for Config {
     /// Prints the settings a reader needs to tell two clients apart, and no
     /// value that could be a credential: the `Authorization` value is replaced
     /// by a marker and the default headers are reduced to their names, since a
-    /// caller may pass a token there under any name at all.
+    /// caller may pass a token there under any name at all. The endpoints are
+    /// printed as an error names them, which is the base URL without a default
+    /// port; a base URL can carry no userinfo, query or fragment, but it keeps
+    /// its path, so a credential put into that path would show here.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Config")
-            .field("base_url", &self.base_url)
+            .field("endpoints", &self.endpoints)
             .field("default_model", &self.default_model)
             .field("timeout", &self.timeout)
+            .field("max_response_bytes", &self.max_response_bytes)
             .field("authorization", &Hidden)
             .field("default_headers", &HeaderNames(&self.default_headers))
             .finish()
@@ -247,10 +287,22 @@ impl fmt::Debug for HeaderNames<'_> {
 }
 
 /// The URLs of the two API endpoints under one base URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Endpoints {
     system_one: Uri,
     models: Uri,
+}
+
+impl fmt::Debug for Endpoints {
+    /// `["POST <system one URL>", "GET <models URL>"]`, each as an error names
+    /// the endpoint it failed at.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_list()
+            .entry(&format_endpoint(&Method::POST, &self.system_one))
+            .entry(&format_endpoint(&Method::GET, &self.models))
+            .finish()
+    }
 }
 
 impl Endpoints {
@@ -355,6 +407,9 @@ fn bearer(key: &SecretString) -> Result<HeaderValue, Error> {
     Ok(value)
 }
 
+/// The message a zero deadline is refused with, the Python SDK's wording.
+pub(crate) const ZERO_TIMEOUT: &str = "timeout must be a positive, finite number of seconds.";
+
 /// Whether `c` is whitespace to Python's `str.strip()`, which is what the
 /// Python SDK trims with: Unicode whitespace plus the four ASCII separators
 /// U+001C to U+001F, which Python counts as whitespace and Rust's
@@ -370,13 +425,27 @@ fn is_blank(text: &str) -> bool {
 
 /// The variable `name` as `env` finds it, trimmed as [`is_python_space`]
 /// says, or `None` when it is unset or blank.
-fn from_env(env: &impl Fn(&str) -> Option<String>, name: &str) -> Option<String> {
-    let mut value = env(name)?;
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error naming the
+/// variable when its value is not UTF-8. The value itself is not repeated: it
+/// may be the API key.
+fn from_env<V>(env: &impl Fn(&str) -> Option<V>, name: &str) -> Result<Option<String>, Error>
+where
+    V: Into<OsString>,
+{
+    let Some(value) = env(name) else {
+        return Ok(None);
+    };
+    let mut value = value.into().into_string().map_err(|_| {
+        Error::config(format!("The {name} environment variable is not valid UTF-8."))
+    })?;
     let end = value.trim_end_matches(is_python_space).len();
     value.truncate(end);
     let start = value.len() - value.trim_start_matches(is_python_space).len();
     value.drain(..start);
-    if value.is_empty() { None } else { Some(value) }
+    Ok(if value.is_empty() { None } else { Some(value) })
 }
 
 #[cfg(test)]

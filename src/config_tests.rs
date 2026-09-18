@@ -7,7 +7,7 @@
 //! [`Config::resolve`] its own lookup closure, so no test touches the process
 //! environment and the cases can run in parallel.
 
-use std::{cell::RefCell, error::Error as StdError};
+use std::{cell::RefCell, error::Error as StdError, ffi::OsString};
 
 use http::HeaderName;
 
@@ -70,11 +70,11 @@ fn defaults_apply_when_neither_the_caller_nor_the_environment_sets_anything() {
     let config = with_key(no_env);
 
     assert_eq!(authorization(&config), "Bearer test-key");
-    assert_eq!(config.base_url(), "https://api.typesafe.ai");
     assert_eq!(config.endpoints().system_one(), "https://api.typesafe.ai/v1/systemone");
     assert_eq!(config.endpoints().models(), "https://api.typesafe.ai/v1/models");
     assert_eq!(config.default_model(), "jev-latest");
-    assert_eq!(config.timeout(), Duration::from_secs(10));
+    assert_eq!(config.timeout(), Some(Duration::from_secs(10)));
+    assert_eq!(config.max_response_bytes(), 16 * 1024 * 1024);
     assert!(config.default_headers().is_empty());
 }
 
@@ -122,7 +122,7 @@ fn each_setting_comes_from_the_caller_then_the_environment_then_the_default() {
         assert_eq!(authorization(&config), key, "source {source}");
         assert_eq!(config.endpoints().system_one(), url, "source {source}");
         assert_eq!(config.default_model(), model, "source {source}");
-        assert_eq!(config.timeout(), Duration::from_secs(10), "source {source}");
+        assert_eq!(config.timeout(), Some(Duration::from_secs(10)), "source {source}");
     }
 }
 
@@ -180,9 +180,9 @@ fn explicit_settings_are_used_without_consulting_the_environment() {
         .unwrap_or_else(|error| panic!("explicit settings failed to resolve: {error:?}"));
 
     assert_eq!(authorization(&config), "Bearer code-key");
-    assert_eq!(config.base_url(), "https://code.test");
+    assert_eq!(config.endpoints().system_one(), "https://code.test/v1/systemone");
     assert_eq!(config.default_model(), "code-model");
-    assert_eq!(config.timeout(), Duration::from_millis(1500));
+    assert_eq!(config.timeout(), Some(Duration::from_millis(1500)));
 }
 
 /// The message an explicit blank API key fails with.
@@ -289,7 +289,6 @@ fn trailing_slashes_are_stripped_and_a_path_prefix_is_kept() {
     )
     .unwrap_or_else(|error| panic!("{error:?}"));
 
-    assert_eq!(config.base_url(), "https://example.test/prefix");
     assert_eq!(config.endpoints().system_one(), "https://example.test/prefix/v1/systemone");
     assert_eq!(config.endpoints().models(), "https://example.test/prefix/v1/models");
 }
@@ -383,8 +382,94 @@ fn a_zero_timeout_is_the_upstream_error_and_any_positive_one_is_kept() {
         let config =
             Config::resolve(Explicit::default().api_key("test-key").timeout(timeout), no_env)
                 .unwrap_or_else(|error| panic!("{timeout:?}: {error:?}"));
-        assert_eq!(config.timeout(), timeout);
+        assert_eq!(config.timeout(), Some(timeout));
     }
+}
+
+/// No deadline is asked for by name, and then no timer is armed at all; it is
+/// never spelled as a very long deadline, which a clock can overflow.
+#[test]
+fn no_timeout_is_no_deadline_and_the_last_setting_wins() {
+    let none = Config::resolve(Explicit::default().api_key("test-key").no_timeout(), no_env)
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(none.timeout(), None);
+
+    let explicit =
+        Explicit::default().api_key("test-key").no_timeout().timeout(Duration::from_secs(3));
+    let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(config.timeout(), Some(Duration::from_secs(3)));
+
+    let explicit =
+        Explicit::default().api_key("test-key").timeout(Duration::from_secs(3)).no_timeout();
+    let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(config.timeout(), None);
+}
+
+// -------------------------------------------------------- response limit
+
+#[test]
+fn the_response_limit_is_the_default_or_what_the_caller_set_and_never_zero() {
+    let explicit = Explicit::default().api_key("test-key").max_response_bytes(1);
+    let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(config.max_response_bytes(), 1);
+
+    let rendered =
+        config_error(Explicit::default().api_key("test-key").max_response_bytes(0), no_env);
+    assert_eq!(rendered, "max_response_bytes must be at least 1: every response carries a body.");
+}
+
+// ------------------------------------------------------ not UTF-8
+
+/// A value no `String` can hold, spelled the way the platform spells one.
+fn not_unicode(prefix: &str) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut bytes = prefix.as_bytes().to_vec();
+        bytes.push(0xff);
+        OsString::from_vec(bytes)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt as _;
+        let mut units = prefix.encode_utf16().collect::<Vec<_>>();
+        // A lone surrogate: valid in a Windows string, not in UTF-8.
+        units.push(0xd800);
+        OsString::from_wide(&units)
+    }
+}
+
+/// A variable the SDK reads whose value is not UTF-8 is refused by name. The
+/// value is never repeated: for `TYPESAFE_API_KEY` it is the credential.
+#[test]
+fn a_variable_that_is_not_utf8_is_a_config_error_naming_the_variable() {
+    for name in ["TYPESAFE_API_KEY", "TYPESAFE_BASE_URL", "TYPESAFE_DEFAULT_MODEL"] {
+        let lookup = |wanted: &str| {
+            if wanted == name {
+                Some(not_unicode("sk-not-unicode-secret"))
+            } else if wanted == "TYPESAFE_API_KEY" {
+                Some(OsString::from("env-key"))
+            } else {
+                None
+            }
+        };
+        let error = Config::resolve(Explicit::default(), lookup)
+            .expect_err("a value that is not UTF-8 must not resolve");
+        let message = format!("The {name} environment variable is not valid UTF-8.");
+        assert!(matches!(error.kind(), ErrorKind::Config), "{name}: {error:?}");
+        assert_eq!(error.to_string(), message, "{name}");
+        assert_eq!(format!("{error:?}"), config_debug(&message), "{name}");
+        assert!(StdError::source(&error).is_none(), "{name}: {error:?}");
+    }
+
+    // A variable the caller's explicit setting makes unnecessary is not read,
+    // so an unreadable value there is no error.
+    let lookup = |_: &str| Some(not_unicode("unread"));
+    let explicit = Explicit::default()
+        .api_key("code-key")
+        .base_url("https://code.test")
+        .default_model("code-model");
+    Config::resolve(explicit, lookup).unwrap_or_else(|error| panic!("{error:?}"));
 }
 
 // -------------------------------------------------------------- API key
@@ -463,8 +548,9 @@ fn debug_prints_neither_the_key_nor_any_default_header_value() {
     assert_eq!(
         debug,
         concat!(
-            r#"Config { base_url: "https://example.test/prefix", default_model: "jev-latest", "#,
-            r#"timeout: 10s, authorization: <redacted>, "#,
+            r#"Config { endpoints: ["POST https://example.test/prefix/v1/systemone", "#,
+            r#""GET https://example.test/prefix/v1/models"], default_model: "jev-latest", "#,
+            r#"timeout: Some(10s), max_response_bytes: 16777216, authorization: <redacted>, "#,
             r#"default_headers: ["x-team", "x-client-secret"] }"#,
         )
     );
