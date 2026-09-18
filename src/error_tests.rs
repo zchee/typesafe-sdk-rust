@@ -437,6 +437,17 @@ fn an_endpoint_drops_the_credentials_the_query_and_the_default_port() {
         format_endpoint(&Method::GET, &uri("http://[::1]:9000/v1/models")),
         "GET http://[::1]:9000/v1/models"
     );
+    // `Uri::host` hands back an IPv6 literal still wrapped in its brackets,
+    // and the brackets are what separate the address from a port, so dropping
+    // a default port must not take them with it.
+    assert_eq!(
+        format_endpoint(&Method::GET, &uri("https://[::1]:443/v1/models")),
+        "GET https://[::1]/v1/models"
+    );
+    assert_eq!(
+        format_endpoint(&Method::GET, &uri("http://[::1]:80/v1/models")),
+        "GET http://[::1]/v1/models"
+    );
     // A scheme this crate knows no default port for keeps whatever port it was
     // given, and a target with no authority at all is just its path.
     assert_eq!(

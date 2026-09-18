@@ -50,13 +50,10 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri, header};
 use serde::{Deserialize, de::IgnoredAny};
 
-use crate::codec::{self, DecodeError, DecodeErrorKind, RawJson};
-
-/// The response header carrying the server's identifier for a request.
-const REQUEST_ID_HEADER: &str = "x-typesafe-request-id";
-
-/// The non-standard millisecond-precision companion to `Retry-After`.
-const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
+use crate::{
+    codec::{self, DecodeError, DecodeErrorKind, RawJson},
+    constants::{REQUEST_ID_HEADER, RETRY_AFTER_MS_HEADER},
+};
 
 /// How much of an error body is rendered into a message before it is cut.
 ///
