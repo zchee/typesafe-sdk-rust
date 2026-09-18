@@ -312,9 +312,14 @@ $TARGET/release/encode-buffer verify
 ```
 
 All seven variants produce byte-identical bodies for all four states. The scalar escaper's output equals
-`sonic_rs::to_string` for the English-like filler and for `"` `\` `/`, every control character ` `-``,
-``, ` `, ` `, ` `, an astral character and `é€—`; `escaped_len` predicts the exact written length
-in every case. `json_escape_simd` also matches sonic-rs byte for byte.
+`sonic_rs::to_string` for the English-like filler and for `"`, `\`, `/`, every control character in
+U+0000-U+001F, U+007F (DEL), U+00A0 (no-break space), U+2028 (line separator), U+2029 (paragraph separator),
+the astral character U+1F600 and the non-ASCII sample `é€—` (U+00E9, U+20AC, U+2014); `escaped_len` predicts the
+exact written length in every case. `json_escape_simd` also matches sonic-rs byte for byte.
+
+Those characters are named in notation rather than written out: the corpus itself lives in
+`spikes/encode-buffer/src/main.rs`, and putting raw control bytes in a Markdown file turns it into something
+`file` calls data, git diffs as binary and grep skips.
 
 ### `json-escape-simd`: can it write into a caller-provided buffer?
 
@@ -562,6 +567,11 @@ when a stream is produced and down when it is dropped. The two counts agree in e
 min/median/max are the connections the server accepted for the 64-way fan-out itself; "warm = yes" means one request
 completed first, and then the 64 opened **zero** new connections in both modes. 2,580 requests were served in total
 across the four cases.
+
+The **minimum of case A cold varies between runs**: 64 in the run tabulated above, 3 in the lead's re-run of the same
+binary (median 64, max 64, client_opened 64 in both). It depends on how far the first handshake gets before the other
+63 tasks are polled, which is a scheduling race. The decision does not rest on it: what matters is that A's median and
+maximum are 64 while B was 1/1/1 in both runs.
 
 **Decision (plan section 5, S2b rule: "if `http2_only` yields 1 and `Auto` yields > 1, the default for `https` base
 URLs is `Http2Only`, with `Auto` as the documented knob"): the rule fires exactly. `Http2Only` is the default for
