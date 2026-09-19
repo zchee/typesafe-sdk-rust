@@ -743,3 +743,109 @@ fn owned_and_borrowed_text_encode_alike() {
         r#"{"q":{"type":"noul","instructions":"Is this about billing?","criteria":{"true":"payments"}}}"#
     );
 }
+
+// ------------------------------------------------------------- compiled sets
+
+/// A set laid out as the derive lays one out, built in a `static`: that it
+/// compiles is the proof that `from_static` is a `const fn`.
+static COMPILED: PreparedQuestions = PreparedQuestions::from_static(
+    concat!(r#"{"billing":{"type":"noul"},"":{"type":"noul","instructions":"Spam?"}}"#, "billing"),
+    69,
+    &[76, 76],
+);
+
+/// A compiled set is the set `prepare` builds from the same questions: equal,
+/// with the same names, length and printed JSON, whichever way each was made.
+#[test]
+fn a_compiled_set_equals_the_prepared_one() {
+    let prepared = Questions::new()
+        .noul("billing", Noul::new())
+        .noul("", Noul::new().instructions("Spam?"))
+        .prepare()
+        .expect("valid");
+    assert_eq!(COMPILED, prepared);
+    assert_eq!(prepared, COMPILED);
+    assert_eq!(COMPILED.len(), 2);
+    assert!(!COMPILED.is_empty());
+    assert_eq!(COMPILED.names().collect::<Vec<_>>(), ["billing", ""]);
+    assert_eq!(COMPILED.names().rev().collect::<Vec<_>>(), ["", "billing"]);
+    assert_eq!(
+        COMPILED.as_bytes(),
+        br#"{"billing":{"type":"noul"},"":{"type":"noul","instructions":"Spam?"}}"#
+    );
+    assert_eq!(format!("{COMPILED:?}"), format!("{prepared:?}"));
+    // A clone of a compiled set still points at the program's bytes.
+    let clone = COMPILED.clone();
+    assert!(std::ptr::eq(clone.as_bytes(), COMPILED.as_bytes()));
+}
+
+/// Two sets with the same bytes but different name boundaries differ.
+#[test]
+fn compiled_sets_compare_their_name_boundaries() {
+    let one_name = PreparedQuestions::from_static(r#"{"ab":{"type":"noul"}}ab"#, 22, &[24]);
+    let two_names = PreparedQuestions::from_static(r#"{"ab":{"type":"noul"}}ab"#, 22, &[23, 24]);
+    assert_ne!(one_name, two_names);
+    assert_eq!(two_names.names().collect::<Vec<_>>(), ["a", "b"]);
+}
+
+/// Every layout `from_static` refuses, with its message. In the `static` the
+/// derive generates, the same panic stops the build.
+#[test]
+fn from_static_refuses_a_layout_that_does_not_hold() {
+    let cases: [(&'static str, usize, &'static [usize], &str); 7] = [
+        ("{}", 2, &[], "a question set has at least one question"),
+        ("{}", 3, &[3], "the JSON must end within the buffer"),
+        ("{}\u{E9}", 3, &[4], "the JSON must end on a character boundary"),
+        ("{}ab", 2, &[4, 3], "a name must not end before it starts"),
+        ("{}ab", 2, &[9], "a name must end within the buffer"),
+        ("{}\u{E9}", 2, &[3], "a name must end on a character boundary"),
+        ("{}ab", 2, &[3], "the last name must end where the buffer does"),
+    ];
+    for (buf, json_len, name_ends, message) in cases {
+        let panic = std::panic::catch_unwind(|| {
+            drop(PreparedQuestions::from_static(buf, json_len, name_ends));
+        })
+        .expect_err("the layout is refused");
+        assert_eq!(
+            panic.downcast_ref::<&str>().copied(),
+            Some(message),
+            "{buf:?} {json_len} {name_ends:?}"
+        );
+    }
+}
+
+// ------------------------------------------------------------- asking a set
+
+/// The derive used from inside the crate, where the SDK is `crate` rather
+/// than `::typesafe_sdk`: the crate-path override at work.
+#[cfg(feature = "macros")]
+#[expect(dead_code, reason = "no response is decoded into it here")]
+#[derive(typesafe_sdk_rust_macros::QuestionSet)]
+#[question_set(crate = crate)]
+struct Spam {
+    #[noul(instructions = "Spam?")]
+    spam: crate::response::NoulAnswer,
+}
+
+/// `ask` is `system_one` with the set's questions, typed as the set: the same
+/// builder, and the same settings.
+#[cfg(feature = "macros")]
+#[test]
+fn ask_is_system_one_with_the_sets_questions() {
+    let client = Client::builder().api_key("test-key").build().expect("the client builds");
+    let asked = client.ask::<Spam>("state").model("jev-2").header("x-team", "billing");
+    let built = client
+        .system_one("state", Spam::prepared())
+        .typed::<Spam>()
+        .model("jev-2")
+        .header("x-team", "billing");
+    assert_eq!(format!("{asked:?}"), format!("{built:?}"));
+    assert_eq!(
+        format!("{asked:?}"),
+        r#"SystemOne { questions: 1, model: Some("jev-2"), deadline: Client, headers: ["x-team"], extra_body: [], .. }"#
+    );
+    assert_eq!(
+        format!("{:?}", Spam::prepared()),
+        r#"PreparedQuestions { json: "{\"spam\":{\"type\":\"noul\",\"instructions\":\"Spam?\"}}" }"#
+    );
+}

@@ -101,3 +101,32 @@ pub use crate::{
         Body, BoxError, HttpService, HttpVersion, HyperResponseFuture, HyperTransport, ResponseBody,
     },
 };
+
+pub use crate::question::QuestionSet;
+
+/// Implements [`QuestionSet`](trait@QuestionSet) and [`AnswerSet`] for a struct with one field
+/// per question.
+///
+/// Available with the `macros` feature, which is on by default.
+///
+/// ```
+/// use typesafe_sdk::{ChoiceAnswer, NoulAnswer, QuestionSet, ScoreAnswer};
+///
+/// #[derive(QuestionSet)]
+/// struct Ticket {
+///     #[noul(instructions = "Is this about billing?", yes = "payments or invoices")]
+///     billing: NoulAnswer,
+///     #[choice(instructions = "What is the tone?", options("calm" = "neutral or polite", "angry"))]
+///     tone: ChoiceAnswer,
+///     #[score(instructions = "How urgent?", levels("can wait", "this week", "today"))]
+///     urgency: ScoreAnswer,
+/// }
+///
+/// assert_eq!(Ticket::prepared().names().collect::<Vec<_>>(), ["billing", "tone", "urgency"]);
+/// ```
+#[cfg(feature = "macros")]
+#[doc(inline)]
+pub use typesafe_sdk_rust_macros::QuestionSet;
+
+#[doc(hidden)]
+pub mod __private;

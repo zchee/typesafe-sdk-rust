@@ -35,9 +35,13 @@ use bytes::Bytes;
 use serde::Serialize;
 
 use crate::{
+    client::Client,
     codec::{self, EncodeError, RawJson},
     content::Content,
+    de::AnswerSet,
     error::Error,
+    request::SystemOne,
+    transport::HttpService,
 };
 
 /// A yes/no question: how true is a statement about the state?
@@ -407,7 +411,11 @@ impl<'a> Questions<'a> {
             buf.extend_from_slice(name.as_bytes());
         }
 
-        Ok(PreparedQuestions { buf: Bytes::from(buf.into_boxed_slice()), json_len, name_ends })
+        Ok(PreparedQuestions {
+            buf: Bytes::from(buf.into_boxed_slice()),
+            json_len,
+            name_ends: NameEnds::Shared(name_ends),
+        })
     }
 }
 
@@ -424,28 +432,99 @@ pub struct PreparedQuestions {
     json_len: usize,
     /// Where each name ends in `buf`; each name starts where the one before
     /// it ends.
-    name_ends: Arc<[usize]>,
+    name_ends: NameEnds,
 }
 
+/// The name ends of a prepared set: allocated once by [`Questions::prepare`],
+/// or compiled into the program for a [`QuestionSet`].
+#[derive(Clone)]
+enum NameEnds {
+    Shared(Arc<[usize]>),
+    Static(&'static [usize]),
+}
+
+impl NameEnds {
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            Self::Shared(ends) => ends,
+            Self::Static(ends) => ends,
+        }
+    }
+}
+
+/// Two sets are equal when their bytes are, however each was made.
+impl PartialEq for NameEnds {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for NameEnds {}
+
 impl PreparedQuestions {
+    /// A set whose bytes were produced at compile time; what the code that
+    /// `#[derive(QuestionSet)]` generates calls. No semver promise.
+    ///
+    /// `buf` holds the JSON object in its first `json_len` bytes and then
+    /// every name, unescaped and back to back; `name_ends` holds where each
+    /// name ends. Nothing is allocated, now or when the set is used. The
+    /// layout is checked here, and since the generated code calls this in a
+    /// `static`, a layout that does not hold stops the build rather than a
+    /// running program.
+    ///
+    /// # Panics
+    ///
+    /// When `name_ends` is empty, when the JSON or a name would end past the
+    /// end of `buf`, when a name would end before it starts, when the last
+    /// name does not end where `buf` does, or when a boundary falls inside a
+    /// UTF-8 character.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn from_static(
+        buf: &'static str,
+        json_len: usize,
+        name_ends: &'static [usize],
+    ) -> Self {
+        assert!(!name_ends.is_empty(), "a question set has at least one question");
+        assert!(json_len <= buf.len(), "the JSON must end within the buffer");
+        assert!(buf.is_char_boundary(json_len), "the JSON must end on a character boundary");
+        let mut start = json_len;
+        // `for` loops and iterators are not available in a `const fn`.
+        let mut index = 0;
+        while index < name_ends.len() {
+            let end = name_ends[index];
+            assert!(start <= end, "a name must not end before it starts");
+            assert!(end <= buf.len(), "a name must end within the buffer");
+            assert!(buf.is_char_boundary(end), "a name must end on a character boundary");
+            start = end;
+            index += 1;
+        }
+        assert!(start == buf.len(), "the last name must end where the buffer does");
+        Self {
+            buf: Bytes::from_static(buf.as_bytes()),
+            json_len,
+            name_ends: NameEnds::Static(name_ends),
+        }
+    }
+
     /// The number of questions in the set. It is never zero.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.name_ends.len()
+        self.name_ends.as_slice().len()
     }
 
     /// Always `false`: an empty set is rejected by [`Questions::prepare`].
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.name_ends.is_empty()
+        self.name_ends.as_slice().is_empty()
     }
 
     /// The question names, in the order they are sent.
     pub fn names(&self) -> impl ExactSizeIterator<Item = &str> + DoubleEndedIterator + '_ {
-        (0..self.name_ends.len()).map(|index| {
-            let start =
-                index.checked_sub(1).map_or(self.json_len, |previous| self.name_ends[previous]);
-            std::str::from_utf8(&self.buf[start..self.name_ends[index]])
+        let ends = self.name_ends.as_slice();
+        (0..ends.len()).map(|index| {
+            let start = index.checked_sub(1).map_or(self.json_len, |previous| ends[previous]);
+            std::str::from_utf8(&self.buf[start..ends[index]])
                 .expect("invariant: the names were copied from `str`s")
         })
     }
@@ -466,6 +545,102 @@ impl fmt::Debug for PreparedQuestions {
     /// wire form is the one thing worth seeing.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("PreparedQuestions").field("json", &self.json()).finish()
+    }
+}
+
+/// A question set declared as a type: it knows the questions it asks, and its
+/// answers decode into it.
+///
+/// `#[derive(QuestionSet)]` implements it for a struct with one field per
+/// question, serializing the questions when the program is compiled; see the
+/// derive for the attributes it reads. [`Client::ask`] sends one:
+///
+/// ```
+/// # #[cfg(feature = "macros")]
+/// # fn main() -> Result<(), typesafe_sdk::Error> {
+/// use typesafe_sdk::{ChoiceAnswer, Choice, NoulAnswer, Noul, Questions, QuestionSet};
+///
+/// #[derive(QuestionSet)]
+/// struct Ticket {
+///     #[noul(instructions = "Is this about billing?")]
+///     billing: NoulAnswer,
+///     #[choice(options("calm", "angry"))]
+///     tone: ChoiceAnswer,
+/// }
+///
+/// // The same questions, built at run time, are the same bytes.
+/// let built = Questions::new()
+///     .noul("billing", Noul::new().instructions("Is this about billing?"))
+///     .choice("tone", Choice::new(["calm", "angry"]))
+///     .prepare()?;
+/// assert_eq!(Ticket::prepared(), &built);
+/// # Ok(())
+/// # }
+/// # #[cfg(not(feature = "macros"))]
+/// # fn main() {}
+/// ```
+///
+/// Implementing it by hand takes a `'static` set and an [`AnswerSet`]
+/// implementation that follows that trait's contract.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` is not a question set",
+    label = "no questions are declared for this type",
+    note = "derive it: `#[derive(typesafe_sdk::QuestionSet)]` on a struct with one \
+            `NoulAnswer`, `ChoiceAnswer` or `ScoreAnswer` field per question"
+)]
+pub trait QuestionSet: AnswerSet {
+    /// The questions, validated and serialized once for the whole program.
+    fn prepared() -> &'static PreparedQuestions;
+}
+
+/// Asking a [`QuestionSet`].
+impl<S> Client<S>
+where
+    S: HttpService,
+{
+    /// A System One request that asks the questions of `Q` about `state` and
+    /// decodes the answers into a `Q`.
+    ///
+    /// It is [`system_one`](Client::system_one) with `Q`'s prepared questions,
+    /// made [`typed`](SystemOne::typed) as `Q`: the same builder, configured
+    /// and sent the same way.
+    ///
+    /// The state's type is not a type parameter of this method, so that
+    /// `ask::<Ticket>(&state)` names only the question set. It stays a type of
+    /// its own, unnamed, in the builder's type; a function that takes the
+    /// builder takes it as a generic.
+    ///
+    /// ```
+    /// # #[cfg(feature = "macros")]
+    /// # fn main() -> Result<(), typesafe_sdk::Error> {
+    /// use std::time::Duration;
+    ///
+    /// use typesafe_sdk::{Client, NoulAnswer, QuestionSet};
+    ///
+    /// #[derive(QuestionSet)]
+    /// struct Spam {
+    ///     #[noul(instructions = "Is this message spam?")]
+    ///     spam: NoulAnswer,
+    /// }
+    ///
+    /// let client = Client::builder().api_key("your-api-key").build()?;
+    /// let request = client.ask::<Spam>("Buy now!").timeout(Duration::from_secs(2));
+    /// // `request.send().await?` needs a Tokio runtime and returns a
+    /// // `SystemOneResponse<Spam>`, whose `answers().spam` is the answer.
+    /// drop(request);
+    /// # Ok(())
+    /// # }
+    /// # #[cfg(not(feature = "macros"))]
+    /// # fn main() {}
+    /// ```
+    pub fn ask<'a, Q>(
+        &'a self,
+        state: &'a (impl Serialize + ?Sized),
+    ) -> SystemOne<'a, S, impl Serialize + ?Sized, Q>
+    where
+        Q: QuestionSet,
+    {
+        self.system_one(state, Q::prepared()).typed::<Q>()
     }
 }
 
