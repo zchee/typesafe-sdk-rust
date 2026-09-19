@@ -34,7 +34,9 @@ COMMENT_TASK = re.compile(r"\b(?:" + "to" + "do|" + "fix" + r"me)\b", re.IGNOREC
 #: itself; spelled out whole, every one of them would be a hit here. The two
 #: task markers are refused in capitals anywhere, and in any letter case after
 #: a comment opener (``COMMENT_TASK``), as whole words only, so that an
-#: identifier that merely contains one stays clean.
+#: identifier that merely contains one stays clean. A test switched off
+#: outright is refused in the plain and the raw-identifier spelling
+#: (``r#`` before the word), which rustc accepts alike.
 PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b" + "TO" + r"DO\b"), "a task marker"),
     (re.compile(r"\b" + "FIX" + r"ME\b"), "a task marker"),
@@ -47,7 +49,10 @@ PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
         re.compile(r"\b" + "unimple" + r"mented!\s*[(\[{]"),
         "a macro that panics in place of code",
     ),
-    (re.compile(r"#\[\s*" + "ign" + r"ore\b"), "a test switched off"),
+    (
+        re.compile(r"#\[\s*+(?:r#)?" + "ign" + r"ore\b"),
+        "a test switched off",
+    ),
 )
 
 #: The word that switches a test off inside a ``cfg_attr``.
