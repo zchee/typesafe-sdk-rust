@@ -6,7 +6,7 @@
 //! caller can inspect - an API error keeping its status, headers and bytes for
 //! a failure status, a response-validation error for a success status - and
 //! never as a panic. The bodies are the ones the fuzzer's finding reduced to,
-//! one per decode path that used to panic inside the codec.
+//! one per decode path it reached inside the codec.
 
 use std::time::Duration;
 

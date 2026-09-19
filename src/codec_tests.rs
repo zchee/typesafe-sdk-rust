@@ -266,8 +266,8 @@ fn control_and_format_characters_in_a_key_are_escaped() {
 #[test]
 fn a_key_spelling_an_escape_renders_apart_from_a_key_holding_the_character() {
     // Six characters of text - backslash, `u`, `{`, `1`, `b`, `}` - against
-    // one real ESC. Before a backslash was escaped both rendered as
-    // `\u{1b}`, and a reader could not tell which key the server sent.
+    // one real ESC. The backslash is escaped, so the two render apart and a
+    // reader can tell which key the server sent.
     let spelled = keyed_path(r"\u{1b}");
     let real = keyed_path("\u{1b}");
 
@@ -859,9 +859,9 @@ fn numbers_keep_their_value_across_the_transcode() {
 
 #[test]
 fn a_negative_zero_loses_its_sign_on_the_transcode_path_only() {
-    // The recorded divergence of this codec, now reachable one step further
-    // out: the transcode reads the number with this parser, so a literal
-    // negative zero comes out positive. The splice never reads it.
+    // The recorded divergence of this codec, one step further out: the
+    // transcode reads the number with this parser, so a literal negative zero
+    // comes out positive. The splice never reads it.
     let raw = RawJson::from_text("-0.0".to_owned());
 
     assert_eq!(serde_json::to_string(&raw).expect("it writes as data"), "0.0");
@@ -1205,11 +1205,12 @@ fn a_data_error_without_a_path_says_so_rather_than_printing_an_empty_one() {
 // ------------------------------------------------- bytes that are not UTF-8
 //
 // The codec takes a string's bytes as text without checking them, and reports
-// a byte that is not UTF-8 only after the whole document has been read. Before
-// the check in `as_text`, a response holding one inside a string that is kept
-// as raw text - a member of an error body, an object in a score legend -
-// panicked inside the codec in a debug build and handed on an invalid `&str`
-// in a release build. Each case below is refused before the codec sees it.
+// a byte that is not UTF-8 only after the whole document has been read. A
+// string kept as raw text - a member of an error body, an object in a score
+// legend - is therefore checked for UTF-8 in `as_text` before the codec reads
+// it: taken unchecked, such a byte panics inside the codec in a debug build
+// and hands on an invalid `&str` in a release build. Each case below is
+// refused before the codec sees it.
 
 /// Documents holding a byte sequence that is not UTF-8, with the one-based
 /// line and byte column of its first byte.
@@ -1279,7 +1280,7 @@ fn the_utf8_check_comes_before_the_depth_check() {
 }
 
 #[test]
-fn a_document_that_is_utf8_decodes_as_before() {
+fn a_document_that_is_utf8_decodes() {
     let raw =
         decode::<RawJson>("{\"caf\u{e9}\":\"\u{1F600}\"}".as_bytes()).expect("valid UTF-8 JSON");
     assert_eq!(raw.as_str(), "{\"caf\u{e9}\":\"\u{1F600}\"}");

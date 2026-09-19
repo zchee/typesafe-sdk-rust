@@ -10,8 +10,8 @@
 //! or hold one level, and holds what the decoded response keeps to a small
 //! multiple of what the SAME body keeps when the request gives no hint at all
 //! (a question set without a score). Without a hint the decoder sizes every
-//! list from what it reads, as it did before the hint existed, so that is the
-//! baseline an unbounded hint is measured against.
+//! list from what it reads, so that is the baseline an unbounded hint is
+//! measured against.
 //!
 //! "Keeps" is measured as the bytes freed when the response is dropped: every
 //! block the response owns is freed then, and nothing else is, because the
