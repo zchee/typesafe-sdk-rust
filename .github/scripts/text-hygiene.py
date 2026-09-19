@@ -14,8 +14,6 @@ decision somebody made, not something that slips in with a commit.
 Run it over the whole tree with no arguments, or over named paths.
 """
 
-from __future__ import annotations
-
 import subprocess
 import sys
 import unicodedata

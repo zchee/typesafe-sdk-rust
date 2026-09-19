@@ -9,8 +9,6 @@ them, so this does.
 Run it over the whole tree with no arguments, or over named paths.
 """
 
-from __future__ import annotations
-
 import re
 import subprocess
 import sys
