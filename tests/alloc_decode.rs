@@ -8,20 +8,23 @@
 //! The fixture is the upstream `RESULT` (three answers: a noul, a choice, a
 //! score). Every block it costs is one the answer representation asks for -
 //! decoding it into a fully borrowed type costs none - so the count below is a
-//! count of `String`s and `Vec`s:
+//! count of `Vec`s and of strings too long to be stored inline. The names (the
+//! model, the question names, the choice's pick and option names) are stored
+//! inline up to 24 bytes on a 64-bit target, and every name in the fixture is
+//! shorter; the level descriptions are `Content`, which owns a `String`:
 //!
 //! | item | blocks |
 //! | --- | ---: |
-//! | model name | 1 |
+//! | model name (inline) | 0 |
 //! | answers vector, sized from the question count | 1 |
-//! | three question names | 3 |
-//! | the choice's pick | 1 |
+//! | three question names (inline) | 0 |
+//! | the choice's pick (inline) | 0 |
 //! | the choice's probabilities vector | 1 |
-//! | the choice's two option names | 2 |
+//! | the choice's two option names (inline) | 0 |
 //! | the score's legend vector | 1 |
 //! | the score's three level descriptions | 3 |
 //! | the score's probabilities vector | 1 |
-//! | **total** | **14** |
+//! | **total** | **7** |
 //!
 //! One profiler exists per process, so all of it runs in a single test.
 
@@ -60,7 +63,10 @@ const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 const QUESTIONS: usize = 3;
 
 /// The decode budget: blocks, bytes, and the ratio to the comparator's blocks.
-const MAX_BLOCKS: u64 = 14;
+/// The block count is exact, so one more `String` or `Vec` fails it. The byte
+/// bound is the one frozen with the first budget and has headroom: the decode
+/// measures 578 bytes against it.
+const MAX_BLOCKS: u64 = 7;
 const MAX_BYTES: u64 = 700;
 const MAX_RATIO_TO_NAIVE: f64 = 0.7;
 

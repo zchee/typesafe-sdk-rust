@@ -20,7 +20,7 @@ use typesafe_sdk::{
     Body, Client, Error, HttpService, HyperResponseFuture, HyperTransport, Noul, PreparedQuestions,
     QuestionSet, Questions, ResponseBody, RetryPolicy, StatusSet, SystemOneResponse,
     de::{AnswerContext, AnswerSet},
-    response::NoulAnswer,
+    response::{Answer, Answers, ChoiceAnswer, NoulAnswer},
 };
 
 // `Result<T, Error>` costs a pointer beside `T`.
@@ -46,6 +46,19 @@ const fn crosses_threads<T: Send + 'static>() {}
 const _: () = crosses_threads::<ResponseBody>();
 const _: () = crosses_threads::<HyperResponseFuture>();
 const _: fn(<HyperTransport as HttpService>::ResponseBody) -> ResponseBody = |body| body;
+
+// The response types keep their sizes whatever holds their names: a name is
+// as wide as the `String` it replaced, and `None` still costs nothing extra.
+// Sizes on a 64-bit target.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(size_of::<SystemOneResponse<Answers>>() == 216);
+    assert!(size_of::<Answers>() == 24);
+    assert!(size_of::<Answer>() == 64);
+    assert!(size_of::<Option<Answer>>() == 64);
+    assert!(size_of::<ChoiceAnswer>() == 56);
+    assert!(size_of::<Option<ChoiceAnswer>>() == 56);
+};
 
 /// A transport of the caller's own, for the bounds over a custom `S`.
 #[derive(Debug, Clone, Copy)]

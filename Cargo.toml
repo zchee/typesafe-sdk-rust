@@ -36,6 +36,9 @@ unwrap_used = "deny"
 # `^1.11.1`, so patch and compatible minor upgrades still resolve.
 [workspace.dependencies]
 bytes = "1.12.1"
+# No `serde` feature: the names it holds are decoded and serialized by the
+# SDK's own code, which reads and writes them as plain strings.
+compact_str = { version = "0.10.0", default-features = false, features = ["std"] }
 fastrand = "2.5.0"
 http = "1.5.0"
 http-body = "1.1.0"
@@ -130,6 +133,10 @@ internals = []
 
 [dependencies]
 bytes = { workspace = true }
+# The names a response owns (model, answer, choice pick and option names): a
+# name of up to 24 bytes is stored inline, so decoding one allocates nothing.
+# Only `src/name.rs` names the crate.
+compact_str = { workspace = true }
 # The random draw of the retry backoff's jitter.
 fastrand = { workspace = true }
 http = { workspace = true }
