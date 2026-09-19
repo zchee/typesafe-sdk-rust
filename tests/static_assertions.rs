@@ -15,7 +15,8 @@ use std::{
 use http::{Request, Response};
 use tower_service::Service;
 use typesafe_sdk::{
-    Body, Client, Error, HyperTransport, Noul, Questions, SystemOneResponse,
+    Body, Client, Error, HttpService, HyperResponseFuture, HyperTransport, Noul, Questions,
+    ResponseBody, SystemOneResponse,
     de::{AnswerContext, AnswerSet},
     response::NoulAnswer,
 };
@@ -30,6 +31,13 @@ const fn client_is_shareable<T: Clone + Send + Sync>() {}
 const _: () = client_is_shareable::<Client>();
 const _: () = client_is_shareable::<Client<HyperTransport>>();
 const _: () = client_is_shareable::<Client<Echo>>();
+
+// The default transport answers with this crate's own body type, not hyper's,
+// and both it and the future that yields it can move to another thread.
+const fn crosses_threads<T: Send + 'static>() {}
+const _: () = crosses_threads::<ResponseBody>();
+const _: () = crosses_threads::<HyperResponseFuture>();
+const _: fn(<HyperTransport as HttpService>::ResponseBody) -> ResponseBody = |body| body;
 
 /// A transport of the caller's own, for the bounds over a custom `S`.
 #[derive(Debug, Clone, Copy)]

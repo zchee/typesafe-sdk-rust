@@ -38,7 +38,7 @@ use http_body_util::{BodyExt as _, LengthLimitError, Limited};
 use tower_service::Service;
 
 pub(crate) use self::hyper::TransportSettings;
-pub use self::hyper::{HttpVersion, HyperResponseFuture, HyperTransport};
+pub use self::hyper::{HttpVersion, HyperResponseFuture, HyperTransport, ResponseBody};
 use crate::{
     config::Config,
     constants::{

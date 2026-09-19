@@ -23,7 +23,9 @@ use std::{
 };
 
 use ::hyper::body::Incoming;
+use bytes::Bytes;
 use http::{Request, Response};
+use http_body::{Frame, SizeHint};
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
     client::legacy::{self, connect::HttpConnector},
@@ -149,7 +151,7 @@ impl fmt::Debug for HyperTransport {
 }
 
 impl Service<Request<Body>> for HyperTransport {
-    type Response = Response<Incoming>;
+    type Response = Response<ResponseBody>;
     type Error = BoxError;
     type Future = HyperResponseFuture;
 
@@ -180,7 +182,7 @@ impl fmt::Debug for HyperResponseFuture {
 }
 
 impl Future for HyperResponseFuture {
-    type Output = Result<Response<Incoming>, BoxError>;
+    type Output = Result<Response<ResponseBody>, BoxError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Both fields are `Unpin`, so the pinned reference can be turned back
@@ -188,9 +190,50 @@ impl Future for HyperResponseFuture {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Ok(response)) => Poll::Ready(Ok(response)),
+            Poll::Ready(Ok(response)) => Poll::Ready(Ok(response.map(ResponseBody))),
             Poll::Ready(Err(error)) => Poll::Ready(Err(failure(error, this.connect_timeout))),
         }
+    }
+}
+
+/// The body of a response [`HyperTransport`] received, read frame by frame as
+/// it arrives.
+///
+/// It is hyper's own body under a name of this crate's, so that a new major
+/// version of hyper is not a breaking change here. Every call is forwarded as
+/// it is, and nothing is boxed or copied: the length the server declared is
+/// still what [`size_hint`](http_body::Body::size_hint) reports, which is what
+/// lets a response over the limit be refused before a byte of it is read.
+///
+/// `Debug` prints no part of the body.
+pub struct ResponseBody(Incoming);
+
+impl fmt::Debug for ResponseBody {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("ResponseBody").finish_non_exhaustive()
+    }
+}
+
+impl http_body::Body for ResponseBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        // hyper's body is `Unpin`, so the pinned reference can be turned back
+        // into a plain one and the body pinned in place again, with no
+        // `unsafe` projection. Its error is boxed only when one occurs.
+        Pin::new(&mut self.get_mut().0).poll_frame(cx).map_err(Into::into)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.0.size_hint()
     }
 }
 

@@ -1,12 +1,81 @@
-//! Tests for the default transport's construction and error mapping.
+//! Tests for the default transport's construction, error mapping and response
+//! body.
 
 use std::io;
+
+use http_body::Body as _;
+use http_body_util::BodyExt as _;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::TcpListener,
+};
 
 use super::*;
 use crate::ErrorKind;
 
 fn settings(version: HttpVersion) -> TransportSettings {
     TransportSettings { version, extra_roots: Vec::new(), connect_timeout: None }
+}
+
+/// A loopback server that reads one request and answers it with `reply`, as
+/// raw bytes, then closes the connection.
+async fn raw_server(reply: &'static [u8]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
+    let address = listener.local_addr().expect("its address");
+    tokio::spawn(async move {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer).await;
+            let _ = stream.write_all(reply).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    format!("http://{address}/")
+}
+
+/// Sends one `GET` through the transport itself, with no SDK around it, and
+/// returns the body of the answer.
+async fn body_from(reply: &'static [u8]) -> ResponseBody {
+    let mut transport = HyperTransport::new(settings(HttpVersion::Auto)).expect("it builds");
+    let request = Request::get(raw_server(reply).await).body(Body::empty()).expect("a request");
+    let response = transport.call(request).await.expect("the server answers");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    response.into_body()
+}
+
+#[tokio::test]
+async fn the_response_body_forwards_the_declared_length_the_frames_and_the_end() {
+    let mut body = body_from(b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+    // The declared length is known before a byte of the body is read: that
+    // is what the size limit is checked against.
+    assert_eq!(body.size_hint().exact(), Some(5));
+    assert!(!body.is_end_stream());
+    assert_eq!(format!("{body:?}"), "ResponseBody { .. }", "no part of the body is shown");
+
+    let frame = body.frame().await.expect("one frame").expect("it reads");
+    assert_eq!(frame.into_data().expect("a data frame"), Bytes::from_static(b"hello"));
+    assert!(body.is_end_stream(), "the declared length has been read");
+    assert_eq!(body.size_hint().exact(), Some(0));
+    assert!(body.frame().await.is_none());
+}
+
+#[tokio::test]
+async fn a_response_body_without_a_declared_length_reports_none_and_streams() {
+    let body =
+        body_from(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n")
+            .await;
+    assert_eq!(body.size_hint().lower(), 0);
+    assert_eq!(body.size_hint().exact(), None);
+    assert_eq!(body.collect().await.expect("it reads").to_bytes(), Bytes::from_static(b"abc"));
+}
+
+#[tokio::test]
+async fn a_body_cut_short_fails_with_hyper_error_as_the_boxed_cause() {
+    let body = body_from(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nabc").await;
+    let error = body.collect().await.expect_err("the server closed 97 bytes early");
+    let cause = error.downcast_ref::<::hyper::Error>().expect("hyper's own error, boxed once");
+    let underneath = cause.source().and_then(|inner| inner.downcast_ref::<io::Error>());
+    assert_eq!(underneath.map(io::Error::kind), Some(io::ErrorKind::UnexpectedEof), "{cause:?}");
 }
 
 #[test]
