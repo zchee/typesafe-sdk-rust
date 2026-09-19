@@ -1191,7 +1191,7 @@ fn the_expectations_name_what_was_wanted() {
     }
     assert_eq!(
         Expecting(&|f| Visitor::expecting(
-            &EnvelopeVisitor::<Answers> { context: AnswerContext::default(), answers: PhantomData },
+            &EnvelopeSeed::<Answers> { context: AnswerContext::default(), answers: PhantomData },
             f
         ))
         .to_string(),

@@ -1335,17 +1335,11 @@ where
     where
         D: Deserializer<'de>,
     {
-        deserializer
-            .deserialize_map(EnvelopeVisitor { context: self.context, answers: PhantomData })
+        deserializer.deserialize_map(self)
     }
 }
 
-struct EnvelopeVisitor<A> {
-    context: AnswerContext,
-    answers: PhantomData<A>,
-}
-
-impl<'de, A> Visitor<'de> for EnvelopeVisitor<A>
+impl<'de, A> Visitor<'de> for EnvelopeSeed<A>
 where
     A: AnswerSet,
 {
