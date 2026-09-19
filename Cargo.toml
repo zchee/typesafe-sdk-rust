@@ -8,6 +8,8 @@ members = [".", "crates/live-tests", "crates/macros", "crates/test-support"]
 # Naming the default set explicitly is what keeps a crate whose tests need a
 # live API key out of a bare `cargo test` and out of CI: such a crate is added
 # to `members` and left out here, so no command has to remember to exclude it.
+# Its tests also need `TYPESAFE_LIVE_TESTS=1` besides the key, so a key
+# exported for other work does not make `--workspace` bill anyone.
 default-members = [".", "crates/macros", "crates/test-support"]
 exclude = ["fuzz", "spikes"]
 # Resolver 3 is the edition-2024 default; stating it silences the warning that

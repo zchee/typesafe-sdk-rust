@@ -1,10 +1,10 @@
 //! The Python SDK's `tests/test_integration.py`, against the live API, and
 //! the idle-connection check.
 //!
-//! Every test needs `TYPESAFE_API_KEY` and fails without it; see
-//! [`live_client`]. Run them with
-//! `cargo nextest run -p typesafe-sdk-rust-live-tests`; nothing else in the
-//! repository runs them.
+//! Every test needs both `TYPESAFE_LIVE_TESTS=1` and `TYPESAFE_API_KEY` and
+//! fails without either; see [`live_client`]. Run them with
+//! `TYPESAFE_LIVE_TESTS=1 cargo nextest run -p typesafe-sdk-rust-live-tests`;
+//! nothing else in the repository runs them.
 
 use std::{
     collections::BTreeMap,
