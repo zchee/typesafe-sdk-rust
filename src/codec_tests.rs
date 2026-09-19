@@ -255,7 +255,7 @@ fn assert_printable(rendered: &str) {
         !rendered.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
         "a control byte reached the text: {rendered:?}"
     );
-    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}'] {
+    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
         assert!(!rendered.contains(hidden), "{hidden:?} reached the text: {rendered:?}");
     }
 }

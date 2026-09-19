@@ -287,7 +287,9 @@ fn text_a_transport_chose_is_escaped_and_cut_and_its_error_kept_whole() {
     );
     for shown in [rendered.clone(), format!("{rendered:?}")] {
         assert!(!shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f), "{shown:?}");
-        assert!(!shown.contains('\u{202e}'), "{shown:?}");
+        for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
+            assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
+        }
     }
     let source = error.source().expect("the transport's error is kept");
     assert_eq!(source.to_string(), Loud.to_string(), "the cause keeps its full text");

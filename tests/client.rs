@@ -489,7 +489,7 @@ fn assert_printable(shown: &str) {
         !shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
         "a control byte reached the rendering: {shown:?}"
     );
-    for hidden in ['\u{202e}', '\u{2066}'] {
+    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
         assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
     }
 }
@@ -711,7 +711,9 @@ async fn a_transport_error_of_any_text_is_escaped_and_cut_in_the_message() {
     assert_eq!(rendered.chars().count(), 18 + 200 + 1);
     for shown in [rendered.clone(), format!("{rendered:?}")] {
         assert!(!shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f), "{shown:?}");
-        assert!(!shown.contains('\u{202e}'), "{shown:?}");
+        for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
+            assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
+        }
     }
     let cause = error.source().and_then(|cause| cause.downcast_ref::<Loud>());
     assert_eq!(cause.map(ToString::to_string), Some(Loud.to_string()));
