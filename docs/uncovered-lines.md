@@ -1,6 +1,6 @@
 # Line coverage
 
-Measured at commit `2231589` with
+Measured at commit `6f4a680` with
 `cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85 --show-missing-lines`;
 every line number below is a line of that commit.
 
@@ -23,14 +23,20 @@ on macOS arm64 with rustc 1.98.1 and cargo-llvm-cov.
 
 | Lines | Missed | Line coverage | Regions | Missed | Functions | Missed |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4,047 | 162 | **96.00%** | 6,305 | 352 | 710 | 34 |
+| 4,047 | 161 | **96.02%** | 6,305 | 351 | 710 | 34 |
 
 A line counts as covered when any test executes it in any instantiation of the
 code it belongs to.
 
+The summary's 161 missed lines are more than the 139 this page lists because
+llvm-cov's summary counts a line as missed when one instantiation of its
+function does not run it, even when another instantiation does, while
+`--show-missing-lines`, like this page's rule above, lists only the lines no
+instantiation runs.
+
 ## Uncovered lines
 
-Line numbers are those of commit `2231589`. "Cheap to cover"
+Line numbers are those of commit `6f4a680`. "Cheap to cover"
 marks a line a short test would reach; those tests belong in sibling test files
 this page's author did not own, so they are listed here instead of written.
 
@@ -83,7 +89,6 @@ this page's author did not own, so they are listed here instead of written.
 | Lines | Why |
 | --- | --- |
 | 321 | A response-validation error whose headers name a delay, retried because a caller's predicate asked for it. **Cheap to cover** with a predicate test (`src/retry_tests.rs`). |
-| 494 | `StatusSet::is_empty` on a set with a status in a later word. **Cheap to cover** (`src/retry_tests.rs`). |
 | 662-663 | The real-clock arm of the test-only `run` (`#[cfg(test)]`): the crate's unit tests always pass a fake clock, and the integration tests run the non-test `run`, which is covered. |
 
 ### `src/telemetry.rs`
