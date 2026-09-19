@@ -1361,6 +1361,10 @@ const MIN_KEPT_ANSWER_BYTES: usize = r#""":{"type":"noul","noul":0}"#.len();
 /// Returns [`ErrorKind::ResponseValidation`](crate::ErrorKind::ResponseValidation)
 /// carrying the status, the headers, the whole body and the decode failure,
 /// whose path names the field that did not fit.
+// A request knows more than the question count and calls
+// `decode_system_one_with`; this shorter form is kept only for the tests and
+// the `internals` wrapper, and would be dead code in any other build.
+#[cfg(any(test, feature = "internals"))]
 pub(crate) fn decode_system_one<A>(
     body: Bytes,
     status: StatusCode,
@@ -1374,8 +1378,8 @@ where
     decode_system_one_with(body, status, headers, AnswerContext::new(questions), endpoint)
 }
 
-/// [`decode_system_one`] with everything the request knows about its
-/// answers.
+/// Decodes a System One response with everything the request knows about
+/// its answers: the question count and the largest score's level count.
 pub(crate) fn decode_system_one_with<A>(
     body: Bytes,
     status: StatusCode,
