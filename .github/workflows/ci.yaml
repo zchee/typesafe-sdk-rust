@@ -211,3 +211,8 @@ jobs:
       # still reads as a mapping, so only a check notices it stopped being one.
       - name: Port test matrix
         run: python3 .github/scripts/port-test-matrix.py
+
+      # pipx ships with the runner image and runs pytest from a throwaway
+      # environment, so nothing is installed into the image's Python.
+      - name: Tests of the scripts
+        run: pipx run --spec 'pytest==9.*' pytest .github/scripts/tests -q

@@ -34,3 +34,6 @@ rustc-ice-*.txt
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
+
+# Bytecode Python writes beside the CI scripts when their tests run.
+__pycache__/
