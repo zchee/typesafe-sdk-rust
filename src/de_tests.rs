@@ -4,7 +4,7 @@ use http::HeaderValue;
 use serde_json::json;
 
 use super::*;
-use crate::{ErrorKind, response::Answer, test_rendering::assert_printable};
+use crate::{ErrorKind, rendering_tests::assert_printable, response::Answer};
 
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("../tests/fixtures/result.json");

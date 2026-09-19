@@ -2,7 +2,7 @@
 //! rules it serves are pinned by the codec's own tests, which run through it.
 
 use super::*;
-use crate::test_rendering::assert_printable;
+use crate::rendering_tests::assert_printable;
 
 #[test]
 fn control_and_format_characters_are_escaped_and_printable_text_is_kept() {

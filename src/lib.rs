@@ -74,12 +74,12 @@ pub mod error;
 pub mod models;
 mod name;
 pub mod question;
+#[cfg(test)]
+mod rendering_tests;
 pub mod request;
 pub mod response;
 pub mod retry;
 mod telemetry;
-#[cfg(test)]
-mod test_rendering;
 mod text;
 pub mod transport;
 

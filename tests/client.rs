@@ -35,10 +35,10 @@ use typesafe_sdk::{
 #[cfg(feature = "tracing")]
 #[path = "support/recorder.rs"]
 mod recorder;
-#[path = "../src/test_rendering.rs"]
-mod test_rendering;
+#[path = "../src/rendering_tests.rs"]
+mod rendering_tests;
 
-use test_rendering::assert_printable;
+use rendering_tests::assert_printable;
 
 // ------------------------------------------------------------- fixtures
 

@@ -11,7 +11,7 @@ use crate::{
     ErrorKind,
     config::Explicit,
     constants::{RUNTIME_HEADER, SDK_HEADER},
-    test_rendering::assert_printable,
+    rendering_tests::assert_printable,
 };
 
 /// A configuration with a key, a base URL and the given default headers.
