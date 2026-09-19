@@ -207,11 +207,11 @@ thread_local! {
 /// The codec reserves six times a string's length before writing it, so the
 /// scratch a large string state leaves behind is six times the state, and a
 /// thread would keep it until later calls on that same thread decayed it
-/// away - never, on a thread that goes idle. A 64 MiB state left
-/// 402,653,228 B on its thread. A scratch over this size is dropped after its
-/// call instead, and a state that large grows it afresh on every call, as a
-/// first call does. A 1 MB state, the largest one a call is budgeted for,
-/// leaves 6,291,587 B, under the ceiling, so its calls keep reusing it.
+/// away - never, on a thread that goes idle. A scratch over this size is
+/// dropped after its call instead, and a state that large grows it afresh on
+/// every call, as a first call does. The scratch of a 1 MB state, the largest
+/// one a call is budgeted for, stays under the ceiling, so its calls keep
+/// reusing it.
 const MAX_RETAINED_SCRATCH: usize = 8 * 1024 * 1024;
 
 /// Appends the JSON form of `value` to `buf`.

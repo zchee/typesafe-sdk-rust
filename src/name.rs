@@ -1,21 +1,15 @@
 //! The owned text of a name a response carries: the model that answered, each
 //! answer's question name, a choice's pick and its option names.
 //!
-//! These names are short - a question name, an option label, a model id - and
-//! a response holds several of them, so storing each as a `String` costs one
-//! heap block per name. Decoding the three-answer response the allocation
-//! budget is measured on spent half of its blocks on them. [`Name`] keeps a
-//! name of up to 24 bytes (12 on a 32-bit target: the size of a `String`)
-//! inside the value itself and allocates only for a longer one, so those
-//! blocks disappear while every accessor still hands out `&str`.
+//! These names are short, and a `String` costs one heap block per name.
+//! [`Name`] keeps a name of up to 24 bytes (12 on a 32-bit target: the size
+//! of a `String`) inside the value itself and allocates only for a longer one,
+//! while every accessor still hands out `&str`.
 //!
-//! The small-string representation comes from the `compact_str` crate, not
-//! from code of our own: it needs `unsafe`, which this crate forbids, and it is
-//! exactly what that crate provides. This module is the only one that names it,
-//! so replacing it (or going back to `String`) changes this file alone. The
-//! crate's `serde` feature is not used: a name is decoded and serialized here,
-//! as a plain JSON string, by the same visitor code the rest of the decoder
-//! uses.
+//! The representation is the `compact_str` crate's: it needs `unsafe`, which
+//! this crate forbids, and this module is the only one that names it. Its
+//! `serde` feature is not used: a name is decoded and serialized here, as a
+//! plain JSON string.
 
 use std::{borrow::Cow, fmt};
 
@@ -27,7 +21,7 @@ use serde::{
 
 /// A name owned by a response, stored inline when it is short.
 ///
-/// It prints, compares and serializes exactly as the `String` it replaces.
+/// It prints, compares and serializes exactly as a `String` does.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Name(CompactString);
 

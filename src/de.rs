@@ -53,9 +53,9 @@ use crate::{
 /// and it never changes what is decoded or whether decoding succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AnswerContext {
-    // Both counts are held as `u32`, saturating: they are capacity hints, and
-    // the context is carried in every call's future twice, where two `usize`
-    // fields instead of one tipped the future over tokio's debug box size.
+    // Both counts are `u32`, not `usize`, saturating: they are capacity hints,
+    // and the context is carried twice in every call's future, where wider
+    // fields push that future over tokio's debug-build box size.
     expected_answers: u32,
     /// The most levels any score question of the request has, or 0 when
     /// unknown: the capacity a score's level lists start at, since the codec
@@ -95,12 +95,10 @@ impl AnswerContext {
 ///
 /// The hint is the largest score the request asked, but the server decides
 /// how many answers come back and how many levels each carries, so an
-/// unbounded hint lets a response multiply its size in memory: asking one
-/// score of 1,000 levels and receiving 500 empty and 500 one-level score
-/// answers kept 188 times what the same 90 KB body keeps without a hint. The
-/// hint exists to save the one growth a list of 5 to 8 levels pays after
-/// starting at 4, so 8 keeps all of that saving; a longer list grows from 8
-/// as it would without a hint.
+/// unbounded hint lets a response multiply its size in memory. The hint
+/// exists to save the one growth a list of 5 to 8 levels pays after starting
+/// at 4, so 8 keeps all of that saving; a longer list grows from 8 as it would
+/// without a hint.
 const MAX_LEVEL_HINT: usize = 8;
 
 /// The largest capacity a choice's probability list starts at from a
