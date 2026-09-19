@@ -476,7 +476,7 @@ key's account when both `TYPESAFE_LIVE_TESTS=1` and `TYPESAFE_API_KEY` are set a
 reaches them: `cargo test --workspace`, `cargo nextest run --workspace`, or anything naming
 `-p typesafe-sdk-rust-live-tests`. Without either variable they fail, never skip, before any
 request is made, so a key exported for other work does not make `--workspace` bill anyone; it
-makes those four tests fail instead. Run them only on purpose:
+makes those tests fail instead. Run them only on purpose:
 
 ```sh
 TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rust-live-tests
