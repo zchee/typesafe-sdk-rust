@@ -65,6 +65,16 @@ jobs:
       - name: Tests
         run: cargo nextest run --all-features
 
+      # The same tests under libtest, which runs the tests of one binary as
+      # threads of one process where nextest gives each its own: state that
+      # one test leaves in the process (a cached tracing interest, once) can
+      # only show here. One platform is enough for a harness difference. No
+      # `--workspace`, for the reason given at Tests; the doctests have
+      # their own step.
+      - name: Tests under libtest
+        if: matrix.os == 'ubuntu-26.04'
+        run: cargo test --all-features --tests
+
       - name: Doctests
         run: cargo test --doc --all-features
 
