@@ -47,8 +47,25 @@ PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
         "a macro that panics in place of code",
     ),
     (re.compile(r"#\[\s*" + "ign" + r"ore\b"), "a test switched off"),
+)
+
+#: What is refused anywhere in a file's whole text rather than line by line,
+#: with the reason printed beside a hit reported at the line it starts on.
+#:
+#: rustfmt writes a long ``cfg_attr`` over several lines, so its condition is
+#: matched as a run of tokens: a string literal, whose ``]`` does not end the
+#: attribute, or any other character but ``]`` and ``#``. The run stops at the
+#: first ``]`` outside a string, so a match cannot run past the attribute it
+#: starts in, and a word inside a string literal is never a hit. It stops at a
+#: ``#`` outside a string too, which no ``cfg_attr`` condition holds: an
+#: attribute left open cannot make every later attribute rescan the rest of
+#: the file, so a scan stays linear in the file's size.
+FILE_PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
-        re.compile(r"#\[\s*cfg_attr\s*\([^\]]*\b" + "ign" + r"ore\b"),
+        re.compile(
+            r'#\[\s*cfg_attr\s*\((?:"(?:[^"\\]|\\.)*"|[^"#\]])*?\b' + "ign" + r"ore\b",
+            re.DOTALL,
+        ),
         "a test switched off under a condition",
     ),
 )
@@ -92,6 +109,12 @@ def faults(path: str) -> list[str]:
                 found.append(
                     f"{path}:{number}:{hit.start() + 1}: {reason}: {hit.group(0)}"
                 )
+    for pattern, reason in FILE_PLACEHOLDERS:
+        for hit in pattern.finditer(text):
+            number = text.count("\n", 0, hit.start()) + 1
+            column = hit.start() - (text.rfind("\n", 0, hit.start()) + 1) + 1
+            shown = " ".join(hit.group(0).split())
+            found.append(f"{path}:{number}:{column}: {reason}: {shown}")
     return found
 
 
