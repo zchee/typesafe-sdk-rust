@@ -115,9 +115,7 @@ jobs:
         run: cargo deny check
 
       # The fuzz targets are a workspace of their own with a lock file of
-      # their own, which the step above never reads. The same deny.toml
-      # judges it; its one crate-scoped license exception (NCSA, for
-      # libfuzzer-sys) is used only by this graph.
+      # their own, which the step above never reads.
       - name: Dependency policy of the fuzz targets
         run: cargo deny --manifest-path fuzz/Cargo.toml check
 
@@ -129,12 +127,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # The fuzz targets are a workspace of their own, excluded from the one
-      # every step above builds, and running them needs nightly. Checking
-      # them needs neither: stable compiles them, together with libFuzzer's
-      # C++ runtime, so a change to the hidden seam they call through breaks
-      # here instead of on the next fuzzing run. One platform is enough for a
-      # compile check; `--locked` holds it to the committed lock file.
+      # Running the fuzz targets needs nightly; checking them does not:
+      # stable compiles them, together with libFuzzer's C++ runtime, so a
+      # change to the hidden seam they call through breaks here instead of
+      # on the next fuzzing run. One platform is enough for a compile check;
+      # `--locked` holds it to the committed lock file.
       - name: Fuzz targets compile
         if: matrix.os == 'ubuntu-26.04'
         run: cargo check --locked --manifest-path fuzz/Cargo.toml
@@ -180,18 +177,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # Nothing else in the toolchain looks for these: a NUL byte made git
-      # treat a text file as binary once already, and an invisible character
-      # survives every formatter this repository runs.
       - name: Invisible and control characters
         run: python3 .github/scripts/text-hygiene.py
 
       - name: No placeholders
         run: python3 .github/scripts/no-placeholders.py
 
-      # Every upstream test is mapped to a Rust test that exists or to a row
-      # of the README's deviations table. A renamed test or a reworded row
-      # still reads as a mapping, so only a check notices it stopped being one.
       - name: Port test matrix
         run: python3 .github/scripts/port-test-matrix.py
 
