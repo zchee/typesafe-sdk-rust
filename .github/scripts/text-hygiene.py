@@ -23,20 +23,15 @@ FORBIDDEN_BYTES: frozenset[int] = frozenset(
     {*range(0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0x7F}
 )
 
-#: Characters that render as nothing, or as an ordinary space they are not.
+#: Characters that render as an ordinary space or line break they are not.
+#: Every format character (category ``Cf``: a zero-width space, a
+#: bidirectional mark or override, a variation selector, a tag character) is
+#: refused as well, since each of them renders as nothing.
 #:
-#: Keyed by code point, never by the character itself: writing one of these
+#: Held by code point, never by the character itself: writing one of these
 #: into this file would put in it exactly what it exists to keep out, and no
 #: reader of the source could see that it had happened.
-FORBIDDEN_CHARS: dict[int, str] = {
-    0x00A0: "NO-BREAK SPACE",
-    0x200B: "ZERO WIDTH SPACE",
-    0x200E: "LEFT-TO-RIGHT MARK",
-    0x200F: "RIGHT-TO-LEFT MARK",
-    0x2028: "LINE SEPARATOR",
-    0x2029: "PARAGRAPH SEPARATOR",
-    0xFEFF: "ZERO WIDTH NO-BREAK SPACE",
-}
+FORBIDDEN_CHARS: frozenset[int] = frozenset({0x00A0, 0x2028, 0x2029})
 
 
 def tracked_files() -> list[str]:
@@ -82,13 +77,10 @@ def faults(path: str) -> list[str]:
     # before they could be reported.
     for number, line in enumerate(text.split("\n"), start=1):
         for column, character in enumerate(line, start=1):
-            name = FORBIDDEN_CHARS.get(ord(character))
-            if name is not None:
-                found.append(f"{path}:{number}:{column}: U+{ord(character):04X} {name}")
-            elif unicodedata.category(character) == "Cf":
-                # Every other format character: a bidirectional override, a
-                # variation selector, a tag character. None of them belongs in
-                # source or prose here, and each of them is invisible.
+            if (
+                ord(character) in FORBIDDEN_CHARS
+                or unicodedata.category(character) == "Cf"
+            ):
                 found.append(
                     f"{path}:{number}:{column}: U+{ord(character):04X} "
                     f"{unicodedata.name(character, 'unnamed format character')}"
