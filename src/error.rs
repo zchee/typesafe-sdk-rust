@@ -21,20 +21,6 @@
 //!   mocking time, so the parser takes the instant to measure against and
 //!   [`ApiError::retry_after`] is the thin wrapper that reads the clock.
 
-// The crate-visible constructors here are the seam the request, response and
-// transport lanes raise their failures through, and none of those modules
-// exists yet; everything private below is reached only from those
-// constructors. The module is written once and completely rather than grown a
-// piece at a time, so until the first real caller lands the compiler is right
-// that nothing outside the tests calls it.
-//
-// `expect` rather than `allow`, so this expires by itself: the moment the last
-// item here has a caller the expectation goes unfulfilled, which is a warning,
-// which is a failed gate. The attribute is not applied under `cfg(test)`,
-// where the tests are callers and the expectation could not hold; that is also
-// what keeps this from hiding an item no test reaches, which the test build
-// still reports.
-
 use std::{
     borrow::Cow,
     error::Error as StdError,
