@@ -65,6 +65,13 @@ jobs:
       - name: Lints without default features
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
+      # The live tests compile here and run nowhere in CI: with a key they
+      # make billed calls, without one they fail on purpose. The two steps
+      # above already lint them through `--workspace`; naming the package
+      # keeps them linted if either step ever drops `--workspace`.
+      - name: Lints of the live tests
+        run: cargo clippy -p typesafe-sdk-rust-live-tests --all-targets -- -D warnings
+
       # No `--workspace`: this one runs code. A crate whose tests need a live
       # API key is a workspace member and not a default member, so the default
       # selection is the one that can never reach it.
@@ -121,6 +128,24 @@ jobs:
         run: cargo doc --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings
+
+      # A task marker, a macro that panics where code should be, or a test
+      # switched off with an attribute compiles, passes every lint above and
+      # reads as finished in a review. One platform is enough for a scan of
+      # the tracked text.
+      - name: No placeholders
+        if: matrix.os == 'ubuntu-26.04'
+        run: python3 .github/scripts/no-placeholders.py
+
+      # The fuzz targets are a workspace of their own, excluded from the one
+      # every step above builds, and running them needs nightly. Checking
+      # them needs neither: stable compiles them, together with libFuzzer's
+      # C++ runtime, so a change to the hidden seam they call through breaks
+      # here instead of on the next fuzzing run. One platform is enough for a
+      # compile check; `--locked` holds it to the committed lock file.
+      - name: Fuzz targets compile
+        if: matrix.os == 'ubuntu-26.04'
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml
 
   coverage:
     name: coverage

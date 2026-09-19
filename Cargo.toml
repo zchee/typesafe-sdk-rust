@@ -2,13 +2,14 @@
 # The root package is a workspace member as well, so "." is listed explicitly
 # next to the helper crates. `spikes/` holds throwaway measurement binaries;
 # excluding them keeps `cargo build` at the root from compiling the whole
-# dependency graph twice with different feature unions.
-members = [".", "crates/macros", "crates/test-support"]
+# dependency graph twice with different feature unions. `fuzz/` is a
+# workspace of its own, run with the nightly toolchain only.
+members = [".", "crates/live-tests", "crates/macros", "crates/test-support"]
 # Naming the default set explicitly is what keeps a crate whose tests need a
 # live API key out of a bare `cargo test` and out of CI: such a crate is added
 # to `members` and left out here, so no command has to remember to exclude it.
 default-members = [".", "crates/macros", "crates/test-support"]
-exclude = ["spikes"]
+exclude = ["fuzz", "spikes"]
 # Resolver 3 is the edition-2024 default; stating it silences the warning that
 # a virtual workspace manifest has no edition to infer it from.
 resolver = "3"

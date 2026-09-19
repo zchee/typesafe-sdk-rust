@@ -1,0 +1,29 @@
+# Tests against the live API. With `TYPESAFE_API_KEY` set they make real,
+# BILLED calls; without it they FAIL - they never skip. So this crate is a
+# workspace member for the lints and never a default member: `cargo test` and
+# `cargo nextest run` without `--workspace` or `-p` never reach it.
+# `publish = false`: it is not a library anybody depends on.
+[package]
+name = "typesafe-sdk-rust-live-tests"
+version = "0.0.0"
+description = "Tests of typesafe-sdk-rust against the live TypeSafe API"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "live_tests"
+
+[dependencies]
+# Default features: the typed test uses the derive.
+typesafe-sdk-rust = { path = "../.." }
+
+[dev-dependencies]
+# A criteria object for the raw-shaped question, as the Python test spells it.
+serde = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

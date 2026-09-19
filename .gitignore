@@ -27,3 +27,10 @@ rustc-ice-*.txt
 .env
 .env.*
 !.env.example
+
+# cargo-fuzz output: the build, the inputs a run finds (the committed seeds
+# live in fuzz/corpus and a run is pointed at another directory for its own
+# finds, see fuzz/README.md), crash reproducers and coverage data.
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
