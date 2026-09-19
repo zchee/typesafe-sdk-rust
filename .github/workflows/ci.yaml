@@ -43,14 +43,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # `rustup toolchain install` with no toolchain named installs the active
-      # one, which is the one rust-toolchain.toml names, together with its
-      # components. It is spelled out rather than left to happen on the first
-      # cargo call: rustup 1.28.0 removed that automatic install, 1.28.1 put it
-      # back as a default that `RUSTUP_AUTO_INSTALL=0` turns off and 1.29.0
-      # added `rustup set auto-install disable` beside it, so whether a bare
-      # cargo call installs anything is a property of the runner image, not of
-      # this workflow. `rustup show` never installed; it only reports.
+      # `rustup toolchain install` with no toolchain named installs the one
+      # rust-toolchain.toml names, with its components. Whether a bare cargo
+      # call would install it depends on the runner's rustup settings.
       - name: Install the pinned toolchain
         run: rustup toolchain install --no-self-update
 
