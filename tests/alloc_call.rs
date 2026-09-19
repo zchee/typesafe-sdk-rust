@@ -31,8 +31,12 @@
 //! the call inside a task never pays it; a pinned reference is one pointer
 //! wide, so the pinned runs count the SDK's blocks only. The same calls
 //! unpinned are measured and printed on every run as well, with the futures'
-//! sizes, so the runtime's box stays visible: in a debug build the System One
-//! future is over the threshold and its unpinned calls cost one block more.
+//! sizes, so the runtime's box shows up here the moment a future grows past
+//! the threshold. Over this test's transport the System One future is 2,040
+//! bytes, under the debug threshold, so today its unpinned calls cost exactly
+//! what the pinned ones cost, in both profiles. Over the default transport the
+//! same future is 2,344 bytes: a debug build that hands such a call to
+//! `block_on` or `spawn` still pays the box, one block more.
 //!
 //! One profiler exists per process, so all of it runs in a single test.
 
