@@ -1,4 +1,4 @@
-//! B4: reading `Retry-After`.
+//! B4: reading `Retry-After`, and the backoff delay.
 //!
 //! The parse is reached the way a caller reaches it: an API error from a
 //! real call through the in-memory transport, then `ApiError::retry_after`,
@@ -10,12 +10,17 @@
 //! so the HTTP-date case includes a `SystemTime::now()`; the other two read
 //! it too and never use it. Inside the retry loop the SDK passes the clock
 //! reading it already has.
+//!
+//! `backoff` is the pure delay function with the default policy's numbers
+//! (0.5 s initial, 5 s cap, 0.25 jitter), at the first attempt, at one past
+//! the cap, and far past it, where the cap is tested in log2 space before
+//! any doubling. The random draw is an argument, so no generator is timed.
 
 use std::pin::pin;
 
 use divan::{Bencher, black_box};
 use http::StatusCode;
-use typesafe_sdk::{ApiError, ErrorKind, RetryPolicy};
+use typesafe_sdk::{__internals as sdk, ApiError, ErrorKind, RetryPolicy};
 
 use crate::{
     service::{InMemory, client},
@@ -57,4 +62,11 @@ fn retry_after(bencher: Bencher<'_, '_>, spelling: &str) {
     let error = rate_limited(header(spelling));
     assert!(error.retry_after().is_some(), "{spelling}: {:?} gives a wait", header(spelling));
     bencher.bench_local(|| black_box(&error).retry_after());
+}
+
+#[divan::bench(args = [1, 6, 1000])]
+fn backoff(bencher: Bencher<'_, '_>, attempt: u32) {
+    assert!(sdk::backoff_seconds(attempt, 0.5, 5.0, 0.25, 0.5) > 0.0);
+    bencher
+        .bench_local(|| sdk::backoff_seconds(black_box(attempt), 0.5, 5.0, 0.25, black_box(0.5)));
 }

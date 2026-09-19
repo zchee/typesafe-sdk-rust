@@ -105,3 +105,10 @@ where
 {
     crate::de::decode_system_one(body, status, headers, questions, None)
 }
+
+/// See `retry::backoff_seconds`: the delay before the attempt after attempt
+/// number `attempt` failed, with `draw` standing in for the random number.
+#[must_use]
+pub fn backoff_seconds(attempt: u32, initial: f64, max: f64, jitter: f64, draw: f64) -> f64 {
+    crate::retry::backoff_seconds(attempt, initial, max, jitter, draw)
+}
