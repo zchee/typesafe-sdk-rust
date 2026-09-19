@@ -934,11 +934,9 @@ fn unparsed_message(body: &[u8], failure: &DecodeError) -> Box<str> {
     if failure.kind() == DecodeErrorKind::TooDeep { json_message(body) } else { text_message(body) }
 }
 
-/// The server's `text` as a message holds it: escaped through the one helper
-/// for text this SDK did not write, with a backslash kept as it is, and cut at
-/// [`text::MAX_MESSAGE_CHARS`] characters, counted after escaping and marked with
-/// U+2026 when anything was left off. A cut never splits an escape, and the
-/// text past it is not copied into the message.
+/// The server's `text` as a message holds it: escaped and cut at
+/// [`text::MAX_MESSAGE_CHARS`] characters as `crate::text` describes, with a
+/// backslash kept as it is.
 ///
 /// The backslash is kept because a JSON body standing in for a message already
 /// spells its escapes with one (`"a\nb"`), and a second pass would turn every

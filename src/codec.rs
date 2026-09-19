@@ -505,16 +505,10 @@ const MAX_PATH_SEGMENT_CHARS: usize = 128;
 const MAX_PATH_CHARS: usize = 320;
 
 /// Renders a field path the way `serde_path_to_error` does - dotted names,
-/// bracketed indices, `.` for the root - with every name made safe to print.
-///
-/// A name keeps its printable text, non-ASCII included. A control character,
-/// or a format character that reorders or hides the text around it, is
-/// written as a Rust escape (`\n`, `\r`, `\t`, or `\u{1b}` for the others), so
-/// that a key cannot break a log line, recolour a terminal or disguise itself;
-/// a backslash is written `\\`, so that no escape can be mistaken for text.
-/// Each name is capped at [`MAX_PATH_SEGMENT_CHARS`] characters and the whole
-/// path at [`MAX_PATH_CHARS`], counted after escaping; a cut never splits a
-/// character or an escape, and is marked with U+2026.
+/// bracketed indices, `.` for the root - with every name escaped and cut as
+/// `crate::text` describes, and a backslash written `\\` so that no escape
+/// can be mistaken for text. Each name is capped at [`MAX_PATH_SEGMENT_CHARS`]
+/// characters and the whole path at [`MAX_PATH_CHARS`].
 fn render_path(path: &serde_path_to_error::Path, missing: Option<&str>) -> String {
     use serde_path_to_error::Segment;
 
