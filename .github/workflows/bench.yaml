@@ -1,17 +1,24 @@
 name: Benchmarks
 
-# Pull requests and manual runs only. A `push` trigger on `main` would send
-# results to CodSpeed before the repository is set up there, and fail the
-# branch for it; add it once the CodSpeed app is installed and a pull
-# request run has been green.
+# CodSpeed compares a pull request's instruction counts with those of the
+# branch it targets, so it needs both: runs on `main` are the baseline of
+# its regression reports, and runs on pull requests are what it reports on.
+# The `push` trigger could only be added once the CodSpeed app was installed
+# and a pull request run had uploaded; run 35429672326 did both.
 on:
+  push:
+    branches: [main]
   pull_request:
   # CodSpeed starts manual runs itself to measure older commits.
   workflow_dispatch:
 
+# A superseded pull request run measures nothing anyone reads, so the newest
+# push on a branch cancels the ones it replaced. `main` is exempt: each of
+# its runs is the baseline of one commit, and cancelling one would leave
+# that commit without one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read

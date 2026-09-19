@@ -1328,14 +1328,27 @@ Each was built with `cargo codspeed build -m simulation -p typesafe-sdk-rust --f
 the callgrind command under Method was run on each tree five times, pinned to one core, one run at a time. Both
 clones were removed afterwards.
 
+### AC-P7: proven on CodSpeed's runner
+
+| Item | Evidence |
+| --- | --- |
+| First pull-request run (`ca5f02e`) | run 35428694878: build ok, then CodSpeed's runner stopped with "Unsupported system" on `ubuntu-26.04`. Its valgrind setup accepts Ubuntu 22.04 / 24.04 and Debian 12 only (`CodSpeedHQ/runner`, `src/executor/valgrind/setup.rs`, runner 5.2.1 and 5.3.1) |
+| Image pin | `a5a0795`: the `codspeed` job alone runs on `ubuntu-24.04`, the newest GitHub-hosted image the runner supports, with the reason and the condition for going back beside the label (wording made exact in `15952c4`) |
+| Proof | run 35429672326 at `a5a0795`, on `ubuntu-24.04`: 35 benchmarks measured, uploaded through OIDC, and CodSpeed's check reports the app installed. `call::sdk` 108.8 µs against `call::naive` 159.3 µs (**0.68x**), `call::sdk_20` 233 µs against `call::naive_20` 511.3 µs (**0.46x**). These are CodSpeed's simulated times (instruction counts with its cache and cycle estimate), relayed by the lead and checked by the Phase 5 verifier, not measured on the Linux host |
+| `push` trigger | added after that run: `bench.yaml` now also runs on every push to `main`, the baseline CodSpeed compares pull requests with. A `main` run is never cancelled by a newer one (`cancel-in-progress` is off for `refs/heads/main`, as in `ci.yaml`) |
+
+AC-P7's condition, "the instruction count of the SDK full-call benchmark is lower than the naive comparator's", holds on
+CodSpeed's runner as it held on the Linux host (0.51x to 0.52x in raw instructions there). CodSpeed reports estimated
+times rather than raw instructions, so its ratios are not expected to equal the host's; why the 3-question ratio is
+higher there (0.68x) was not measured.
+
 ### Unmeasured
 
-- Instruction counts on arm64 (callgrind is not available for macOS arm64), and CodSpeed's own runner: AC-P7 is proved
-  only by a pull-request run of `bench.yaml`, which needs the CodSpeed GitHub app on the repository (the owner's step).
+- Instruction counts on arm64 (callgrind is not available for macOS arm64).
 - Comparator (B), `typesafe-rs` 0.1.0 (a new crate).
 - Wall-clock numbers on an idle macOS machine: every macOS table here was taken under a load average of 8 to 15 from
   other sessions.
 - Instruction counts of `loopback` (kept out of the instrumented run on purpose).
 - The R17 ceiling at any value other than 1 MiB and 8 MiB, and under a musl or jemalloc allocator.
 - The name budgets on a 32-bit target (inline limit 12 bytes), and `compact_str`'s instruction counts on arm64.
-- Future sizes on Windows (the size guard keeps loose bounds there), and CodSpeed's cycle estimate itself.
+- Future sizes on targets other than macOS and Linux (the size guard keeps loose bounds there).
