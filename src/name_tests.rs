@@ -83,61 +83,128 @@ fn a_value_that_is_not_a_string_is_refused_as_a_string_refuses_it() {
     }
 }
 
-/// Every Rust file of the package, outside `target`.
-fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
+/// Every file under `dir` that `wanted` accepts, outside `target` and `.git`.
+fn files_under(dir: &Path, wanted: &dyn Fn(&Path) -> bool, found: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
     for entry in entries {
         let path = entry.expect("a directory entry").path();
         if path.is_dir() {
-            if path.file_name().is_some_and(|name| name == "target") {
+            if path.file_name().is_some_and(|name| name == "target" || name == ".git") {
                 continue;
             }
-            rust_files(&path, found);
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files_under(&path, wanted, found);
+        } else if wanted(&path) {
             found.push(path);
         }
     }
 }
 
-/// `src/name.rs` is the one file that names the small-string crate, so that
-/// replacing the crate stays a change to that file alone. The check reads
-/// every Rust file of this package - library, tests, benches and the derive
-/// crate - because an integration test or a bench can name a dependency of
-/// the library too.
+/// The lines of `path` that `offends` flags, as `path:line: text`.
+fn flagged_lines(path: &Path, offends: &dyn Fn(&str) -> bool) -> Vec<String> {
+    let text =
+        fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| offends(line))
+        .map(|(number, line)| format!("{}:{}: {line}", path.display(), number + 1))
+        .collect()
+}
+
+/// `src/name.rs` is the one file that uses the small-string crate, so that
+/// replacing the crate stays a change to that file alone. Three rules keep it
+/// so, and each one closes a route the others leave open:
+///
+/// 1. No Rust file of the package other than `src/name.rs` names the crate:
+///    library, tests, benches and the workspace's other crates, because an
+///    integration test or a bench can name a dependency of the library too.
+/// 2. Inside `src/name.rs` the crate's type is only the private field of
+///    `Name`. Outside comments, the only lines that may name the crate or its
+///    type are the private import, the struct declaration and the two
+///    constructor calls, exactly as written. Any other line fails: `use ...
+///    as`, `pub use` or `pub(crate) use` of anything in the crate, a type
+///    alias, or a signature that hands the type out would let another module
+///    use the crate without naming it.
+/// 3. No `Cargo.toml` under the repository renames the package
+///    (`other = { package = "..." }`): a renamed dependency is used under a
+///    name the first rule does not look for.
 #[test]
 fn only_this_module_names_the_small_string_crate() {
-    // Spelled in two pieces so this file does not name it either.
+    // Spelled in pieces so this file does not name the crate or its type.
     let needle = concat!("compact", "_str");
+    let type_name = concat!("Compact", "String");
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let allowed = root.join("src").join("name.rs");
 
+    let is_rust = |path: &Path| path.extension().is_some_and(|extension| extension == "rs");
     let mut files = Vec::new();
     for dir in ["src", "tests", "benches", "crates"] {
         let dir = root.join(dir);
         if dir.is_dir() {
-            rust_files(&dir, &mut files);
+            files_under(&dir, &is_rust, &mut files);
         }
     }
     assert!(files.contains(&allowed), "the scan did not see {}", allowed.display());
     assert!(files.len() > 20, "the scan found only {} files: {files:?}", files.len());
 
+    // Rule 1.
+    let names_the_crate = |line: &str| line.contains(needle);
     let offenders: Vec<String> = files
         .iter()
         .filter(|path| **path != allowed)
-        .filter_map(|path| {
-            let text = fs::read_to_string(path)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-            let lines: Vec<String> = text
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| line.contains(needle))
-                .map(|(number, line)| format!("{}:{}: {line}", path.display(), number + 1))
-                .collect();
-            (!lines.is_empty()).then(|| lines.join("\n"))
-        })
+        .flat_map(|path| flagged_lines(path, &names_the_crate))
         .collect();
     assert!(offenders.is_empty(), "only src/name.rs may name {needle}:\n{}", offenders.join("\n"));
 
+    // Rule 2.
+    let permitted = [
+        format!("use {needle}::{type_name};"),
+        format!("pub(crate) struct Name({type_name});"),
+        format!("Self({type_name}::from(text))"),
+    ];
+    let hands_it_out = |line: &str| {
+        let code = line.trim();
+        !code.starts_with("//")
+            && (code.contains(needle) || code.contains(type_name))
+            && !permitted.iter().any(|shape| code == shape)
+    };
+    let exposed = flagged_lines(&allowed, &hands_it_out);
+    assert!(
+        exposed.is_empty(),
+        "src/name.rs may use {type_name} only as Name's private field; these lines go further:\n{}",
+        exposed.join("\n")
+    );
     let own = fs::read_to_string(&allowed).expect("src/name.rs reads");
-    assert!(own.contains(needle), "src/name.rs no longer names {needle}; update this check");
+    for shape in &permitted {
+        assert!(
+            own.contains(shape.as_str()),
+            "src/name.rs no longer has `{shape}`; update this check"
+        );
+    }
+
+    // Rule 3. Spaces and the quote style are ignored, so any spelling of the
+    // key is caught.
+    let is_manifest = |path: &Path| path.file_name().is_some_and(|name| name == "Cargo.toml");
+    let mut manifests = Vec::new();
+    files_under(root, &is_manifest, &mut manifests);
+    assert!(
+        manifests.contains(&root.join("Cargo.toml"))
+            && manifests.contains(&root.join("crates").join("macros").join("Cargo.toml")),
+        "the scan did not see the workspace's manifests: {manifests:?}"
+    );
+    let renamed_to = format!("package=\"{needle}\"");
+    let renames_it = |line: &str| {
+        let squeezed: String = line
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| if c == '\'' { '"' } else { c })
+            .collect();
+        squeezed.contains(&renamed_to)
+    };
+    let renamed: Vec<String> =
+        manifests.iter().flat_map(|path| flagged_lines(path, &renames_it)).collect();
+    assert!(
+        renamed.is_empty(),
+        "{needle} is depended on under another name:\n{}",
+        renamed.join("\n")
+    );
 }
