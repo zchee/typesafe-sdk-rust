@@ -46,8 +46,20 @@ jobs:
       # CodSpeed authenticates the upload through GitHub's OpenID Connect
       # token, so no upload token is stored in the repository.
       id-token: write
+    # This is the one job that can mint an OIDC token, and it runs two
+    # third-party actions pinned at a major tag (taiki-e/install-action@v2,
+    # CodSpeedHQ/action@v5), as every workflow here does: fixes within the
+    # major arrive without an edit, but a re-pointed or compromised tag runs
+    # here unreviewed, with the token's audience (CodSpeed, able to forge a
+    # benchmark upload) and read access to the repository. A commit-SHA pin
+    # would close that and turn every upstream fix into a manual bump.
     steps:
+      # No later step fetches or pushes through git with the job's token, so
+      # it is not left in `.git/config`, where every build script and proc
+      # macro the job compiles could read it.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # The toolchain rust-toolchain.toml pins, as in ci.yaml.
       - name: Install the pinned toolchain
