@@ -156,6 +156,14 @@ fn a_question_set_is_a_bound_like_any_other() {
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
+/// The body sent when a `Review` is asked about "I was charged twice.".
+const REVIEW_BODY: &str = concat!(
+    r#"{"state":"I was charged twice.","model":"jev-latest","questions":"#,
+    r#"{"spam":{"type":"noul","instructions":"Spam?"},"#,
+    r#""tone":{"type":"choice","instructions":"Tone?","criteria":{"friendly":null,"hostile":null}},"#,
+    r#""quality":{"type":"score","instructions":"Quality?","criteria":["bad","ok","great"]}}}"#,
+);
+
 include!("support/answering.rs");
 
 fn client_for(server: &TestServer) -> Client {
@@ -204,14 +212,8 @@ async fn ask_sends_the_compiled_questions_and_decodes_into_the_struct() {
 
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
-    let expected_body = concat!(
-        r#"{"state":"I was charged twice.","model":"jev-latest","questions":"#,
-        r#"{"spam":{"type":"noul","instructions":"Spam?"},"#,
-        r#""tone":{"type":"choice","instructions":"Tone?","criteria":{"friendly":null,"hostile":null}},"#,
-        r#""quality":{"type":"score","instructions":"Quality?","criteria":["bad","ok","great"]}}}"#,
-    );
     for request in &requests {
-        assert_eq!(std::str::from_utf8(&request.body).expect("UTF-8"), expected_body);
+        assert_eq!(std::str::from_utf8(&request.body).expect("UTF-8"), REVIEW_BODY);
         assert_eq!(request.headers["x-team"], "billing");
     }
 
@@ -314,14 +316,8 @@ async fn an_asked_request_is_retried_by_the_policy_that_applies_to_it() {
 
     // Every attempt of every call sent the same body, the compiled questions
     // included.
-    let expected_body = concat!(
-        r#"{"state":"I was charged twice.","model":"jev-latest","questions":"#,
-        r#"{"spam":{"type":"noul","instructions":"Spam?"},"#,
-        r#""tone":{"type":"choice","instructions":"Tone?","criteria":{"friendly":null,"hostile":null}},"#,
-        r#""quality":{"type":"score","instructions":"Quality?","criteria":["bad","ok","great"]}}}"#,
-    );
     for (index, request) in requests.iter().enumerate() {
-        assert_eq!(std::str::from_utf8(&request.body).expect("UTF-8"), expected_body, "{index}");
+        assert_eq!(std::str::from_utf8(&request.body).expect("UTF-8"), REVIEW_BODY, "{index}");
     }
 }
 
