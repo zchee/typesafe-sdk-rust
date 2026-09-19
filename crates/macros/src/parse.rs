@@ -213,13 +213,13 @@ pub(crate) fn parse(input: &DeriveInput) -> syn::Result<QuestionSetInput> {
         }
     };
 
-    let mut questions: Vec<(QuestionField, Span)> = Vec::with_capacity(fields.len());
+    let mut questions: Vec<QuestionField> = Vec::with_capacity(fields.len());
     for field in fields {
         let Some(member) = &field.ident else { continue };
         let Some((question, name, name_span)) = errors.keep(field_question(field, member)) else {
             continue;
         };
-        if let Some((first, _)) = questions.iter().find(|(known, _)| known.name == name) {
+        if let Some(first) = questions.iter().find(|known| known.name == name) {
             errors.push(syn::Error::new(
                 name_span,
                 format!(
@@ -234,15 +234,14 @@ pub(crate) fn parse(input: &DeriveInput) -> syn::Result<QuestionSetInput> {
             continue;
         }
         let ty_span = field.ty.span();
-        questions
-            .push((QuestionField { member: member.clone(), name, question, ty_span }, name_span));
+        questions.push(QuestionField { member: member.clone(), name, question, ty_span });
     }
 
     errors.finish()?;
     Ok(QuestionSetInput {
         root: root.unwrap_or_else(|| quote!(::typesafe_sdk)),
         ident: ident.clone(),
-        fields: questions.into_iter().map(|(field, _)| field).collect(),
+        fields: questions,
     })
 }
 
