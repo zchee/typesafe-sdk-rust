@@ -69,9 +69,9 @@ impl AnswerContext {
     }
 
     /// The same, for a request whose largest score question has `levels`
-    /// levels.
+    /// levels, held to at most [`MAX_LEVEL_HINT`].
     pub(crate) fn with_levels(self, levels: usize) -> Self {
-        Self { levels: saturate(levels), ..self }
+        Self { levels: saturate(levels.min(MAX_LEVEL_HINT)), ..self }
     }
 
     /// The level hint, as a capacity.
@@ -89,6 +89,18 @@ impl AnswerContext {
         self.expected_answers as usize
     }
 }
+
+/// The largest capacity a score's first level list starts at.
+///
+/// The hint is the largest score the request asked, but the server decides
+/// how many answers come back and how many levels each carries, so an
+/// unbounded hint lets a response multiply its size in memory: asking one
+/// score of 1,000 levels and receiving 500 empty and 500 one-level score
+/// answers kept 188 times what the same 90 KB body keeps without a hint. The
+/// hint exists to save the one growth a list of 5 to 8 levels pays after
+/// starting at 4, so 8 keeps all of that saving; a longer list grows from 8
+/// as it would without a hint.
+const MAX_LEVEL_HINT: usize = 8;
 
 /// `count` as a `u32`, or `u32::MAX` when it does not fit.
 fn saturate(count: usize) -> u32 {
@@ -1090,12 +1102,22 @@ impl<'de> Visitor<'de> for LevelsSeed {
     where
         M: MapAccess<'de>,
     {
+        // The hinted capacity is reserved only once a first entry exists, so
+        // an empty `{}` allocates nothing whatever the hint. The first key is
+        // read ahead of the loop rather than tested for inside it, which
+        // keeps the loop itself as it was without a hint.
+        let Some(mut level) = map.next_key_seed(LevelSeed)? else {
+            return Ok(Vec::new());
+        };
         let mut entries = Vec::with_capacity(self.capacity);
-        while let Some(level) = map.next_key_seed(LevelSeed)? {
+        loop {
             let probability = map.next_value()?;
             insert_by_level(&mut entries, level, probability);
+            match map.next_key_seed(LevelSeed)? {
+                Some(next) => level = next,
+                None => return Ok(entries),
+            }
         }
-        Ok(entries)
     }
 }
 
@@ -1126,14 +1148,21 @@ impl<'de> Visitor<'de> for LegendSeed {
     where
         M: MapAccess<'de>,
     {
+        // Reserved at the first entry, as `LevelsSeed` does.
+        let Some(mut level) = map.next_key_seed(LevelSeed)? else {
+            return Ok(Vec::new());
+        };
         let mut entries = Vec::with_capacity(self.capacity);
-        while let Some(level) = map.next_key_seed(LevelSeed)? {
+        loop {
             // The description borrows the body while it is read and is copied
             // once, here, because a response outlives nothing it could borrow.
             let description: Content<'de> = map.next_value()?;
             insert_by_level(&mut entries, level, description.into_owned());
+            match map.next_key_seed(LevelSeed)? {
+                Some(next) => level = next,
+                None => return Ok(entries),
+            }
         }
-        Ok(entries)
     }
 }
 
@@ -1391,7 +1420,9 @@ where
     A: AnswerSet,
 {
     let expected = asked.expected_answers().min(body.len() / MIN_KEPT_ANSWER_BYTES);
-    let context = AnswerContext::new(expected).with_levels(asked.levels());
+    // The level hint was bounded where it entered; only the count is capped
+    // here.
+    let context = AnswerContext { expected_answers: saturate(expected), ..asked };
     let meta = ResponseMeta::new(status, headers, body);
     let decoded =
         codec::decode_seed(meta.raw_body(), EnvelopeSeed::<A> { context, answers: PhantomData });

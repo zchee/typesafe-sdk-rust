@@ -651,6 +651,56 @@ fn score_levels_are_integers_sorted_whatever_the_wire_order() {
 }
 
 #[test]
+fn the_level_hint_is_bounded_where_it_enters() {
+    let rows = [(0, 0), (5, 5), (8, 8), (9, 8), (1_000, 8), (usize::MAX, 8)];
+    for (asked, hinted) in rows {
+        let context = AnswerContext::new(3).with_levels(asked);
+        assert_eq!(context.levels(), hinted, "a request whose largest score has {asked} levels");
+        assert_eq!(
+            context.expected_answers(),
+            3,
+            "a request whose largest score has {asked} levels"
+        );
+    }
+}
+
+#[test]
+fn a_level_list_takes_the_hinted_capacity_only_once_it_has_an_entry() {
+    // (probabilities, legend, hint, entries, capacity)
+    let rows = [
+        ("{}", "{}", 8, 0, 0),
+        ("{}", "{}", 0, 0, 0),
+        (r#"{"0":1}"#, r#"{"0":"only"}"#, 8, 1, 8),
+        (r#"{"2":0.5,"0":0.25,"1":0.25}"#, r#"{"2":"c","0":"a","1":"b"}"#, 5, 3, 5),
+        (
+            r#"{"4":0.2,"3":0.2,"2":0.2,"1":0.2,"0":0.2}"#,
+            r#"{"4":"e","3":"d","2":"c","1":"b","0":"a"}"#,
+            5,
+            5,
+            5,
+        ),
+    ];
+    for (probabilities, legend, hint, entries, capacity) in rows {
+        let levels = LevelsSeed { capacity: hint }
+            .deserialize(&mut sonic_rs::Deserializer::from_slice(probabilities.as_bytes()))
+            .unwrap_or_else(|error| panic!("{probabilities} did not decode: {error}"));
+        assert_eq!(levels.len(), entries, "probabilities {probabilities} under hint {hint}");
+        assert_eq!(levels.capacity(), capacity, "probabilities {probabilities} under hint {hint}");
+        assert!(levels.is_sorted_by_key(|(level, _)| *level), "{probabilities}: {levels:?}");
+
+        let legend_entries = LegendSeed { capacity: hint }
+            .deserialize(&mut sonic_rs::Deserializer::from_slice(legend.as_bytes()))
+            .unwrap_or_else(|error| panic!("{legend} did not decode: {error}"));
+        assert_eq!(legend_entries.len(), entries, "legend {legend} under hint {hint}");
+        assert_eq!(legend_entries.capacity(), capacity, "legend {legend} under hint {hint}");
+        assert!(
+            legend_entries.is_sorted_by_key(|(level, _)| *level),
+            "{legend}: {legend_entries:?}"
+        );
+    }
+}
+
+#[test]
 fn a_score_level_that_is_not_a_non_negative_integer_fails_at_its_key() {
     let rows = [
         (r#""legend":{"-1":"x"},"probabilities":{}"#, "answers.s.legend.-1"),
