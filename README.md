@@ -190,6 +190,15 @@ documented 401.
 An error's `Display` is the sentence to show a user; for an API error it reads
 `POST https://api.typesafe.ai/v1/systemone: 429 Too many requests (request_id=req_123)`.
 
+A response body that is **not valid UTF-8** is not JSON (RFC 8259 requires UTF-8), and every body
+is checked before the parser reads it. With a 2xx status it is a `ResponseValidation` error: its
+`decode_error()` is a `Syntax` error at the first bad byte (line and column, the column counted in
+bytes), its `field_path()` is empty, and like any body that does not decode it is not retried for
+its status. With any other status the caller still gets the `ApiError`, with its status, headers,
+`retry_after()` and every byte of the body in `body()`; its `message()` is the whole body as
+lossy text (each bad sequence becomes U+FFFD), escaped and cut at 200 characters like any body
+that is not JSON, and `error_type()` is `None`.
+
 ```rust,no_run
 use typesafe_sdk::{ApiErrorKind, Client, ErrorKind, PreparedQuestions};
 
@@ -460,6 +469,35 @@ second identical call, 64-bit targets.
   error body nested deeper than 16 is not parsed and becomes the raw-text message. The parser has
   no recursion limit of its own and aborts the process on very deep input, so the depth is
   checked on the raw bytes first.
+
+## Testing
+
+`cargo nextest run` and `cargo test`, without `--workspace` or `-p`, run the default members: the
+SDK, `crates/macros` and `crates/test-support`. Their tests run against local servers and need
+neither a key nor the network.
+
+`crates/live-tests` holds the tests against the live API. It is a workspace member, so `clippy
+--workspace` compiles it, but not a default member. **Its tests make real, billed calls** on the
+key's account when both `TYPESAFE_LIVE_TESTS=1` and `TYPESAFE_API_KEY` are set and a command
+reaches them: `cargo test --workspace`, `cargo nextest run --workspace`, or anything naming
+`-p typesafe-sdk-rust-live-tests`. Without either variable they fail, never skip, before any
+request is made, so a key exported for other work does not make `--workspace` bill anyone; it
+makes those four tests fail instead. Run them only on purpose:
+
+```sh
+TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rust-live-tests
+```
+
+- **Fuzzing.** `fuzz/` holds libFuzzer targets for the response decoders and the `Retry-After`
+  parser, in a workspace of its own that needs the nightly toolchain and `cargo-fuzz`; see
+  `fuzz/README.md`.
+- **Coverage.** CI holds the crate at 85% line coverage; `docs/uncovered-lines.md` records the
+  measured total and why each uncovered line is not reached.
+- **The port.** `docs/port-test-matrix.md` maps every test of the Python SDK to the Rust tests
+  that cover it, the deviation that explains why none does, or the reason it was left out;
+  `python3 .github/scripts/port-test-matrix.py` checks that every Rust test and deviation it
+  names exists (CI runs it; `--upstream <checkout>` also checks it against a checkout of the
+  Python SDK).
 
 ## Deviations from the Python SDK
 
