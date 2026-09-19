@@ -10,6 +10,7 @@ use std::{
 use bytes::Bytes;
 use http::{HeaderValue, Request, Response, StatusCode};
 use serde::Serialize;
+use tokio::runtime::Runtime;
 use tower_service::Service;
 use typesafe_sdk::{__internals as sdk, Body, Client};
 
@@ -60,8 +61,13 @@ impl Service<Request<Body>> for InMemory {
     }
 }
 
+/// A current-thread runtime with its time driver, as a call's deadline needs.
+pub(crate) fn runtime() -> Runtime {
+    tokio::runtime::Builder::new_current_thread().enable_time().build().expect("the runtime builds")
+}
+
 /// A client over `service` with the settings every bench here shares.
-pub(crate) fn client(service: InMemory) -> Client<InMemory> {
+pub(crate) fn client<S: typesafe_sdk::HttpService>(service: S) -> Client<S> {
     Client::builder()
         .api_key("bench-key")
         .base_url("http://127.0.0.1:9")

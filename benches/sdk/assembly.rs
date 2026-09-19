@@ -27,11 +27,10 @@ use divan::{Bencher, black_box};
 use http::{HeaderMap, HeaderValue, Method, Request, Response, Uri};
 use http_body_util::BodyExt as _;
 use tower_service::Service;
-use typesafe_sdk::{Body, Client};
+use typesafe_sdk::Body;
 
 use crate::{
-    MODEL,
-    service::body,
+    service::{body, client, runtime},
     support::{RESULT, questions, text},
 };
 
@@ -61,17 +60,9 @@ impl Service<Request<Body>> for Capture {
 /// The body a real call sends for `state`.
 fn sent_body(state: &str) -> Bytes {
     let capture = Capture::default();
-    let client: Client<Capture> = Client::builder()
-        .api_key("bench-key")
-        .base_url("http://127.0.0.1:9")
-        .default_model(MODEL)
-        .build_with_service(capture.clone())
-        .expect("the client builds");
+    let client = client(capture.clone());
     let questions = questions();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("the runtime builds");
+    let runtime = runtime();
     runtime.block_on(pin!(client.system_one(state, &questions).send())).expect("the call succeeds");
     capture.0.lock().expect("the slot is never poisoned").take().expect("a body was sent")
 }

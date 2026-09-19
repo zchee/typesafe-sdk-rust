@@ -28,7 +28,7 @@ use http::StatusCode;
 use typesafe_sdk::{__internals as sdk, ApiError, ErrorKind, RetryPolicy};
 
 use crate::{
-    service::{InMemory, client},
+    service::{InMemory, client, runtime},
     support::{questions, text},
 };
 
@@ -47,10 +47,7 @@ fn rate_limited(header: (&'static str, &'static str)) -> ApiError {
     let client = client(InMemory::failing(StatusCode::TOO_MANY_REQUESTS, header));
     let questions = questions();
     let state = text(64);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("the runtime builds");
+    let runtime = runtime();
     let call = client
         .system_one(state.as_str(), &questions)
         .retry(RetryPolicy::default().max_retries(0))

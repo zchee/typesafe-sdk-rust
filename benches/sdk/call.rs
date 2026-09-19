@@ -27,7 +27,6 @@ use bytes::Bytes;
 use divan::{Bencher, black_box};
 use http::{Method, Request, StatusCode, Uri};
 use http_body_util::BodyExt as _;
-use tokio::runtime::Runtime;
 use tower_service::Service as _;
 use typesafe_sdk::{Body, Choice, Noul, PreparedQuestions, Questions, Score};
 
@@ -35,13 +34,9 @@ use crate::{
     MODEL, QUESTIONS_JSON,
     decode::TWENTY,
     naive::NaiveClient,
-    service::{InMemory, client},
+    service::{InMemory, client, runtime},
     support::{RESULT, questions, text},
 };
-
-fn runtime() -> Runtime {
-    tokio::runtime::Builder::new_current_thread().enable_time().build().expect("the runtime builds")
-}
 
 #[divan::bench]
 fn sdk(bencher: Bencher<'_, '_>) {

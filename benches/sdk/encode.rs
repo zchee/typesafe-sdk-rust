@@ -18,9 +18,12 @@
 
 use divan::{Bencher, black_box};
 use serde::Serialize;
-use typesafe_sdk::{__internals as sdk, Choice, Noul, Questions, Score};
+use typesafe_sdk::__internals as sdk;
 
-use crate::{service::body, support::text};
+use crate::{
+    service::body,
+    support::{questions, text},
+};
 
 /// 1 KB, 64 KB and 1 MB states.
 const SIZES: [usize; 3] = [1 << 10, 64 << 10, 1 << 20];
@@ -48,15 +51,7 @@ fn prepared(bencher: Bencher<'_, '_>, len: usize) {
 fn unprepared(bencher: Bencher<'_, '_>, len: usize) {
     let state = text(len);
     drop(body(state.as_str()));
-    bencher.bench_local(|| {
-        let questions = Questions::new()
-            .noul("spam", Noul::new().instructions("Spam?"))
-            .choice("tone", Choice::new(["friendly", "hostile"]).instructions("Tone?"))
-            .score("quality", Score::new(["bad", "ok", "great"]).instructions("Quality?"))
-            .prepare()
-            .expect("the questions prepare");
-        (black_box(questions), body(black_box(state.as_str())))
-    });
+    bencher.bench_local(|| (black_box(questions()), body(black_box(state.as_str()))));
 }
 
 #[divan::bench]
