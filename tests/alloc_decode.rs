@@ -28,11 +28,6 @@
 //!
 //! One profiler exists per process, so all of it runs in a single test.
 
-// A test target of the root package is found without a manifest entry, and the
-// manifest is not this file's to change; gating the whole file on the feature
-// is what a `required-features` entry would otherwise do.
-#![cfg(feature = "internals")]
-
 mod support;
 
 use std::{collections::HashMap, fmt};

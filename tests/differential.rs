@@ -11,11 +11,6 @@
 //! back by `serde_json`, and must come back as exactly the value that went in,
 //! apart from non-finite floats, which both codecs write as `null`.
 
-// A test target of the root package is found without a manifest entry, and the
-// manifest is not this file's to change; gating the whole file on the feature
-// is what a `required-features` entry would otherwise do.
-#![cfg(feature = "internals")]
-
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,

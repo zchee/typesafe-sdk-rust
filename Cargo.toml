@@ -209,6 +209,14 @@ path = "tests/alloc_call.rs"
 required-features = ["internals"]
 
 [[test]]
+name = "alloc_decode"
+required-features = ["internals"]
+
+[[test]]
+name = "differential"
+required-features = ["internals"]
+
+[[test]]
 name = "derive"
 path = "tests/derive.rs"
 required-features = ["macros"]
