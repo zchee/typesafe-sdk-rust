@@ -10,19 +10,20 @@ nothing but a check notices that it has stopped being one. This is that check.
 It fails on:
 
 * a row whose target cell is empty, or holds neither Rust tests nor a
-  deviation, and an excluded row without a reason;
-* a Rust target ``path::name`` when ``path`` has no ``fn name`` carrying a test
-  attribute (a directory is searched recursively; a directory that does not
-  exist yet is reported and skipped, which is how a crate another change adds
-  is named before it lands);
+  deviation, an excluded row without a reason, and an excluded row of a file
+  that is not one of the tooling files in ``EXCLUDED_FILES``;
+* a Rust target ``path::name`` when ``path`` (a file, or a directory searched
+  recursively) does not exist or has no ``fn name`` carrying a test attribute;
 * a quoted deviation that is not the first cell of a row of the deviations
   table in README.md;
-* per-file counts that differ from the ones the matrix states, and an upstream
-  test named twice.
+* per-file counts that differ from the ones the matrix states, stated function
+  counts that differ from upstream's (``UPSTREAM_FUNCTIONS``, pinned so that a
+  dropped row fails without an upstream checkout), and an upstream test named
+  twice.
 
 A row is one of three kinds: mapped to Rust tests, mapped to a deviation row,
-or excluded with a reason (the functions of upstream files that test the Python
-repository's own tooling).
+or excluded with a reason (only the functions of the upstream files that test
+the Python repository's own tooling).
 
 With ``--upstream <checkout>`` it also checks that every upstream ``test_*``
 function has exactly one row and that no row names a function upstream does not
@@ -55,6 +56,36 @@ EXCLUDED_PREFIX = "Excluded: "
 UPSTREAM_TEST = re.compile(r"^(?:async )?def (test_\w+)\(", re.MULTILINE)
 #: An attribute that makes the function after it a test.
 TEST_ATTRIBUTE = re.compile(r"#\[(?:[\w:]+::)?test\b")
+#: The upstream files that test the Python repository's own tooling, the only
+#: ones whose functions may be excluded.
+EXCLUDED_FILES = frozenset(
+    {
+        "tests/test_docs.py",
+        "tests/test_public_api_surface.py",
+        "tests/test_public_sync.py",
+        "tests/test_release_notes.py",
+        "tests/test_typing.py",
+    }
+)
+#: How many ``test_*`` functions each upstream file defines at the ported
+#: release (typesafe-sdk-python 2ce5c65, v0.7.0).
+UPSTREAM_FUNCTIONS = {
+    "tests/test_clients.py": 21,
+    "tests/test_config.py": 8,
+    "tests/test_docs.py": 2,
+    "tests/test_errors.py": 6,
+    "tests/test_integration.py": 3,
+    "tests/test_logging.py": 3,
+    "tests/test_public_api_surface.py": 3,
+    "tests/test_public_sync.py": 10,
+    "tests/test_pydantic_response_models.py": 5,
+    "tests/test_questions.py": 11,
+    "tests/test_release_notes.py": 2,
+    "tests/test_responses.py": 15,
+    "tests/test_retry.py": 25,
+    "tests/test_types.py": 6,
+    "tests/test_typing.py": 1,
+}
 
 
 @dataclass
@@ -192,14 +223,12 @@ def defines_test(path: Path, name: str) -> bool:
     return False
 
 
-def check_row(row: Row, deviations: set[str], pending: set[str]) -> tuple[str | None, list[str]]:
+def check_row(row: Row, deviations: set[str]) -> tuple[str | None, list[str]]:
     """Check one row's target.
 
     Args:
         row: The row.
         deviations: The first cells of the README's deviations table.
-        pending: Filled with the directories named by targets that do not
-            exist yet.
 
     Returns:
         The row's kind (``"rust"``, ``"deviation"`` or ``"excluded"``,
@@ -207,9 +236,15 @@ def check_row(row: Row, deviations: set[str], pending: set[str]) -> tuple[str | 
     """
     where = f"{MATRIX}:{row.line}: {row.file}::{row.name}"
     if row.target.startswith(EXCLUDED_PREFIX):
+        excluded: list[str] = []
+        if row.file not in EXCLUDED_FILES:
+            excluded.append(
+                f"{where}: excluded, but {row.file} is not a tooling file "
+                f"({', '.join(sorted(EXCLUDED_FILES))})"
+            )
         if not row.target.removeprefix(EXCLUDED_PREFIX).strip():
-            return "excluded", [f"{where}: excluded without a reason"]
-        return "excluded", []
+            excluded.append(f"{where}: excluded without a reason")
+        return "excluded", excluded
     faults: list[str] = []
     if not row.cases.isdigit() or int(row.cases) < 1:
         faults.append(f"{where}: the case count {row.cases!r} is not a positive number")
@@ -232,9 +267,6 @@ def check_row(row: Row, deviations: set[str], pending: set[str]) -> tuple[str | 
     for path_text, name in targets:
         path = Path(path_text)
         if not path.exists():
-            if path.suffix == "":
-                pending.add(path_text)
-                continue
             faults.append(f"{where}: {path_text} does not exist")
         elif not defines_test(path, name):
             faults.append(f"{where}: {path_text} has no test function `{name}`")
@@ -301,14 +333,13 @@ def main(argv: list[str]) -> int:
     if not matrix.counts:
         faults.append(f"{MATRIX}: no Counts table")
 
-    pending: set[str] = set()
     tally: dict[str, Counts] = {}
     seen: set[tuple[str, str]] = set()
     for row in matrix.rows:
         if (row.file, row.name) in seen:
             faults.append(f"{MATRIX}:{row.line}: {row.file}::{row.name} has a second row")
         seen.add((row.file, row.name))
-        kind, row_faults = check_row(row, deviations, pending)
+        kind, row_faults = check_row(row, deviations)
         faults.extend(row_faults)
         counts = tally.setdefault(row.file, Counts(0, 0, 0, 0))
         counts.functions += 1
@@ -328,13 +359,24 @@ def main(argv: list[str]) -> int:
                 f"{counted.excluded}"
             )
 
+    for file in sorted(set(matrix.counts) | set(UPSTREAM_FUNCTIONS)):
+        stated = matrix.counts.get(file)
+        upstream = UPSTREAM_FUNCTIONS.get(file)
+        if upstream is None:
+            faults.append(f"{MATRIX}: {file} is not an upstream test file")
+        elif stated is None:
+            faults.append(f"{MATRIX}: upstream {file} has no line in the Counts table")
+        elif stated.functions != upstream:
+            faults.append(
+                f"{MATRIX}: {file} states {stated.functions} functions, upstream "
+                f"defines {upstream}"
+            )
+
     if arguments.upstream is not None:
         faults.extend(check_upstream(matrix, arguments.upstream))
 
     for fault in faults:
         print(fault)
-    for path in sorted(pending):
-        print(f"note: {path} does not exist yet; its targets are not checked")
     rust = sum(counts.rust for counts in tally.values())
     deviation = sum(counts.deviation for counts in tally.values())
     excluded = sum(counts.excluded for counts in tally.values())

@@ -5,8 +5,10 @@ Every test function of the Python SDK's `tests/test_*.py`
 `2ce5c65`) and where its behaviour is covered here: a Rust test that exists in this repository,
 named `path::function`, or a row of the deviations table in [`README.md`](../README.md), quoted
 by its first cell; a test of the Python repository's own tooling is listed as excluded, with its
-reason. `.github/scripts/port-test-matrix.py` checks every row; with `--upstream <checkout>` it
-also checks that every upstream `test_*` function has exactly one row.
+reason. `.github/scripts/port-test-matrix.py` checks every row, allows exclusions only for the
+five tooling files, and holds the Counts table to the function counts of upstream `2ce5c65`,
+which it pins; with `--upstream <checkout>` it also checks that every upstream `test_*` function
+has exactly one row.
 
 A parametrized upstream test is one row, and **Cases** is the number of cases pytest collects
 for it. Upstream's `clients` fixture runs most client tests twice, once with the synchronous client
