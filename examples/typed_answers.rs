@@ -3,7 +3,8 @@
 //!
 //! The questions are serialized at compile time and the response decodes
 //! straight into the struct. It needs the `macros` feature, which is on by
-//! default. Run it with
+//! default; the manifest declares that, so cargo skips the example when the
+//! feature is off. Run it with
 //!
 //! ```sh
 //! TYPESAFE_API_KEY=... cargo run --example typed_answers
@@ -11,14 +12,11 @@
 //!
 //! Every call is billed by the API.
 
-#[cfg(feature = "macros")]
 use std::process::ExitCode;
 
-#[cfg(feature = "macros")]
 use typesafe_sdk::{ChoiceAnswer, Client, Error, NoulAnswer, QuestionSet, ScoreAnswer};
 
 /// One question per field; the field's type says the question's kind.
-#[cfg(feature = "macros")]
 #[derive(QuestionSet)]
 struct Ticket {
     #[noul(instructions = "Is this message about billing?", yes = "payments or invoices")]
@@ -32,7 +30,6 @@ struct Ticket {
     urgency: ScoreAnswer,
 }
 
-#[cfg(feature = "macros")]
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -44,7 +41,6 @@ async fn main() -> ExitCode {
     }
 }
 
-#[cfg(feature = "macros")]
 async fn run() -> Result<(), Error> {
     let client = Client::from_env()?;
     let state = "I was charged twice for the same order. Please fix it before Friday.";
@@ -60,10 +56,4 @@ async fn run() -> Result<(), Error> {
         println!("urgency level {level} ({}): {probability:.3}", label.unwrap_or("?"));
     }
     Ok(())
-}
-
-/// Without the derive there is nothing to show.
-#[cfg(not(feature = "macros"))]
-fn main() {
-    eprintln!("this example needs the `macros` feature, which is on by default");
 }

@@ -216,6 +216,13 @@ name = "alloc_derive"
 path = "tests/alloc_derive.rs"
 required-features = ["internals", "macros"]
 
+# The example declares its questions with the derive; without the feature
+# cargo skips it rather than building a stub.
+[[example]]
+name = "typed_answers"
+path = "examples/typed_answers.rs"
+required-features = ["macros"]
+
 # divan supplies its own `main`, so the benches opt out of libtest's harness.
 # `sdk` is the CPU-only set that CodSpeed measures; `loopback` is a real
 # socket and stays out of that run (see the file).
