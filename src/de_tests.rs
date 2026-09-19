@@ -889,7 +889,10 @@ fn the_question_count_reaches_the_failure_pass_too() {
 
 // ---------------------------------------------------- typed answer sets
 
-include!("../tests/support/ticket.rs");
+#[path = "../tests/support/ticket.rs"]
+mod ticket;
+
+use ticket::Ticket;
 
 #[test]
 fn a_struct_answer_set_decodes_each_answer_into_its_field() {

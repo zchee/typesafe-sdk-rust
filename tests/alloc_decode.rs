@@ -98,7 +98,10 @@ use naive_response::NaiveResponse;
 
 // ------------------------------------------------- a struct answer set
 
-include!("support/ticket.rs");
+#[path = "support/ticket.rs"]
+mod ticket;
+
+use ticket::Ticket;
 
 // ------------------------------------------------------------------ test
 

@@ -1,15 +1,16 @@
-// The typed answer set the decode tests and the decode allocation budget
-// share. Each includes it with `include!`, so it uses the names its includer
-// imports.
+//! The typed answer set the decode tests and the decode allocation budget
+//! share.
+
+use super::*;
 
 /// A question set declared as a struct, with the [`AnswerSet`] implementation
 /// the derive generates, written by hand: field dispatch on the key, no map
 /// and no name string.
 #[derive(Debug, Clone, PartialEq)]
-struct Ticket {
-    spam: NoulAnswer,
-    tone: ChoiceAnswer,
-    quality: ScoreAnswer,
+pub(super) struct Ticket {
+    pub(super) spam: NoulAnswer,
+    pub(super) tone: ChoiceAnswer,
+    pub(super) quality: ScoreAnswer,
 }
 
 enum TicketField {
