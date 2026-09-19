@@ -32,7 +32,7 @@
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    fmt::{self, Write as _},
+    fmt,
     marker::PhantomData,
 };
 
@@ -44,6 +44,8 @@ use serde::{
     ser::{SerializeMap, SerializeSeq, SerializeStruct},
 };
 use thiserror::Error;
+
+use crate::text::{Backslash, SafeText};
 
 /// The deepest JSON nesting this crate will parse.
 ///
@@ -467,7 +469,7 @@ const MAX_PATH_CHARS: usize = 320;
 fn render_path(path: &serde_path_to_error::Path, missing: Option<&str>) -> String {
     use serde_path_to_error::Segment;
 
-    let mut out = PathText::default();
+    let mut out = SafeText::new(MAX_PATH_CHARS, Backslash::Double);
     // A name is preceded by a dot unless it starts the path; an index never
     // is. Whether it starts the path cannot be read off the text, because a
     // key may be the empty string.
@@ -479,7 +481,7 @@ fn render_path(path: &serde_path_to_error::Path, missing: Option<&str>) -> Strin
                 if !first {
                     out.fixed(".");
                 }
-                out.name(key);
+                out.untrusted(key, MAX_PATH_SEGMENT_CHARS);
             }
             Segment::Unknown => out.fixed(if first { "?" } else { ".?" }),
         }
@@ -490,98 +492,12 @@ fn render_path(path: &serde_path_to_error::Path, missing: Option<&str>) -> Strin
             if !first {
                 out.fixed(".");
             }
-            out.name(field);
+            out.untrusted(field, MAX_PATH_SEGMENT_CHARS);
         }
         None if first => out.fixed("."),
         None => {}
     }
-    out.text
-}
-
-/// A field path being rendered, with the count of characters written so far.
-#[derive(Default)]
-struct PathText {
-    text: String,
-    chars: usize,
-    /// Set once the whole-path cap is reached; nothing is written after it.
-    full: bool,
-}
-
-impl PathText {
-    /// Text that comes from the path's structure rather than from a name.
-    fn fixed(&mut self, text: &str) {
-        self.put(&text, text.chars().count());
-    }
-
-    /// One name, escaped and capped.
-    fn name(&mut self, name: &str) {
-        let mut written = 0;
-        for character in name.chars() {
-            // Rust lets a binding be declared here and assigned in only one
-            // arm, so each escape lives long enough to be borrowed below.
-            let short;
-            let code;
-            let (shown, len): (&dyn fmt::Display, usize) = match character {
-                // A backslash is the one printable character escaped: written
-                // bare, a key spelling `\u{1b}` would read exactly like a key
-                // holding a real ESC.
-                '\\' | '\n' | '\r' | '\t' => {
-                    short = character.escape_default();
-                    (&short, short.len())
-                }
-                _ if character.is_control() || hides_text(character) => {
-                    code = character.escape_unicode();
-                    (&code, code.len())
-                }
-                _ => (&character, 1),
-            };
-            if written + len > MAX_PATH_SEGMENT_CHARS {
-                self.put(&'\u{2026}', 1);
-                return;
-            }
-            if !self.put(shown, len) {
-                return;
-            }
-            written += len;
-        }
-    }
-
-    /// Appends `piece`, which renders as `len` characters, whole - or, when
-    /// it would cross the whole-path cap, the ellipsis instead, after which
-    /// nothing more is written. Returns whether `piece` was written.
-    fn put(&mut self, piece: &dyn fmt::Display, len: usize) -> bool {
-        if self.full {
-            return false;
-        }
-        if self.chars + len > MAX_PATH_CHARS {
-            self.text.push('\u{2026}');
-            self.full = true;
-            return false;
-        }
-        write!(self.text, "{piece}").expect("invariant: writing to a String cannot fail");
-        self.chars += len;
-        true
-    }
-}
-
-/// Whether `character` is a Unicode format character that reorders, joins or
-/// hides the text around it: the bidirectional embeddings, overrides and
-/// isolates, the zero-width characters, the byte-order mark, the line and
-/// paragraph separators, the interlinear annotation marks and the invisible
-/// tag characters. `char::is_control` covers none of them.
-fn hides_text(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00ad}'
-            | '\u{061c}'
-            | '\u{180e}'
-            | '\u{200b}'..='\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{feff}'
-            | '\u{fff9}'..='\u{fffb}'
-            | '\u{e0000}'..='\u{e007f}'
-    )
+    out.into_string()
 }
 
 /// Extracts `noul` from ``missing field `noul` at line 1 column 101``.

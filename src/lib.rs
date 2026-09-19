@@ -77,6 +77,7 @@ pub mod request;
 pub mod response;
 pub mod retry;
 mod telemetry;
+mod text;
 pub mod transport;
 
 #[cfg(feature = "internals")]
