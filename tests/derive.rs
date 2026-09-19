@@ -11,7 +11,6 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use bytes::Bytes;
 use http::{HeaderValue, StatusCode};
 use test_support::{Protocol, RecordedRequest, TestServer, json_response};
 use typesafe_sdk::{
@@ -164,7 +163,10 @@ const REVIEW_BODY: &str = concat!(
     r#""quality":{"type":"score","instructions":"Quality?","criteria":["bad","ok","great"]}}}"#,
 );
 
-include!("support/answering.rs");
+#[path = "support/answering.rs"]
+mod answering;
+
+use answering::answering;
 
 fn client_for(server: &TestServer) -> Client {
     Client::builder()

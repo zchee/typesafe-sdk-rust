@@ -13,8 +13,7 @@ use std::time::Duration;
 use http::{StatusCode, header::RETRY_AFTER};
 use test_support::{Protocol, TestServer, json_response};
 use typesafe_sdk::{
-    ApiErrorKind, Client, ClientBuilder, DecodeErrorKind, ErrorKind, HttpVersion, Questions,
-    RetryPolicy, Score,
+    ApiErrorKind, Client, DecodeErrorKind, ErrorKind, Questions, RetryPolicy, Score,
 };
 
 /// An error body whose one member holds a byte that is not UTF-8: the error
@@ -44,7 +43,10 @@ async fn answering(protocol: Protocol, status: StatusCode, body: &'static [u8]) 
     .expect("the test server starts")
 }
 
-include!("support/loopback_builder.rs");
+#[path = "support/loopback_builder.rs"]
+mod loopback_builder;
+
+use loopback_builder::loopback_builder;
 
 /// A client of `server` that makes one attempt per call.
 fn client_for(server: &TestServer, protocol: Protocol) -> Client {

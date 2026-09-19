@@ -2,17 +2,20 @@
 //! cases of the upstream `tests/test_clients.py` (upstream has no
 //! `test_models.py`), and `warm_up`, which is a models call.
 
-use bytes::Bytes;
 use http::StatusCode;
-use test_support::{Protocol, TestServer, json_response};
-use typesafe_sdk::{ApiErrorKind, Client, ClientBuilder, ErrorKind, HttpVersion};
+use test_support::{Protocol, TestServer};
+use typesafe_sdk::{ApiErrorKind, Client, ErrorKind};
 
 const MODELS: &[u8] = include_bytes!("fixtures/models.json");
 const MODELS_EXTRA_FIELDS: &[u8] = include_bytes!("fixtures/models-extra-fields.json");
 
-include!("support/answering.rs");
+#[path = "support/answering.rs"]
+mod answering;
+#[path = "support/loopback_builder.rs"]
+mod loopback_builder;
 
-include!("support/loopback_builder.rs");
+use answering::answering;
+use loopback_builder::loopback_builder;
 
 fn client_for(server: &TestServer, protocol: Protocol) -> Client {
     loopback_builder(server, protocol).build().expect("the client builds")

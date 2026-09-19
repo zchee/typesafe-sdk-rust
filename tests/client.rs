@@ -28,8 +28,8 @@ use test_support::{Protocol, RecordedRequest, TestServer, json_response, raw_ser
 use tokio::{net::TcpListener, sync::Notify};
 use tower_service::Service;
 use typesafe_sdk::{
-    ApiError, ApiErrorKind, Body, Choice, Client, ClientBuilder, Content, Error, ErrorKind,
-    HttpVersion, Noul, PreparedQuestions, Questions, RawQuestion, RetryPolicy, Score,
+    ApiError, ApiErrorKind, Body, Choice, Client, ClientBuilder, Content, Error, ErrorKind, Noul,
+    PreparedQuestions, Questions, RawQuestion, RetryPolicy, Score,
 };
 
 #[path = "../src/test_rendering.rs"]
@@ -42,9 +42,13 @@ use test_rendering::assert_printable;
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
-include!("support/answering.rs");
+#[path = "support/answering.rs"]
+mod answering;
+#[path = "support/loopback_builder.rs"]
+mod loopback_builder;
 
-include!("support/loopback_builder.rs");
+use answering::answering;
+use loopback_builder::loopback_builder;
 
 /// A builder for a client of `server`, with a default model.
 fn builder_for(server: &TestServer, protocol: Protocol) -> ClientBuilder {
