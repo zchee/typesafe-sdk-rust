@@ -630,9 +630,9 @@ fn a_choice_needs_options_and_a_score_needs_levels() {
                 tone: ChoiceAnswer,
             }
         )),
-        ["`#[choice]` needs its options: `options(\"a\", \"b\")`, each one optionally described \
-             as `\"a\" = \"...\"`, as in `#[choice(instructions = \"...\", options(\"a\" = \"...\", \
-             \"b\"))]`"]
+        ["field `tone`: `#[choice]` needs its options: `options(\"a\", \"b\")`, each one \
+             optionally described as `\"a\" = \"...\"`, as in `#[choice(instructions = \"...\", \
+             options(\"a\" = \"...\", \"b\"))]`"]
     );
     assert_eq!(
         refused(&parse_quote!(
@@ -641,9 +641,9 @@ fn a_choice_needs_options_and_a_score_needs_levels() {
                 tone: ChoiceAnswer,
             }
         )),
-        ["`#[choice]` needs its options: `options(\"a\", \"b\")`, each one optionally described \
-             as `\"a\" = \"...\"`, as in `#[choice(instructions = \"...\", options(\"a\" = \"...\", \
-             \"b\"))]`"]
+        ["field `tone`: `#[choice]` needs its options: `options(\"a\", \"b\")`, each one \
+             optionally described as `\"a\" = \"...\"`, as in `#[choice(instructions = \"...\", \
+             options(\"a\" = \"...\", \"b\"))]`"]
     );
     assert_eq!(
         refused(&parse_quote!(
@@ -652,8 +652,8 @@ fn a_choice_needs_options_and_a_score_needs_levels() {
                 urgency: ScoreAnswer,
             }
         )),
-        ["`#[score]` needs its levels, lowest first: `levels(\"low\", \"high\")`, as in \
-             `#[score(instructions = \"...\", levels(\"low\", \"high\"))]`"]
+        ["field `urgency`: `#[score]` needs its levels, lowest first: `levels(\"low\", \
+             \"high\")`, as in `#[score(instructions = \"...\", levels(\"low\", \"high\"))]`"]
     );
 }
 
@@ -666,8 +666,8 @@ fn an_option_is_listed_once() {
                 tone: ChoiceAnswer,
             }
         )),
-        ["the option \"calm\" is listed twice: each option of a choice is listed once, with its \
-             description if it has one"]
+        ["field `tone`: the option \"calm\" is listed twice: each option of a choice is listed \
+             once, with its description if it has one"]
     );
 }
 
@@ -720,8 +720,9 @@ fn a_key_is_given_once() {
             "`levels(...)` is given twice",
         ),
     ];
+    // Every field of these inputs is `a`, and each message names it first.
     for (input, message) in cases {
-        assert_eq!(refused(&input), [message]);
+        assert_eq!(refused(&input), [format!("field `a`: {message}")]);
     }
 }
 
@@ -767,8 +768,9 @@ fn unknown_keys_name_the_keys_there_are() {
              the question is asked under",
         ),
     ];
+    // Every field of these inputs is `a`, and each message names it first.
     for (input, message) in cases {
-        assert_eq!(refused(&input), [message]);
+        assert_eq!(refused(&input), [format!("field `a`: {message}")]);
     }
 }
 
@@ -866,8 +868,9 @@ fn values_are_string_literals() {
             "expected `name = \"...\"`".to_owned(),
         ),
     ];
+    // Every field of these inputs is `a`, and each message names it first.
     for (input, message) in cases {
-        assert_eq!(refused(&input), [message]);
+        assert_eq!(refused(&input), [format!("field `a`: {message}")]);
     }
 }
 
@@ -921,8 +924,9 @@ fn malformed_attributes_say_what_is_expected() {
             "expected attribute arguments in parentheses: #[question(...)]",
         ),
     ];
+    // Every field of these inputs is `a`, and each message names it first.
     for (input, message) in cases {
-        assert_eq!(refused(&input), [message]);
+        assert_eq!(refused(&input), [format!("field `a`: {message}")]);
     }
 }
 
@@ -969,7 +973,8 @@ fn every_problem_is_reported_at_once() {
              `ScoreAnswer`",
             "field `plain` is not a question: every field of a question set asks one; add \
              `#[noul(...)]`, `#[choice(...)]` or `#[score(...)]`",
-            "unknown key `bad` in `#[noul(...)]`: the keys are `instructions`, `yes` and `no`",
+            "field `spam`: unknown key `bad` in `#[noul(...)]`: the keys are `instructions`, `yes` \
+             and `no`",
         ]
     );
 }
@@ -1005,7 +1010,7 @@ fn the_question_attribute_gives_one_name() {
                 a: NoulAnswer,
             }
         )),
-        ["`name` is given twice in `#[question(...)]`"]
+        ["field `a`: `name` is given twice in `#[question(...)]`"]
     );
     assert_eq!(
         refused(&parse_quote!(
@@ -1015,7 +1020,7 @@ fn the_question_attribute_gives_one_name() {
                 a: NoulAnswer,
             }
         )),
-        ["`#[question(...)]` needs `name = \"...\"`"]
+        ["field `a`: `#[question(...)]` needs `name = \"...\"`"]
     );
 }
 

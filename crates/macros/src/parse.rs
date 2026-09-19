@@ -8,7 +8,8 @@
 //! an option listed twice, any input that is not a plain struct with named
 //! fields, and a struct named like one of the expansion's own items. Nothing
 //! else is limited: the API documents its option and level counts as subject
-//! to change, so no count is checked.
+//! to change, so no count is checked. Every refusal about a field names that
+//! field.
 
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, quote};
@@ -310,7 +311,7 @@ fn field_question(field: &syn::Field, member: &Ident) -> syn::Result<(Question, 
                 continue;
             }
             rename_attr = Some(attr);
-            if let Some(name) = errors.keep(question_name(attr)) {
+            if let Some(name) = errors.keep(question_name(attr).map_err(|e| in_field(e, member))) {
                 rename = Some(name);
             }
         }
@@ -333,7 +334,7 @@ fn field_question(field: &syn::Field, member: &Ident) -> syn::Result<(Question, 
     let name_span = rename.as_ref().map_or_else(|| member.span(), LitStr::span);
     // The attribute comes before the type in the source, so its error is
     // reported first.
-    let question = question(attr, kind, &name);
+    let question = question(attr, kind, member, &name);
     let typed = check_answer_type(&field.ty, kind, member);
     match (question, typed) {
         (Ok(question), Ok(())) => errors.finish().map(|()| (question, name, name_span)),
@@ -437,8 +438,10 @@ fn inner_answer(arguments: &PathArguments) -> Option<Kind> {
     Kind::of_answer(ident)
 }
 
-/// Reads the question attribute of a field whose question is named `name`.
-fn question(attr: &Attribute, kind: Kind, name: &str) -> syn::Result<Question> {
+/// Reads the question attribute of field `member`, whose question is named
+/// `name`.
+fn question(attr: &Attribute, kind: Kind, member: &Ident, name: &str) -> syn::Result<Question> {
+    let grammar = |error| in_field(error, member);
     let mut instructions = None;
     let mut yes = None;
     let mut no = None;
@@ -456,74 +459,77 @@ fn question(attr: &Attribute, kind: Kind, name: &str) -> syn::Result<Question> {
         // their options or levels.
         Meta::Path(_) => {}
         Meta::NameValue(_) => {
-            return Err(syn::Error::new_spanned(
+            return Err(grammar(syn::Error::new_spanned(
                 attr,
                 format!("expected `{}`, not `#[{} = ...]`", kind.example(), kind.attribute()),
-            ));
+            )));
         }
-        Meta::List(_) => attr.parse_nested_meta(|meta| {
-            let key = path_text(&meta.path);
-            let slot = match (kind, key.as_str()) {
-                (_, "instructions") => &mut instructions,
-                (Kind::Noul, "yes") => &mut yes,
-                (Kind::Noul, "no") => &mut no,
-                (Kind::Choice, "options") => {
-                    if options.is_some() {
-                        return Err(meta.error("`options(...)` is given twice"));
+        Meta::List(_) => attr
+            .parse_nested_meta(|meta| {
+                let key = path_text(&meta.path);
+                let slot = match (kind, key.as_str()) {
+                    (_, "instructions") => &mut instructions,
+                    (Kind::Noul, "yes") => &mut yes,
+                    (Kind::Noul, "no") => &mut no,
+                    (Kind::Choice, "options") => {
+                        if options.is_some() {
+                            return Err(meta.error("`options(...)` is given twice"));
+                        }
+                        options = Some(choice_options(&meta)?);
+                        return Ok(());
                     }
-                    options = Some(choice_options(&meta)?);
-                    return Ok(());
-                }
-                (Kind::Score, "levels") => {
-                    if levels.is_some() {
-                        return Err(meta.error("`levels(...)` is given twice"));
+                    (Kind::Score, "levels") => {
+                        if levels.is_some() {
+                            return Err(meta.error("`levels(...)` is given twice"));
+                        }
+                        levels = Some((score_levels(&meta)?, meta.path.span()));
+                        return Ok(());
                     }
-                    levels = Some((score_levels(&meta)?, meta.path.span()));
-                    return Ok(());
+                    _ => {
+                        return Err(meta.error(format!(
+                            "unknown key `{key}` in `#[{}(...)]`: the keys are {keys}",
+                            kind.attribute()
+                        )));
+                    }
+                };
+                if slot.is_some() {
+                    return Err(meta.error(format!("`{key}` is given twice")));
                 }
-                _ => {
-                    return Err(meta.error(format!(
-                        "unknown key `{key}` in `#[{}(...)]`: the keys are {keys}",
-                        kind.attribute()
-                    )));
-                }
-            };
-            if slot.is_some() {
-                return Err(meta.error(format!("`{key}` is given twice")));
-            }
-            *slot = Some(value(&meta, &key)?.value());
-            Ok(())
-        })?,
+                *slot = Some(value(&meta, &key)?.value());
+                Ok(())
+            })
+            .map_err(grammar)?,
     }
 
     match kind {
         Kind::Noul => Ok(Question::Noul { instructions, yes, no }),
         Kind::Choice => {
             let options = options.ok_or_else(|| {
-                syn::Error::new_spanned(
+                grammar(syn::Error::new_spanned(
                     attr,
                     format!(
                         "`#[choice]` needs its options: `options(\"a\", \"b\")`, each one \
                          optionally described as `\"a\" = \"...\"`, as in `{}`",
                         kind.example()
                     ),
-                )
+                ))
             })?;
             Ok(Question::Choice { instructions, options })
         }
         Kind::Score => {
             let (levels, span) = levels.ok_or_else(|| {
-                syn::Error::new_spanned(
+                grammar(syn::Error::new_spanned(
                     attr,
                     format!(
                         "`#[score]` needs its levels, lowest first: `levels(\"low\", \"high\")`, \
                          as in `{}`",
                         kind.example()
                     ),
-                )
+                ))
             })?;
             if levels.is_empty() {
-                // The runtime's message, then what to write instead.
+                // The runtime's message, then what to write instead. It
+                // names the question, which is how the runtime reports it.
                 return Err(syn::Error::new(
                     span,
                     format!(
@@ -621,6 +627,32 @@ fn string(input: ParseStream<'_>, what: &str) -> syn::Result<LitStr> {
         ));
     }
     Ok(literal)
+}
+
+/// `error` with each of its messages prefixed by the field it is about, at
+/// the same source.
+///
+/// Every refusal of a field's attribute passes through here, syn's own
+/// included ("expected `,`"), so none of them leaves the reader to work out
+/// the field from the span alone. A `syn::Error` spans from a first token to
+/// a last one, and `Error::span` cannot hand that range back (it would have to
+/// join the two, which stable rustc does not do). `to_compile_error` can:
+/// its tokens start at the first span and end at the last, and `new_spanned`
+/// spans from its first token to its last, so the rewritten message covers
+/// exactly the source the original did.
+fn in_field(error: syn::Error, member: &Ident) -> syn::Error {
+    let mut named = (&error).into_iter().map(|message| {
+        syn::Error::new_spanned(message.to_compile_error(), format!("field `{member}`: {message}"))
+    });
+    match named.next() {
+        Some(mut first) => {
+            first.extend(named);
+            first
+        }
+        // A `syn::Error` holds at least one message; if one ever held none,
+        // it is returned unchanged rather than lost.
+        None => error,
+    }
 }
 
 /// [`expand::RESERVED`] as a message lists it: `a`, `b` and `c`.

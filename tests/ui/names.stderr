@@ -4,13 +4,13 @@ error: the question name "spam" is used twice, by field `spam` and by field `oth
 9 |     #[question(name = "spam")]
   |                       ^^^^^^
 
-error: expected `name = "..."`
+error: field `no_value`: expected `name = "..."`
   --> tests/ui/names.rs:16:16
    |
 16 |     #[question(name)]
    |                ^^^^
 
-error: unknown key `rename` in `#[question(...)]`: the one key is `name = "..."`, the name the question is asked under
+error: field `unknown_key`: unknown key `rename` in `#[question(...)]`: the one key is `name = "..."`, the name the question is asked under
   --> tests/ui/names.rs:19:16
    |
 19 |     #[question(rename = "x")]
