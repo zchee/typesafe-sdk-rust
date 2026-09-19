@@ -78,6 +78,8 @@ enum Repr<'a> {
 
 impl<'a> Content<'a> {
     /// Wraps text, borrowing it when the caller owns it elsewhere.
+    ///
+    /// A caller who wants the JSON shape of a value calls [`Content::json`].
     #[must_use]
     pub fn text(text: impl Into<Cow<'a, str>>) -> Self {
         Self { repr: Repr::Text(text.into()) }
@@ -150,29 +152,22 @@ impl<'a> Content<'a> {
     }
 }
 
-/// Builds the text shape, borrowing `text`; the same as [`Content::text`].
-///
-/// A caller who wants the JSON shape of a value calls [`Content::json`].
+/// Builds the text shape, borrowing `text`; see [`Content::text`].
 impl<'a> From<&'a str> for Content<'a> {
     fn from(text: &'a str) -> Self {
         Self::text(text)
     }
 }
 
-/// Builds the text shape, taking ownership of `text`; the same as
-/// [`Content::text`].
-///
-/// A caller who wants the JSON shape of a value calls [`Content::json`].
+/// Builds the text shape, owning `text`; see [`Content::text`].
 impl From<String> for Content<'_> {
     fn from(text: String) -> Self {
         Self::text(text)
     }
 }
 
-/// Builds the text shape, borrowing or owning exactly as `text` does; the
-/// same as [`Content::text`].
-///
-/// A caller who wants the JSON shape of a value calls [`Content::json`].
+/// Builds the text shape, borrowing or owning as `text` does; see
+/// [`Content::text`].
 impl<'a> From<Cow<'a, str>> for Content<'a> {
     fn from(text: Cow<'a, str>) -> Self {
         Self::text(text)
