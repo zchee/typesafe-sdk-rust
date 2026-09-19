@@ -1,6 +1,6 @@
 # Line coverage
 
-Measured at commit `b961385` with
+Measured at commit `4c27f80` with
 `cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85 --show-missing-lines`;
 every line number below is a line of that commit.
 
@@ -16,12 +16,12 @@ with rustc 1.98.1 and cargo-llvm-cov.
 
 | Lines | Missed | Line coverage | Regions | Missed | Functions | Missed |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 3,952 | 157 | **96.03%** | 6,124 | 332 | 697 | 33 |
+| 4,043 | 155 | **96.17%** | 6,267 | 328 | 704 | 33 |
 
 A line counts as covered when any test executes it in any instantiation of the
 code it belongs to.
 
-The summary's 157 missed lines are more than the 136 this page lists because
+The summary's 155 missed lines are more than the 136 this page lists because
 llvm-cov's summary counts a line as missed when one instantiation of its
 function does not run it, even when another instantiation does, while
 `--show-missing-lines`, like this page's rule above, lists only the lines no
