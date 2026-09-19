@@ -1,0 +1,36 @@
+error: `Typed` cannot be generic: a question set's questions are serialized once, when the program is compiled, so they cannot depend on a type parameter; remove the generics
+ --> tests/ui/generic.rs:6:13
+  |
+6 | struct Typed<T> {
+  |             ^^^
+
+error: field `other` has `#[noul]`, so its type must be `NoulAnswer` (the type is matched by name: `NoulAnswer` and `typesafe_sdk::NoulAnswer` work, a type alias does not)
+  --> tests/ui/generic.rs:10:12
+   |
+10 |     other: T,
+   |            ^
+
+error: `Borrowed` cannot be generic: a question set's questions are serialized once, when the program is compiled, so they cannot depend on a type parameter; remove the generics
+  --> tests/ui/generic.rs:14:16
+   |
+14 | struct Borrowed<'a> {
+   |                ^^^^
+
+error: field `spam` has `#[noul]`, so its type must be `NoulAnswer` (the type is matched by name: `NoulAnswer` and `typesafe_sdk::NoulAnswer` work, a type alias does not)
+  --> tests/ui/generic.rs:16:11
+   |
+16 |     spam: &'a NoulAnswer,
+   |           ^^^^^^^^^^^^^^
+
+error: `Counted` cannot be generic: a question set's questions are serialized once, when the program is compiled, so they cannot depend on a type parameter; remove the generics
+  --> tests/ui/generic.rs:20:15
+   |
+20 | struct Counted<const N: usize> {
+   |               ^^^^^^^^^^^^^^^^
+
+error: `Bounded` cannot be generic: a question set's questions are serialized once, when the program is compiled, so they cannot depend on a type parameter; remove the generics
+  --> tests/ui/generic.rs:27:1
+   |
+27 | / where
+28 | |     u8: Copy,
+   | |_____________^

@@ -1,0 +1,23 @@
+error: field `plain` is not a question: every field of a question set asks one; add `#[noul(...)]`, `#[choice(...)]` or `#[score(...)]`
+ --> tests/ui/field_questions.rs:8:5
+  |
+8 |     plain: NoulAnswer,
+  |     ^^^^^
+
+error: field `renamed_only` is not a question: every field of a question set asks one; add `#[noul(...)]`, `#[choice(...)]` or `#[score(...)]`
+  --> tests/ui/field_questions.rs:10:5
+   |
+10 |     renamed_only: NoulAnswer,
+   |     ^^^^^^^^^^^^
+
+error: field `both` has two question attributes, `#[noul]` and `#[choice]`: a field answers one question; keep one of them
+  --> tests/ui/field_questions.rs:16:5
+   |
+16 |     #[choice(options("calm"))]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: field `two_names` has two `#[question(...)]` attributes; give its name once
+  --> tests/ui/field_questions.rs:19:5
+   |
+19 |     #[question(name = "b")]
+   |     ^^^^^^^^^^^^^^^^^^^^^^^

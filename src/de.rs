@@ -123,11 +123,12 @@ impl AnswerContext {
 ///   wrong shape is still an error there. A body both accept gives both the
 ///   same answer.
 /// * **Missing answer.** A field with no answer is an error at
-///   `answers.<field>`. A response with no `answers` member at all is an
-///   error at `answers` for every set that cannot be empty: the method is
-///   then called with an empty object, and whatever it fails with is reported
-///   as the missing member. A set that can be empty, as [`Answers`] can,
-///   decodes to its empty value.
+///   `answers.<field>`, where `<field>` is the question's wire name (what
+///   `missing_field` receives), not the Rust field's identifier. A response
+///   with no `answers` member at all is an error at `answers` for every set
+///   that cannot be empty: the method is then called with an empty object,
+///   and whatever it fails with is reported as the missing member. A set that
+///   can be empty, as [`Answers`] can, decodes to its empty value.
 /// * **Extra answers.** An answer the type has no field for is skipped unread,
 ///   whatever its kind or shape, and is never an error. It stays in the raw
 ///   body. [`Answers`] keeps every answer of a kind this version models and
@@ -244,8 +245,9 @@ impl AnswerContext {
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be decoded as the answers of a response",
     label = "not a set of answers",
-    note = "use `Answers` to look answers up by question name, or implement `AnswerSet` for a \
-            struct with one field per question (a later release derives it)"
+    note = "use `Answers` to look answers up by question name, or declare a struct with one \
+            field per question and `#[derive(QuestionSet)]` it (the `macros` feature, on by \
+            default), which implements `AnswerSet`"
 )]
 pub trait AnswerSet: Sized {
     /// Reads the `answers` object of a response.

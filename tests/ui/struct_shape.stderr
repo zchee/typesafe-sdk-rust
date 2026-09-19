@@ -1,0 +1,17 @@
+error: `Pair` is a tuple struct: a question set needs named fields, because a field's name is the name its question is asked under; write `struct Pair { name: NoulAnswer, ... }`
+ --> tests/ui/struct_shape.rs:5:12
+  |
+5 | struct Pair(NoulAnswer, NoulAnswer);
+  |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `Nothing` is a unit struct: a question set needs one named field per question; write `struct Nothing { name: NoulAnswer, ... }`
+ --> tests/ui/struct_shape.rs:8:8
+  |
+8 | struct Nothing;
+  |        ^^^^^^^
+
+error: At least one question is required: `Empty` has no fields; add one field per question, such as `#[noul(instructions = "...")] spam: NoulAnswer`
+  --> tests/ui/struct_shape.rs:11:8
+   |
+11 | struct Empty {}
+   |        ^^^^^

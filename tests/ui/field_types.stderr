@@ -1,0 +1,35 @@
+error: field `kind_mismatch` has `#[noul]`, whose answer is a `NoulAnswer`, but its type is `ChoiceAnswer`: write `#[choice(...)]` for a `ChoiceAnswer` field, or make the field a `NoulAnswer`
+  --> tests/ui/field_types.rs:10:20
+   |
+10 |     kind_mismatch: ChoiceAnswer,
+   |                    ^^^^^^^^^^^^
+
+error: field `another_mismatch` has `#[score]`, whose answer is a `ScoreAnswer`, but its type is `NoulAnswer`: write `#[noul(...)]` for a `NoulAnswer` field, or make the field a `ScoreAnswer`
+  --> tests/ui/field_types.rs:12:23
+   |
+12 |     another_mismatch: typesafe_sdk::NoulAnswer,
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: field `number` has `#[noul]`, so its type must be `NoulAnswer` (the type is matched by name: `NoulAnswer` and `typesafe_sdk::NoulAnswer` work, a type alias does not)
+  --> tests/ui/field_types.rs:14:13
+   |
+14 |     number: f64,
+   |             ^^^
+
+error: field `alias` has `#[noul]`, so its type must be `NoulAnswer` (the type is matched by name: `NoulAnswer` and `typesafe_sdk::NoulAnswer` work, a type alias does not)
+  --> tests/ui/field_types.rs:16:12
+   |
+16 |     alias: Spam,
+   |            ^^^^
+
+error: field `optional` is optional, and a question set's fields cannot be in this version: the API answers every question it is asked, and a response without one of the answers is refused as malformed; make the field a `NoulAnswer`
+  --> tests/ui/field_types.rs:18:15
+   |
+18 |     optional: Option<NoulAnswer>,
+   |               ^^^^^^^^^^^^^^^^^^
+
+error: field `optional_other_kind` is optional, and a question set's fields cannot be in this version: the API answers every question it is asked, and a response without one of the answers is refused as malformed; make the field a `ChoiceAnswer`
+  --> tests/ui/field_types.rs:20:26
+   |
+20 |     optional_other_kind: core::option::Option<ScoreAnswer>,
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

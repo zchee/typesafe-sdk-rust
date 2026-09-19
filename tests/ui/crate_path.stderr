@@ -1,0 +1,11 @@
+error: unknown key `krate` in `#[question_set(...)]`: the one key is `crate = <path>`, the path the SDK is reached through
+ --> tests/ui/crate_path.rs:7:16
+  |
+7 | #[question_set(krate = typesafe_sdk)]
+  |                ^^^^^
+
+error: `crate` is given twice in `#[question_set(...)]`
+  --> tests/ui/crate_path.rs:14:38
+   |
+14 | #[question_set(crate = typesafe_sdk, crate = typesafe_sdk)]
+   |                                      ^^^^^

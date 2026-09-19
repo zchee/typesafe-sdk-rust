@@ -1,0 +1,11 @@
+error: `Mood` is an enum: `#[derive(QuestionSet)]` needs a struct with one named field per question
+ --> tests/ui/not_a_struct.rs:6:1
+  |
+6 | enum Mood {
+  | ^^^^
+
+error: `Bits` is a union: `#[derive(QuestionSet)]` needs a struct with one named field per question
+  --> tests/ui/not_a_struct.rs:12:1
+   |
+12 | union Bits {
+   | ^^^^^
