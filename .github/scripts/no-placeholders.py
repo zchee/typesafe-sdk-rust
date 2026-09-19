@@ -63,9 +63,10 @@ IGNORE = "ign" + "ore"
 #: attempt never splits a run of whitespace two ways.
 CFG_ATTR = re.compile(r"#\s*+(?:!\s*+)?\[\s*+cfg_attr\s*+\(")
 
-#: One token of an attribute's arguments. The literals and comments are
-#: opaque: nothing inside them opens or closes a delimiter or is a word. A
-#: string or raw string left open runs to the end of the file. Every
+#: One token of Rust source, read both in a whole ``.rs`` file and in an
+#: attribute's arguments. The literals and comments are opaque: nothing inside
+#: them opens or closes a delimiter, is a word or starts an attribute. A
+#: string or raw string left open runs to the end of the file. Every unbounded
 #: repetition is possessive and every alternative starts on a character that
 #: it then consumes, so a match never backtracks over what it has read.
 TOKEN = re.compile(
@@ -109,6 +110,36 @@ def block_comment_end(text: str, start: int) -> int:
     return len(text)
 
 
+def token_at(text: str, start: int) -> tuple[re.Match[str], int]:
+    """The token that starts at a position, and where it ends.
+
+    Args:
+        text: The whole file.
+        start: A position inside the file, where a token starts.
+
+    Returns:
+        The ``TOKEN`` match, and the position just after the token: after the
+        matching ``*/`` of a block comment and after the closing quote and
+        hashes of a raw string, or the end of the file when either never
+        closes.
+
+    Raises:
+        AssertionError: If no token matches, which ``TOKEN``'s last
+            alternative rules out.
+    """
+    token = TOKEN.match(text, start)
+    if token is None:
+        raise AssertionError(f"no token matches at offset {start}")
+    match token.lastgroup:
+        case "block_comment":
+            return token, block_comment_end(text, token.end())
+        case "raw_string":
+            closing = '"' + token.group("hashes")
+            found = text.find(closing, token.end())
+            return token, len(text) if found < 0 else found + len(closing)
+    return token, token.end()
+
+
 def attribute_end(text: str, start: int) -> tuple[int, int | None]:
     """Walk an attribute's arguments once, up to the parenthesis closing them.
 
@@ -125,10 +156,7 @@ def attribute_end(text: str, start: int) -> tuple[int, int | None]:
     hit: int | None = None
     position = start
     while position < len(text):
-        token = TOKEN.match(text, position)
-        if token is None:
-            raise AssertionError(f"no token matches at offset {position}")
-        position = token.end()
+        token, position = token_at(text, position)
         match token.lastgroup:
             case "open":
                 depth += 1
@@ -140,16 +168,10 @@ def attribute_end(text: str, start: int) -> tuple[int, int | None]:
                 word = token.group("raw_name") or token.group("word")
                 if word == IGNORE:
                     hit = position
-            case "block_comment":
-                position = block_comment_end(text, position)
-            case "raw_string":
-                closing = '"' + token.group("hashes")
-                found = text.find(closing, position)
-                position = len(text) if found < 0 else found + len(closing)
     return len(text), hit
 
 
-def switched_off(text: str) -> Iterator[tuple[int, int]]:
+def switched_off(text: str, rust: bool) -> Iterator[tuple[int, int]]:
     """Every ``cfg_attr`` attribute that switches a test off.
 
     rustfmt writes a long ``cfg_attr`` over several lines, and its arguments
@@ -161,20 +183,44 @@ def switched_off(text: str) -> Iterator[tuple[int, int]]:
     (``ignore = "reason"``, a nested ``cfg_attr`` and the raw identifier
     ``r#ignore`` included) outside every literal and comment.
 
-    The search for the next attribute resumes where the walk stopped, so no
-    position is read by two walks and the file is read a constant number of
-    times: an attribute left open ends at the end of the file, and whatever
-    follows it is read once, as its arguments, never again for each opener it
-    holds.
+    Where an opener may start depends on the file. In Rust source the whole
+    file is walked once from its start, one ``TOKEN`` at a time, and an
+    attribute is tried only where a token starts, so an opener quoted in a
+    string, a char literal or a comment (a doc comment included) is not an
+    attribute, and it cannot throw the walk out of step with the file's
+    literals and hide a real attribute after it. Any other file has no Rust
+    structure to trust, so an opener is searched for anywhere in it, and one
+    quoted in prose is reported: the safe side.
+
+    The file is read a constant number of times. Two positions only move
+    forward. One is the file's walk in Rust source, since each token ends
+    after it starts, or the opener search in any other file. The other is an
+    attribute's walk: it starts after its opener, and the file's walk or the
+    search resumes where it stopped. So no position is read by two walks, and
+    an attribute left open ends at the end of the file and reads what follows
+    it once, as its arguments. In Rust source the opener is tried where each
+    token starts. A try fails at its first character unless that is a ``#``;
+    after a ``#`` it reads only whitespace runs, one ``!``, one ``[`` and one
+    ``cfg_attr``, never another ``#``, so no character is read by two tries
+    from a ``#``, and what a failed try read the file's walk then reads once
+    more as its next tokens.
 
     Args:
         text: The whole file.
+        rust: Whether the file is Rust source.
 
     Yields:
         The start of each such attribute and the end of its ``ignore``.
     """
     position = 0
-    while (opener := CFG_ATTR.search(text, position)) is not None:
+    while position < len(text):
+        if rust:
+            opener = CFG_ATTR.match(text, position)
+            if opener is None:
+                position = token_at(text, position)[1]
+                continue
+        elif (opener := CFG_ATTR.search(text, position)) is None:
+            return
         position, hit = attribute_end(text, opener.end())
         if hit is not None:
             yield opener.start(), hit
@@ -227,7 +273,7 @@ def faults(path: str) -> list[str]:
     # The line and column of each hit are counted on from the previous one,
     # so many hits in one file, or on one long line, do not reread the text.
     number, line_start, counted = 1, 0, 0
-    for start, end in switched_off(text):
+    for start, end in switched_off(text, rust=path.endswith(".rs")):
         number += text.count("\n", counted, start)
         line_start = text.rfind("\n", counted, start) + 1 or line_start
         counted = start
