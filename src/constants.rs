@@ -80,6 +80,29 @@ pub(crate) const RUNTIME_HEADER: HeaderName = HeaderName::from_static("x-typesaf
 /// SDK on retries only. A caller-supplied one is dropped.
 pub(crate) const RETRY_COUNT_HEADER: HeaderName = HeaderName::from_static("x-typesafe-retry-count");
 
+/// The headers that frame a message or manage its connection, which belong
+/// to the transport and are dropped from client defaults and per-call headers
+/// on every protocol.
+///
+/// A caller's value for one of them disagrees with the body the SDK sends or
+/// with how the transport runs the connection. HTTP/2 forbids the
+/// connection-specific ones (RFC 9113, section 8.2.2), so hyper strips them
+/// there; a `Content-Length` that disagrees with the body fails an HTTP/2
+/// stream and leaves an HTTP/1.1 exchange waiting for bytes that never come,
+/// on a connection other calls share. `Host` is not among them: over HTTP/1.1
+/// it is the request's host, and over HTTP/2 it travels as an ordinary header
+/// beside the `:authority` the base URL gives.
+pub(crate) const TRANSPORT_HEADERS: [HeaderName; 8] = [
+    header::CONTENT_LENGTH,
+    header::TRANSFER_ENCODING,
+    header::CONNECTION,
+    HeaderName::from_static("keep-alive"),
+    HeaderName::from_static("proxy-connection"),
+    header::TE,
+    header::TRAILER,
+    header::UPGRADE,
+];
+
 /// The media type of every request body and of every response the SDK accepts.
 pub(crate) const JSON_CONTENT_TYPE: HeaderValue = HeaderValue::from_static("application/json");
 

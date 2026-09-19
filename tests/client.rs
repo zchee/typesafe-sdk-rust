@@ -1115,6 +1115,104 @@ async fn the_upstream_base_url_with_a_prefix_and_trailing_slashes() {
     assert_upstream_headers(request, "example.test");
 }
 
+/// The headers that frame a message or manage its connection, each with a
+/// value that would change what the transport does if it were sent.
+const TRANSPORT_OWNED: [(&str, &str); 8] = [
+    ("content-length", "999"),
+    ("transfer-encoding", "chunked"),
+    ("connection", "close"),
+    ("keep-alive", "timeout=5"),
+    ("proxy-connection", "keep-alive"),
+    ("te", "trailers"),
+    ("trailer", "x-checksum"),
+    ("upgrade", "websocket"),
+];
+
+/// Asserts that none of [`TRANSPORT_OWNED`] reached the server with the
+/// caller's value, that `Content-Length` is the transport's own when it is
+/// there at all, and that the caller's `Host` arrived.
+fn assert_transport_owned_dropped(request: &RecordedRequest, context: &str) {
+    let context =
+        format!("{context}, {} {}, headers {:?}", request.method, request.uri, request.headers);
+    for (name, _) in TRANSPORT_OWNED {
+        if name == "content-length" {
+            let length = request.body.len().to_string();
+            let sent = header(request, name);
+            assert!(
+                sent.iter().all(|value| *value == length),
+                "{context}: content-length {sent:?} is not the body's length {length}"
+            );
+            if request.method == http::Method::GET {
+                assert!(sent.is_empty() || length == "0", "{context}: content-length {sent:?}");
+            }
+        } else {
+            assert_eq!(header(request, name), Vec::<&str>::new(), "{context}: {name}");
+        }
+    }
+    assert_eq!(header(request, "host"), ["routed.example"], "{context}");
+}
+
+/// The framing and connection headers belong to the transport: set as a
+/// client default or on a call, over each protocol, on a call with a body and
+/// one without, none of them is sent and the call succeeds - a
+/// `content-length: 999` included, which would otherwise fail an HTTP/2
+/// stream and leave an HTTP/1.1 call waiting until its deadline. `host` is
+/// sent as given; over HTTP/2 the `:authority` is still the base URL's.
+#[tokio::test]
+async fn framing_and_connection_headers_are_dropped_and_host_is_sent() {
+    for protocol in PROTOCOLS {
+        let server = TestServer::start(protocol, |request: RecordedRequest| async move {
+            let body: &'static [u8] =
+                if request.method == http::Method::POST { RESULT } else { br#"{"models":[]}"# };
+            json_response(StatusCode::OK, body)
+        })
+        .await
+        .expect("the test server starts");
+        let questions = one_raw_question();
+
+        for set_on in ["default", "call"] {
+            let context = format!("{protocol:?}, set as a {set_on} header");
+            let mut builder = builder_for(&server, protocol).timeout(Duration::from_secs(5));
+            if set_on == "default" {
+                for (name, value) in TRANSPORT_OWNED {
+                    builder = builder.default_header(name, value);
+                }
+                builder = builder.default_header("host", "routed.example");
+            }
+            let client = builder.build().expect("the client builds");
+
+            let mut ask = client.system_one("hello", &questions);
+            let mut list = client.models().list();
+            if set_on == "call" {
+                for (name, value) in TRANSPORT_OWNED {
+                    ask = ask.header(name, value);
+                    list = list.header(name, value);
+                }
+                ask = ask.header("host", "routed.example");
+                list = list.header("host", "routed.example");
+            }
+            ask.send().await.unwrap_or_else(|error| panic!("{context}: the call failed: {error}"));
+            list.send()
+                .await
+                .unwrap_or_else(|error| panic!("{context}: the listing failed: {error}"));
+        }
+
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4, "{protocol:?}: two calls per client, two clients");
+        let authority = server.addr().to_string();
+        for request in &requests {
+            assert_transport_owned_dropped(request, &format!("{protocol:?}"));
+            if protocol != Protocol::Http1 {
+                assert_eq!(
+                    request.uri.authority().map(|authority| authority.as_str()),
+                    Some(authority.as_str()),
+                    "{protocol:?}: the :authority comes from the base URL"
+                );
+            }
+        }
+    }
+}
+
 /// Upstream `test_http_client_settings`, as section 6 has it ("`http_client=`
 /// / `transport=`" row): a transport of the caller's own carries every
 /// request, with the SDK's headers and the call's.

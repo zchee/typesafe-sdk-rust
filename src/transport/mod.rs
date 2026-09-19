@@ -43,7 +43,7 @@ use crate::{
     config::Config,
     constants::{
         JSON_CONTENT_TYPE, PROTECTED_HEADERS, RETRY_COUNT_HEADER, RUNTIME_IDENTIFIER,
-        SDK_IDENTIFIER,
+        SDK_IDENTIFIER, TRANSPORT_HEADERS,
     },
     error::{ApiError, Error, format_endpoint},
     telemetry,
@@ -203,7 +203,8 @@ where
 /// Precedence, lowest first: the client's default headers, then the SDK's
 /// own, which no default can replace, and, when the request has a body,
 /// `Content-Type: application/json`. A default `X-TypeSafe-Retry-Count` is
-/// dropped: the SDK sets that header on retries and only there. Per-call
+/// dropped: the SDK sets that header on retries and only there. So is a
+/// default framing or connection header ([`TRANSPORT_HEADERS`]). Per-call
 /// headers are applied on top of this map for each attempt; see
 /// [`call_headers`].
 pub(crate) fn base_headers(config: &Config, with_body: bool) -> HeaderMap {
@@ -228,11 +229,13 @@ pub(crate) fn base_headers(config: &Config, with_body: bool) -> HeaderMap {
     headers
 }
 
-/// Whether the SDK owns `name` on a request, so a caller cannot set it.
+/// Whether the SDK or its transport owns `name` on a request, so a caller
+/// cannot set it.
 fn is_sdk_owned(name: &HeaderName, with_body: bool) -> bool {
     PROTECTED_HEADERS.contains(name)
         || *name == RETRY_COUNT_HEADER
         || (with_body && *name == CONTENT_TYPE)
+        || TRANSPORT_HEADERS.contains(name)
 }
 
 /// Parses the headers a caller set on one call, dropping the ones the SDK
@@ -241,7 +244,9 @@ fn is_sdk_owned(name: &HeaderName, with_body: bool) -> bool {
 /// A later header of a name replaces an earlier one, as a later key does in a
 /// Python mapping. The protected headers, `X-TypeSafe-Retry-Count`, and
 /// `Content-Type` on a request with a body are dropped without an error, as
-/// the Python SDK overrides them.
+/// the Python SDK overrides them. The framing and connection headers
+/// ([`TRANSPORT_HEADERS`]) are dropped the same way: they belong to the
+/// transport. `Host` is kept.
 ///
 /// # Errors
 ///

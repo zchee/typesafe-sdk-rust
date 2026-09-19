@@ -173,6 +173,10 @@ where
     /// A header for this call only. It replaces a client default of the same
     /// name; the SDK's own headers still win over it, as they do over a
     /// default, and a later header of the same name replaces an earlier one.
+    /// The headers the SDK or its transport owns are dropped without an
+    /// error, as they are from a default; see
+    /// [`ClientBuilder::default_header`](crate::ClientBuilder::default_header)
+    /// for the list, and for what `Host` does.
     pub fn header(mut self, name: impl Into<Cow<'a, str>>, value: impl Into<Cow<'a, str>>) -> Self {
         self.headers.push(name.into(), value.into());
         self

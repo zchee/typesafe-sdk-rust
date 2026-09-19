@@ -301,7 +301,8 @@ The API key is sent as `Authorization: Bearer <key>` and never printed: the `Deb
 the builder, the client and a request show neither the key nor any header value. Headers are
 merged as client defaults < per-call headers < the SDK's own (`Authorization`, `Accept`,
 `User-Agent`, `X-TypeSafe-SDK`, `X-TypeSafe-Runtime`, and `Content-Type` on a request with a
-body), and a caller's `X-TypeSafe-Retry-Count` is dropped. A base URL's path appears in `Debug`
+body), and a caller's `X-TypeSafe-Retry-Count` and framing or connection headers are dropped
+(see [Security notes](#security-notes)). A base URL's path appears in `Debug`
 and in error messages, so do not put a credential there.
 
 ## Custom transport
@@ -426,8 +427,13 @@ application's own filter on the `typesafe_sdk` target.
   keeps the transport's error whole on purpose, and `Debug` prints it, as do reporters such as
   `anyhow` and `eyre` that walk the chain; that text can be long (an HTTP/2 GOAWAY carries up to
   16 KiB of debug data) and is not text this SDK wrote. Log the `Display` form when that matters.
-- **Hop-by-hop headers.** A caller may set `content-length`, `transfer-encoding`, `connection` or
-  `host` as a header; HTTP/2 refuses those as a protocol error, and the request then fails.
+- **Framing and connection headers belong to the transport.** `content-length`,
+  `transfer-encoding`, `connection`, `keep-alive`, `proxy-connection`, `te`, `trailer` and
+  `upgrade` set as a client default or on a call are dropped without an error, on every protocol,
+  as the SDK's own headers are: a caller's `content-length` that disagrees with the body would
+  fail an HTTP/2 stream and leave an HTTP/1.1 call waiting until its deadline. `host` is sent as
+  given, on every protocol; over HTTP/2 the request's `:authority` still comes from the base URL,
+  so a front end that routes on `host` rather than `:authority` sees the caller's value.
 - **Responses are bounded.** A body is read under a 16 MiB cap, and a JSON document nested deeper
   than 16 levels is refused before it reaches the parser (see below).
 
@@ -536,6 +542,7 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | An explicit empty `api_key` is sent | An explicit key or default model that is empty or whitespace-only is a `Config` error, even when the environment holds a usable value; a padded non-blank value is kept byte for byte | A critical setting fails when the client is built, not later as a 401 or 403. |
 | The base URL is not checked until the first request | Checked when the client is built: absolute `http`/`https`, a non-empty host, no userinfo, query or fragment; no message repeats the URL | Fail fast, and a URL that did not parse cannot be trusted to have had its userinfo found. |
 | Any header-legal bytes in the API key | The key must be printable ASCII, spaces or tabs; the message never repeats it | Anything else is a paste error (a curly quote, a non-breaking space) that would only fail later as an authentication error. |
+| Caller headers are sent as the caller set them, `Content-Length`, `Transfer-Encoding`, `Connection` and the other framing and connection headers included | `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer` and `Upgrade` are dropped from client defaults and per-call headers on every protocol; `Host` is sent as given | They belong to the transport: HTTP/2 forbids the connection-specific ones, and a `Content-Length` that disagrees with the body fails an HTTP/2 stream and hangs an HTTP/1.1 call until its deadline. |
 | Log redaction by header name only | A value flagged sensitive is redacted as well; the name rules are the Python SDK's | A tightening. |
 | A typed noul can send `null` outcomes and empty `criteria` | An undescribed outcome and empty `criteria` are left out; `RawQuestion` can still send all three shapes | The same meaning to the API. |
 | A body that is not an object fails at path `''` | The root is named `.` | The codec's name for the root. |
