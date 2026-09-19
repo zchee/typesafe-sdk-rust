@@ -199,12 +199,10 @@ typesafe-sdk-rust-test-support = { path = "crates/test-support" }
 # binary of its own rather than a test function in a shared one.
 [[test]]
 name = "alloc_encode"
-path = "tests/alloc_encode.rs"
 required-features = ["internals"]
 
 [[test]]
 name = "alloc_call"
-path = "tests/alloc_call.rs"
 required-features = ["internals"]
 
 [[test]]
@@ -217,19 +215,16 @@ required-features = ["internals"]
 
 [[test]]
 name = "derive"
-path = "tests/derive.rs"
 required-features = ["macros"]
 
 [[test]]
 name = "alloc_derive"
-path = "tests/alloc_derive.rs"
 required-features = ["internals", "macros"]
 
 # The example declares its questions with the derive; without the feature
 # cargo skips it rather than building a stub.
 [[example]]
 name = "typed_answers"
-path = "examples/typed_answers.rs"
 required-features = ["macros"]
 
 # divan supplies its own `main`, so the benches opt out of libtest's harness.
@@ -237,13 +232,11 @@ required-features = ["macros"]
 # socket and stays out of that run (see the file).
 [[bench]]
 name = "sdk"
-path = "benches/sdk/main.rs"
 harness = false
 required-features = ["internals", "macros"]
 
 [[bench]]
 name = "loopback"
-path = "benches/loopback.rs"
 harness = false
 
 [lints]
