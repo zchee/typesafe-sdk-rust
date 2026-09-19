@@ -1,7 +1,3 @@
-# The derive for `typesafe-sdk-rust`. Callers never name this package: the
-# main crate re-exports the derive behind its `macros` feature and depends on
-# this package with an exact version, so the two are always released and
-# resolved together.
 [package]
 name = "typesafe-sdk-rust-macros"
 version = "0.1.0"
