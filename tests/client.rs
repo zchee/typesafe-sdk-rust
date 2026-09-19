@@ -956,20 +956,21 @@ async fn logging_server(protocol: Protocol) -> TestServer {
     .expect("the test server starts")
 }
 
-/// Sets every header upstream's case sets, on the client and on the call, and
-/// sends one request.
-async fn send_upstream_headers(builder: ClientBuilder) {
+/// `builder` with every client header upstream's case sets.
+fn upstream_builder(builder: ClientBuilder) -> ClientBuilder {
     let mut builder = builder.timeout(Duration::from_secs(7));
     for (name, value) in PROTECTED {
         builder = builder.default_header(name, value);
     }
-    let client = builder
+    builder
         .default_header("X-Team", "default")
         .default_header("X-Default", "kept")
         .default_header("X-API-Key", "key-secret")
         .default_header("cookie", "cookie-secret")
-        .build()
-        .expect("the client builds");
+}
+
+/// Sets every call header upstream's case sets and sends one request.
+async fn send_upstream_headers<S: typesafe_sdk::HttpService>(client: &Client<S>) {
     let questions = one_raw_question();
     let mut request = client.system_one("hello", &questions).timeout(Duration::from_secs(2));
     for (name, value) in PROTECTED {
@@ -1013,7 +1014,7 @@ async fn headers_timeout_and_logging() {
         let server = logging_server(protocol).await;
         let builder =
             builder_for(&server, protocol).base_url(format!("{}/prefix///", server.base_url()));
-        send_upstream_headers(builder).await;
+        send_upstream_headers(&upstream_builder(builder).build().expect("the client builds")).await;
 
         let [request] = &server.requests()[..] else { panic!("{protocol:?}: one request") };
         assert_eq!(request.uri.path(), "/prefix/v1/systemone", "{protocol:?}");
@@ -1029,33 +1030,13 @@ async fn headers_timeout_and_logging() {
 async fn the_upstream_base_url_with_a_prefix_and_trailing_slashes() {
     let server = logging_server(Protocol::Http1).await;
     let forward = Forward::to(&server);
-    let mut builder = Client::builder()
+    let builder = Client::builder()
         .api_key("test-key")
         .default_model("jev-latest")
-        .base_url("https://example.test/prefix///")
-        .timeout(Duration::from_secs(7));
-    for (name, value) in PROTECTED {
-        builder = builder.default_header(name, value);
-    }
-    let client = builder
-        .default_header("X-Team", "default")
-        .default_header("X-Default", "kept")
-        .default_header("X-API-Key", "key-secret")
-        .default_header("cookie", "cookie-secret")
-        .build_with_service(forward.clone())
-        .expect("the client builds");
-    let questions = one_raw_question();
-    let mut request = client.system_one("hello", &questions).timeout(Duration::from_secs(2));
-    for (name, value) in PROTECTED {
-        request = request.header(name, value);
-    }
-    request
-        .header("x-team", "call")
-        .header("x-typesafe-retry-count", "99")
-        .header("content-type", "wrong")
-        .send()
-        .await
-        .expect("the call succeeds");
+        .base_url("https://example.test/prefix///");
+    let client =
+        upstream_builder(builder).build_with_service(forward.clone()).expect("the client builds");
+    send_upstream_headers(&client).await;
 
     assert_eq!(
         forward.asked(),
@@ -1341,7 +1322,8 @@ mod logging {
         let _installed = install(&recorder);
 
         let server = logging_server(Protocol::Http1).await;
-        send_upstream_headers(builder_for(&server, Protocol::Http1)).await;
+        let builder = upstream_builder(builder_for(&server, Protocol::Http1));
+        send_upstream_headers(&builder.build().expect("the client builds")).await;
 
         let text = recorder.text();
         for secret in
