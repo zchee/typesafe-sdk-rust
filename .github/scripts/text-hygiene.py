@@ -7,9 +7,7 @@ file survives every formatter and every linter and changes what the file means
 to a compiler or a shell without changing what it looks like. Nothing else in
 this repository's toolchain looks for either, so this does.
 
-Every tracked file is expected to be UTF-8 text. A binary fixture would have to
-be named in ALLOWED_BINARY below, which is deliberate: adding one should be a
-decision somebody made, not something that slips in with a commit.
+Every tracked file is expected to be UTF-8 text.
 
 Run it over the whole tree with no arguments, or over named paths.
 """
@@ -18,9 +16,6 @@ import subprocess
 import sys
 import unicodedata
 from pathlib import Path
-
-#: Tracked paths that are not UTF-8 text. Add one only with a reason.
-ALLOWED_BINARY: frozenset[str] = frozenset()
 
 #: Bytes that carry no glyph and no meaning in a text file. Tab (0x09), line
 #: feed (0x0A) and carriage return (0x0D) are left out: they are layout.
@@ -68,8 +63,6 @@ def faults(path: str) -> list[str]:
     Returns:
         One human-readable line per fault, empty when the file is clean.
     """
-    if path in ALLOWED_BINARY:
-        return []
     raw = Path(path).read_bytes()
 
     found: list[str] = []
