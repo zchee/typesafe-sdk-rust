@@ -57,8 +57,8 @@ async fn models_ignore_unknown_fields() {
 
 /// Upstream `test_invalid_models_response[None, {}, bad, missing field]`: a
 /// body of the wrong shape is a response-validation error naming the field.
-/// A `null` body fails at `.` (section 6 row "a body that is not an object
-/// fails at path `''`").
+/// A `null` body fails at `.` (README deviation row "A body that is not an
+/// object fails at path `''`").
 #[tokio::test]
 async fn invalid_models_response() {
     let rows: [(&'static [u8], &str); 4] = [

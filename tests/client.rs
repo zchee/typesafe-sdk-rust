@@ -3,8 +3,8 @@
 //! TLS where the protocol can matter.
 //!
 //! Every upstream test is named in the doc comment of the Rust test that
-//! ports it. A case the plan's deviation table (section 6) lists is tested for
-//! the Rust behaviour, and the comment names the row.
+//! ports it. A case the README's deviation table lists is tested for the Rust
+//! behaviour, and the comment names the row.
 
 use std::{
     error::Error as StdError,
@@ -442,10 +442,10 @@ async fn error_messages() {
     }
 }
 
-/// Section 6, "cut to 200 characters + U+2026 on every path": what a server
-/// puts in an error body or its request id reaches `Display` and `Debug`
-/// escaped and cut, over each protocol; the body and the header stay whole
-/// behind their accessors.
+/// README deviation row "Server messages are used verbatim and uncut": what a
+/// server puts in an error body or its request id reaches `Display` and
+/// `Debug` escaped and cut, over each protocol; the body and the header stay
+/// whole behind their accessors.
 #[tokio::test]
 async fn server_text_in_an_api_error_is_escaped_and_cut() {
     let hostile = serde_json::to_string("a\nb\u{1b}[31mRED\u{202e}X\u{0}").expect("serializes");
@@ -702,9 +702,9 @@ async fn held(protocol: Protocol, body: &'static [u8]) -> Held {
 }
 
 /// Upstream `test_transport_errors[ConnectTimeout, ReadTimeout]`: an attempt
-/// past its deadline is a timeout carrying that deadline. (Section 6 row "per-
-/// attempt TOTAL deadline": one deadline covers the whole attempt, not each
-/// httpx phase.)
+/// past its deadline is a timeout carrying that deadline. (README deviation
+/// row "Timeout per httpx phase; `httpx.Timeout` objects": one deadline covers
+/// the whole attempt, not each httpx phase.)
 #[tokio::test]
 async fn an_attempt_past_its_deadline_is_a_timeout_with_that_deadline() {
     for protocol in Protocol::ALL {
@@ -777,8 +777,8 @@ async fn system_one_timeout_override() {
 
 // ------------------------------------------------------- response limit
 
-/// The 16 MiB cap of section 6 ("no response size limit" row), set lower: a
-/// body over it is not read past it, whatever says how long it is.
+/// The 16 MiB cap of README deviation row "No response size limit", set
+/// lower: a body over it is not read past it, whatever says how long it is.
 #[tokio::test]
 async fn a_response_over_the_limit_is_refused() {
     let big = Bytes::from(vec![b' '; 4096]);
@@ -1146,9 +1146,10 @@ async fn framing_and_connection_headers_are_dropped_and_host_is_sent() {
     }
 }
 
-/// Upstream `test_http_client_settings`, as section 6 has it ("`http_client=`
-/// / `transport=`" row): a transport of the caller's own carries every
-/// request, with the SDK's headers and the call's.
+/// Upstream `test_http_client_settings`, as README deviation row
+/// "`http_client=` or `transport=`, mutually exclusive" has it: a transport of
+/// the caller's own carries every request, with the SDK's headers and the
+/// call's.
 #[tokio::test]
 async fn a_custom_transport_carries_every_request_with_the_sdk_headers() {
     let server = TestServer::start(Protocol::Http1, |request: RecordedRequest| async move {
@@ -1230,10 +1231,10 @@ impl Service<Request<Body>> for Counted {
 
 /// Upstream `test_supplied_network_resources_closed`,
 /// `test_owned_http_client_closed` and
-/// `test_exceptional_context_closes_http_client`, as section 6 has them
-/// ("explicit `close()`/context managers" row): a client owns its transport by
-/// value, and dropping the last clone of the client drops it - after success
-/// and after failure alike.
+/// `test_exceptional_context_closes_http_client`, as README deviation row
+/// "`close()`, context managers, closing a supplied client" has them: a client
+/// owns its transport by value, and dropping the last clone of the client
+/// drops it - after success and after failure alike.
 #[tokio::test]
 async fn the_last_clone_of_a_client_drops_its_transport() {
     let server = answering(Protocol::Http1, StatusCode::OK, br#"{"models":[]}"#).await;
@@ -1292,7 +1293,7 @@ async fn dropping_a_call_in_flight_cancels_it() {
 /// The logging half of upstream `test_headers_timeout_and_logging` and
 /// `test_secret_headers_redacted`: no credential reaches an event, whichever
 /// side of the exchange carried it; the request id and the body do, the body
-/// at `TRACE` only (section 6 row "DEBUG logs full bodies").
+/// at `TRACE` only (README deviation row "DEBUG logs full bodies").
 #[cfg(feature = "tracing")]
 mod logging {
     use std::fmt::{self, Write as _};

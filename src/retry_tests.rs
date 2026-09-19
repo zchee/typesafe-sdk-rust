@@ -14,8 +14,8 @@
 //! to stand for time spent answering, so a budget case runs exactly as
 //! upstream's monkeypatched `tenacity.time.monotonic` makes it run. Every
 //! upstream case is ported and named in the doc comment of its Rust test; a
-//! case the deviation table (plan section 6) lists is tested for the Rust
-//! behaviour, and the comment names the row. A deadline is still real time,
+//! case the README's deviation table lists is tested for the Rust behaviour,
+//! and the comment names the row. A deadline is still real time,
 //! 50 ms against a handler held on a channel.
 
 use std::{
@@ -661,7 +661,8 @@ fn the_default_policy_runs_on_the_real_clock() {
 
 /// `test_retry_policy_invalid_timeout`: a budget of zero is refused with
 /// upstream's message. Its `-1`, `inf` and `nan` cannot be written as a
-/// `Duration` (section 6 row "invalid `RetryPolicy` types").
+/// `Duration` (README deviation row "Unknown fields rejected on typed
+/// questions; `RetryPolicy` field types checked at run time").
 #[test]
 fn a_zero_budget_is_refused_as_upstream_test_retry_policy_invalid_timeout() {
     assert_config(
@@ -713,8 +714,9 @@ async fn zero_backoff_retries_at_once_as_upstream_test_zero_backoff_retries() {
 }
 
 /// `test_invalid_backoff`: a negative, NaN or infinite delay cannot be written
-/// as a `Duration` (section 6 row "invalid `RetryPolicy` types"). The largest
-/// one can, and it degrades instead of panicking: under a budget it ends the
+/// as a `Duration` (README deviation row "Unknown fields rejected on typed
+/// questions; `RetryPolicy` field types checked at run time"). The largest one
+/// can, and it degrades instead of panicking: under a budget it ends the
 /// retrying, and with no budget it is waited out as `Duration::MAX`.
 #[tokio::test]
 async fn the_largest_backoff_degrades_as_upstream_test_invalid_backoff() {
@@ -771,7 +773,8 @@ fn a_jitter_outside_zero_to_one_is_refused_as_upstream_test_invalid_backoff_jitt
 }
 
 /// `test_invalid_max_retries`: `-1`, `0.5`, `nan` and `inf` cannot be written
-/// as a `u32` (section 6 row "invalid `RetryPolicy` types"). The largest
+/// as a `u32` (README deviation row "Unknown fields rejected on typed
+/// questions; `RetryPolicy` field types checked at run time"). The largest
 /// count is accepted and counts without overflowing.
 #[tokio::test]
 async fn the_largest_retry_count_is_accepted_as_upstream_test_invalid_max_retries() {
@@ -1129,11 +1132,11 @@ struct Document {
 /// deadline and headers times out, is rate limited, then succeeds; every
 /// attempt sends the same body and headers, and the next call without
 /// overrides is back on the client's settings. Upstream's `httpx.Timeout`
-/// parametrization is a per-phase deadline this SDK does not have (section 6
-/// row "timeout applies per httpx phase"): the Rust call has one deadline per
-/// attempt, 50 ms here so the first attempt times out in real time, and what
-/// the server can observe is asserted instead of the transport's own timeout
-/// settings.
+/// parametrization is a per-phase deadline this SDK does not have (README
+/// deviation row "Timeout per httpx phase; `httpx.Timeout` objects"): the Rust
+/// call has one deadline per attempt, 50 ms here so the first attempt times
+/// out in real time, and what the server can observe is asserted instead of
+/// the transport's own timeout settings.
 #[tokio::test]
 async fn a_call_recovers_with_its_overrides_as_upstream_test_system_one_retry_recovers_with_overrides()
  {
@@ -1437,8 +1440,8 @@ async fn a_calls_count_replaces_the_clients_as_upstream_test_retry_policy_per_ca
 }
 
 /// `test_retry_policy_exceptions_and_predicate`: a predicate opts a 404 in.
-/// Upstream's `exceptions={TypeSafeAPIError}` is dropped (section 6 row
-/// "`RetryPolicy.exceptions`"); the Rust spelling of it is a predicate that
+/// Upstream's `exceptions={TypeSafeAPIError}` is dropped (README deviation
+/// row "`RetryPolicy.exceptions`"); the Rust spelling of it is a predicate that
 /// matches the kind, tested as the second row.
 #[tokio::test]
 async fn a_predicate_opts_a_failure_in_as_upstream_test_retry_policy_exceptions_and_predicate() {
