@@ -16,9 +16,10 @@
 //!
 //! The budget is the frozen inventory: encode 1 + the retained retry body 1 +
 //! header map 2 + request assembly 0 + the queue of collected frames 1 +
-//! decode 14 = 19 blocks under the default retry policy. A call that cannot
-//! retry (`max_retries(0)`) keeps no body for a second attempt, so it costs
-//! the same without the retained body: 18 blocks.
+//! decode 7 = 12 blocks under the default retry policy (the decode's 7 are
+//! itemized in `alloc_decode.rs`). A call that cannot retry
+//! (`max_retries(0)`) keeps no body for a second attempt, so it costs the same
+//! without the retained body: 11 blocks.
 //!
 //! The budgets are asserted on calls whose futures are pinned on the stack
 //! before the runtime drives them. Tokio 1.53.1 boxes a future larger than
@@ -30,8 +31,12 @@
 //! the call inside a task never pays it; a pinned reference is one pointer
 //! wide, so the pinned runs count the SDK's blocks only. The same calls
 //! unpinned are measured and printed on every run as well, with the futures'
-//! sizes, so the runtime's box stays visible: in a debug build the System One
-//! future is over the threshold and its unpinned calls cost one block more.
+//! sizes, so the runtime's box shows up here the moment a future grows past
+//! the threshold. Over this test's transport the System One future is 2,040
+//! bytes, under the debug threshold, so today its unpinned calls cost exactly
+//! what the pinned ones cost, in both profiles. Over the default transport the
+//! same future is 2,344 bytes: a debug build that hands such a call to
+//! `block_on` or `spawn` still pays the box, one block more.
 //!
 //! One profiler exists per process, so all of it runs in a single test.
 
@@ -64,11 +69,11 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 /// `RESULT` of `tests/test_clients.py:42-56`, as the upstream test sends it.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
-/// The frozen per-call budget under the default retry policy.
-const MAX_BLOCKS: u64 = 19;
+/// The per-call budget under the default retry policy.
+const MAX_BLOCKS: u64 = 12;
 
 /// The same call when it cannot retry, so no body is retained.
-const MAX_BLOCKS_WITHOUT_RETRY: u64 = 18;
+const MAX_BLOCKS_WITHOUT_RETRY: u64 = 11;
 
 /// A transport that answers every request with the fixture, allocating the
 /// same blocks whatever the request: one response header.

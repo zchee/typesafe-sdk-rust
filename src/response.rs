@@ -25,7 +25,7 @@ use serde::{
     ser::{SerializeMap, SerializeStruct},
 };
 
-use crate::{constants::REQUEST_ID_HEADER, content::Content};
+use crate::{constants::REQUEST_ID_HEADER, content::Content, name::Name};
 
 // ---------------------------------------------------------------- response
 
@@ -41,7 +41,7 @@ use crate::{constants::REQUEST_ID_HEADER, content::Content};
 /// the API payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemOneResponse<A = Answers> {
-    model: String,
+    model: Name,
     usage: Usage,
     answers: A,
     meta: ResponseMeta,
@@ -49,7 +49,7 @@ pub struct SystemOneResponse<A = Answers> {
 
 impl<A> SystemOneResponse<A> {
     /// Assembles a decoded response.
-    pub(crate) fn from_parts(model: String, usage: Usage, answers: A, meta: ResponseMeta) -> Self {
+    pub(crate) fn from_parts(model: Name, usage: Usage, answers: A, meta: ResponseMeta) -> Self {
         Self { model, usage, answers, meta }
     }
 
@@ -57,7 +57,7 @@ impl<A> SystemOneResponse<A> {
     /// named: asking for `jev-latest` is answered by a concrete model.
     #[must_use]
     pub fn model(&self) -> &str {
-        &self.model
+        self.model.as_str()
     }
 
     /// The tokens the call used.
@@ -211,7 +211,7 @@ impl Usage {
 /// iterate; nothing is copied or cached.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Answers {
-    entries: Vec<(String, Answer)>,
+    entries: Vec<(Name, Answer)>,
 }
 
 impl Answers {
@@ -221,7 +221,7 @@ impl Answers {
     }
 
     /// Appends one answer.
-    pub(crate) fn push(&mut self, name: String, answer: Answer) {
+    pub(crate) fn push(&mut self, name: Name, answer: Answer) {
         self.entries.push((name, answer));
     }
 
@@ -246,7 +246,7 @@ impl Answers {
     /// The answer to the question called `name`.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Answer> {
-        self.entries.iter().find(|(key, _)| key == name).map(|(_, answer)| answer)
+        self.entries.iter().find(|(key, _)| key.as_str() == name).map(|(_, answer)| answer)
     }
 
     /// The answer to the yes/no question called `name`, if there is one and it
@@ -304,7 +304,12 @@ where
     where
         I: IntoIterator<Item = (S, Answer)>,
     {
-        Self { entries: iter.into_iter().map(|(name, answer)| (name.into(), answer)).collect() }
+        Self {
+            entries: iter
+                .into_iter()
+                .map(|(name, answer)| (Name::from(name.into()), answer))
+                .collect(),
+        }
     }
 }
 
@@ -434,9 +439,9 @@ impl Serialize for NoulAnswer {
 /// See the [choice primitive](https://docs.typesafe.ai/primitives/choice).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChoiceAnswer {
-    choice: String,
+    choice: Name,
     confidence: f64,
-    probabilities: Vec<(String, f64)>,
+    probabilities: Vec<(Name, f64)>,
 }
 
 impl ChoiceAnswer {
@@ -450,20 +455,20 @@ impl ChoiceAnswer {
         S: Into<String>,
     {
         Self::from_parts(
-            choice.into(),
+            Name::from(choice.into()),
             confidence,
             probabilities
                 .into_iter()
-                .map(|(name, probability)| (name.into(), probability))
+                .map(|(name, probability)| (Name::from(name.into()), probability))
                 .collect(),
         )
     }
 
     /// Assembles a decoded answer.
     pub(crate) fn from_parts(
-        choice: String,
+        choice: Name,
         confidence: f64,
-        probabilities: Vec<(String, f64)>,
+        probabilities: Vec<(Name, f64)>,
     ) -> Self {
         Self { choice, confidence, probabilities }
     }
@@ -471,7 +476,7 @@ impl ChoiceAnswer {
     /// The option with the highest probability.
     #[must_use]
     pub fn choice(&self) -> &str {
-        &self.choice
+        self.choice.as_str()
     }
 
     /// How sure the model is of the pick, from 0 to 1.
@@ -490,7 +495,10 @@ impl ChoiceAnswer {
     /// The probability of the option called `name`.
     #[must_use]
     pub fn probability(&self, name: &str) -> Option<f64> {
-        self.probabilities.iter().find(|(key, _)| key == name).map(|(_, probability)| *probability)
+        self.probabilities
+            .iter()
+            .find(|(key, _)| key.as_str() == name)
+            .map(|(_, probability)| *probability)
     }
 }
 

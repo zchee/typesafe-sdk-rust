@@ -8,20 +8,21 @@
 //! - `prepared()` allocates nothing, on its first call or any later one: the
 //!   set is a `static` the compiler initialized.
 //! - Decoding the upstream `RESULT` fixture into a derived set costs fewer
-//!   blocks than decoding it into `Answers` (14): there is no map, no answers
-//!   vector and no name string, so what is left is the model name and the
-//!   answers' own storage.
+//!   blocks than decoding it into `Answers` (7): there is no map, no answers
+//!   vector and no question name, so what is left is the model name and the
+//!   answers' own storage. The names are stored inline, as in
+//!   `alloc_decode.rs`:
 //!
 //!   | item | blocks |
 //!   | --- | ---: |
-//!   | model name | 1 |
-//!   | the choice's pick | 1 |
+//!   | model name (inline) | 0 |
+//!   | the choice's pick (inline) | 0 |
 //!   | the choice's probabilities vector | 1 |
-//!   | the choice's two option names | 2 |
+//!   | the choice's two option names (inline) | 0 |
 //!   | the score's legend vector | 1 |
 //!   | the score's three level descriptions | 3 |
 //!   | the score's probabilities vector | 1 |
-//!   | **total** | **10** |
+//!   | **total** | **6** |
 //!
 //! - `Questions::prepare()` on the runtime example set keeps its cost of 3
 //!   blocks: the worst-case buffer, its shrink to exact size, and the name
@@ -49,10 +50,10 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
 /// AC-P2's budget for `Answers`, which a derived set must beat.
-const ANSWERS_BUDGET: u64 = 14;
+const ANSWERS_BUDGET: u64 = 7;
 /// What decoding into a struct costs when the implementation is written by
 /// hand (`alloc_decode.rs`); the derived one is no worse.
-const HAND_WRITTEN_BLOCKS: u64 = 10;
+const HAND_WRITTEN_BLOCKS: u64 = 6;
 /// `Questions::prepare()` on the runtime example set.
 const PREPARE_BLOCKS: u64 = 3;
 const PREPARE_BYTES: u64 = 1524;

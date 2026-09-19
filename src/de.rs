@@ -34,6 +34,7 @@ use crate::{
     codec::{self, DecodeError},
     content::Content,
     error::{Error, ResponseValidationError, format_endpoint},
+    name::Name,
     response::{
         Answer, Answers, ChoiceAnswer, NoulAnswer, ResponseMeta, ScoreAnswer, SystemOneResponse,
         Usage, insert_by_level,
@@ -357,7 +358,7 @@ impl<'de> Visitor<'de> for AnswersVisitor {
                 target: PhantomData,
             };
             if let Some(answer) = map.next_value_seed(seed)? {
-                answers.push(name.into_owned(), answer);
+                answers.push(Name::from(name), answer);
             }
         }
         Ok(answers)
@@ -779,7 +780,7 @@ impl<'de> Visitor<'de> for KindSeed<'_, 'de> {
 #[derive(Default)]
 struct Members<'de> {
     noul: Slot<'de, f64>,
-    choice: Slot<'de, String>,
+    choice: Slot<'de, Name>,
     confidence: Slot<'de, f64>,
     score: Slot<'de, f64>,
     legend: Slot<'de, Vec<(u32, Content<'static>)>>,
@@ -805,7 +806,7 @@ enum Slot<'de, T> {
 enum Probabilities<'de> {
     #[default]
     Missing,
-    Named(Vec<(String, f64)>),
+    Named(Vec<(Name, f64)>),
     Levels(Vec<(u32, f64)>),
     Raw(Cow<'de, str>),
 }
@@ -866,7 +867,7 @@ impl<'de> Members<'de> {
     }
 
     fn choice<E: de::Error>(self) -> Result<ChoiceAnswer, E> {
-        let choice = self.choice.resolve::<String, E>("choice")?;
+        let choice = self.choice.resolve::<Name, E>("choice")?;
         let confidence = self.confidence.resolve::<f64, E>("confidence")?;
         let probabilities = match self.probabilities {
             Probabilities::Named(named) => named,
@@ -1045,7 +1046,7 @@ impl Visitor<'_> for LevelSeed {
 struct NamedSeed;
 
 impl<'de> DeserializeSeed<'de> for NamedSeed {
-    type Value = Vec<(String, f64)>;
+    type Value = Vec<(Name, f64)>;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -1056,7 +1057,7 @@ impl<'de> DeserializeSeed<'de> for NamedSeed {
 }
 
 impl<'de> Visitor<'de> for NamedSeed {
-    type Value = Vec<(String, f64)>;
+    type Value = Vec<(Name, f64)>;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("an object of option name to probability")
@@ -1069,7 +1070,7 @@ impl<'de> Visitor<'de> for NamedSeed {
         let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
         while let Some(name) = map.next_key_seed(TextSeed)? {
             let probability = map.next_value()?;
-            entries.push((name.into_owned(), probability));
+            entries.push((Name::from(name), probability));
         }
         Ok(entries)
     }
@@ -1169,7 +1170,7 @@ impl<'de> Visitor<'de> for LegendSeed {
 /// The owned forms of the three containers, for a member that was held as raw
 /// text and is parsed on its own.
 struct Legend(Vec<(u32, Content<'static>)>);
-struct NamedProbabilities(Vec<(String, f64)>);
+struct NamedProbabilities(Vec<(Name, f64)>);
 struct LevelProbabilities(Vec<(u32, f64)>);
 
 impl From<Legend> for Vec<(u32, Content<'static>)> {
@@ -1249,7 +1250,7 @@ impl<'de> Visitor<'de> for UsageVisitor {
 
 /// The top level of a System One response.
 struct Envelope<A> {
-    model: String,
+    model: Name,
     usage: Usage,
     answers: A,
 }
@@ -1315,7 +1316,7 @@ where
 
         while let Some(index) = map.next_key_seed(KeyIn(&["model", "usage", "answers"]))? {
             match index {
-                Some(0) => model = Some(map.next_value::<String>()?),
+                Some(0) => model = Some(map.next_value::<Name>()?),
                 Some(1) => usage = Some(map.next_value::<Usage>()?),
                 Some(2) => {
                     answers = Some(map.next_value_seed(AnswerSetSeed::<A> {

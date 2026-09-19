@@ -239,10 +239,116 @@ fn a_response_gives_up_its_answers_and_compares_whole() {
     assert_eq!(&answers, response.answers());
 
     let other = SystemOneResponse::from_parts(
-        response.model().to_owned(),
+        Name::from(response.model()),
         *response.usage(),
         answers,
         ResponseMeta::new(StatusCode::OK, HeaderMap::new(), response.meta().raw_body().clone()),
     );
     assert_ne!(other, response, "the HTTP metadata is part of equality");
 }
+
+/// Names on both sides of the inline limit (24 bytes on a 64-bit target),
+/// multi-byte names on both sides of it, and names the body writes with
+/// escapes, in every place a response holds a name: the model, the answer
+/// names, a choice's pick and its option names.
+const NAMES: &str = concat!(
+    r#"{"model":"jev-2026-09-19-model-name-longer-than-24-bytes","#,
+    r#""usage":{"input_tokens":1,"output_tokens":2},"answers":{"#,
+    r#""exactly_twenty_four_byte":{"type":"noul","noul":0.5},"#,
+    r#""twenty_five_bytes_exactly":{"type":"noul","noul":0.25},"#,
+    "\"\u{8cea}\u{554f}\u{306e}\u{540d}\u{524d}\":{\"type\":\"noul\",\"noul\":0.75},",
+    "\"\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{8cea}\u{554f}\u{306e}\u{540d}\":",
+    r#"{"type":"choice","choice":"#,
+    "\"\u{9078}\u{629e}\u{80a2}\u{3001}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{540d}\u{524d}\",",
+    r#""confidence":0.5,"probabilities":{"#,
+    "\"\u{9078}\u{629e}\u{80a2}\u{3001}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{540d}\u{524d}\":0.5,",
+    r#""tab\there":0.25,"an option called \"quoted\", longer than 24":0.25}},"#,
+    r#""tab\tname":{"type":"noul","noul":0.125}}}"#,
+);
+
+#[test]
+fn long_multi_byte_and_escaped_names_decode_serialize_and_print_as_text() {
+    let long_pick =
+        "\u{9078}\u{629e}\u{80a2}\u{3001}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{540d}\u{524d}";
+    let long_question = "\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{8cea}\u{554f}\u{306e}\u{540d}";
+    let short_question = "\u{8cea}\u{554f}\u{306e}\u{540d}\u{524d}";
+    assert_eq!((long_pick.len(), long_question.len(), short_question.len()), (33, 27, 15));
+
+    let response = decode(NAMES.as_bytes());
+
+    assert_eq!(response.model(), "jev-2026-09-19-model-name-longer-than-24-bytes");
+    assert_eq!(
+        response.answers().names().collect::<Vec<_>>(),
+        [
+            "exactly_twenty_four_byte",
+            "twenty_five_bytes_exactly",
+            short_question,
+            long_question,
+            "tab\tname"
+        ]
+    );
+    assert_eq!(
+        response.answers().noul("twenty_five_bytes_exactly").map(NoulAnswer::noul),
+        Some(0.25)
+    );
+    assert_eq!(response.answers().noul(short_question).map(NoulAnswer::noul), Some(0.75));
+    assert_eq!(response.answers().noul("tab\tname").map(NoulAnswer::noul), Some(0.125));
+    let choice = response.answers().choice(long_question).expect("the long name finds its answer");
+    assert_eq!(choice.choice(), long_pick);
+    assert_eq!(
+        choice.probabilities().collect::<Vec<_>>(),
+        [
+            (long_pick, 0.5),
+            ("tab\there", 0.25),
+            ("an option called \"quoted\", longer than 24", 0.25)
+        ]
+    );
+    assert_eq!(choice.probability("an option called \"quoted\", longer than 24"), Some(0.25));
+
+    // Written back, the body is the one that came in, byte for byte: the
+    // multi-byte names unescaped and the tab and quotes escaped as JSON
+    // writes them.
+    assert_eq!(std::str::from_utf8(&through_the_codec(&response)).expect("UTF-8"), NAMES);
+    let through_serde_json = serde_json::to_string(&response).expect("the response serializes");
+    assert_eq!(through_serde_json, NAMES);
+
+    // `Debug` prints each name as a quoted, escaped string, exactly as it
+    // printed when the names were `String`s.
+    assert_eq!(format!("{choice:?}"), EXPECTED_CHOICE_DEBUG);
+    assert_eq!(format!("{:?}", response.answers()), EXPECTED_ANSWERS_DEBUG);
+    let rendered = format!("{response:?}");
+    assert!(
+        rendered.starts_with(
+            "SystemOneResponse { model: \"jev-2026-09-19-model-name-longer-than-24-bytes\", usage: "
+        ),
+        "{rendered}"
+    );
+}
+
+/// `ChoiceAnswer`'s `Debug` output for `NAMES`' choice, as printed when its
+/// names were `String`s.
+const EXPECTED_CHOICE_DEBUG: &str = concat!(
+    r#"ChoiceAnswer { choice: ""#,
+    "\u{9078}\u{629e}\u{80a2}\u{3001}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{540d}\u{524d}",
+    r#"", confidence: 0.5, probabilities: [(""#,
+    "\u{9078}\u{629e}\u{80a2}\u{3001}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{540d}\u{524d}",
+    r#"", 0.5), ("tab\there", 0.25), ("an option called \"quoted\", longer than 24", 0.25)] }"#,
+);
+
+/// `Answers`' `Debug` output for `NAMES`, as printed when its names were
+/// `String`s.
+const EXPECTED_ANSWERS_DEBUG: &str = concat!(
+    r#"Answers { entries: [("exactly_twenty_four_byte", Noul(NoulAnswer { noul: 0.5 })), "#,
+    r#"("twenty_five_bytes_exactly", Noul(NoulAnswer { noul: 0.25 })), (""#,
+    "\u{8cea}\u{554f}\u{306e}\u{540d}\u{524d}",
+    r#"", Noul(NoulAnswer { noul: 0.75 })), (""#,
+    "\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{8cea}\u{554f}\u{306e}\u{540d}",
+    r#"", Choice("#,
+    // The choice prints inside the set exactly as it prints alone.
+    r#"ChoiceAnswer { choice: ""#,
+    "\u{9078}\u{629e}\u{80a2}\u{3001}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{540d}\u{524d}",
+    r#"", confidence: 0.5, probabilities: [(""#,
+    "\u{9078}\u{629e}\u{80a2}\u{3001}\u{3068}\u{3066}\u{3082}\u{9577}\u{3044}\u{540d}\u{524d}",
+    r#"", 0.5), ("tab\there", 0.25), ("an option called \"quoted\", longer than 24", 0.25)] }"#,
+    r#")), ("tab\tname", Noul(NoulAnswer { noul: 0.125 }))] }"#,
+);
