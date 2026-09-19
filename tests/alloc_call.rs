@@ -12,15 +12,32 @@
 //! second of two identical calls. Both runs consume the response body the
 //! same way - frame by frame - and the SDK additionally keeps it.
 //!
-//! The budget is the frozen inventory without the retained retry body, which
-//! the retry phase adds: encode 1 + header map 2 + request assembly 0 + the
-//! queue of collected frames 1 + decode 14 = 18 blocks.
+//! The budget is the frozen inventory: encode 1 + the retained retry body 1 +
+//! header map 2 + request assembly 0 + the queue of collected frames 1 +
+//! decode 14 = 19 blocks under the default retry policy. A call that cannot
+//! retry (`max_retries(0)`) keeps no body for a second attempt, so it costs
+//! the same without the retained body: 18 blocks.
+//!
+//! The budgets are asserted on calls whose futures are pinned on the stack
+//! before the runtime drives them. Tokio 1.53.1 boxes a future larger than
+//! `BOX_FUTURE_THRESHOLD` - 2048 bytes in a debug build, 16384 in a release
+//! build (`runtime/mod.rs:627-631`) - when it is handed to
+//! `Runtime::block_on` (`runtime/runtime.rs:338-345`) or `spawn`
+//! (`runtime/runtime.rs:243-252`). That box is one block of the future's own
+//! size, allocated by the runtime rather than the SDK, and a caller awaiting
+//! the call inside a task never pays it; a pinned reference is one pointer
+//! wide, so the pinned runs count the SDK's blocks only. The same calls
+//! unpinned are measured and printed on every run as well, with the futures'
+//! sizes, so the runtime's box stays visible: in a debug build the System One
+//! future is over the threshold and its unpinned calls cost one block more.
 //!
 //! One profiler exists per process, so all of it runs in a single test.
 
 use std::{
     convert::Infallible,
     future::{Ready, ready},
+    mem::size_of_val,
+    pin::pin,
     task::{Context, Poll},
 };
 
@@ -29,8 +46,8 @@ use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use http_body_util::BodyExt as _;
 use tower_service::Service;
 use typesafe_sdk::{
-    __internals as sdk, Body, Choice, Client, Noul, PreparedQuestions, Questions, Score,
-    response::Answers,
+    __internals as sdk, Body, Choice, Client, Noul, PreparedQuestions, Questions, RetryPolicy,
+    Score, response::Answers,
 };
 
 // A plain wrapper type, so declaring it as the global allocator stays safe
@@ -41,8 +58,11 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 /// `RESULT` of `tests/test_clients.py:42-56`, as the upstream test sends it.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
-/// The frozen per-call budget, without the retained retry body.
-const MAX_BLOCKS: u64 = 18;
+/// The frozen per-call budget under the default retry policy.
+const MAX_BLOCKS: u64 = 19;
+
+/// The same call when it cannot retry, so no body is retained.
+const MAX_BLOCKS_WITHOUT_RETRY: u64 = 18;
 
 /// A transport that answers every request with the fixture, allocating the
 /// same blocks whatever the request: one response header.
@@ -136,30 +156,56 @@ fn a_whole_call_costs_its_own_steps_and_nothing_else() {
     let state = "x".repeat(1024);
 
     let call = || {
+        let call = pin!(client.system_one(state.as_str(), &questions).send());
+        runtime.block_on(call).expect("the call succeeds")
+    };
+    let untimed = || {
+        let call = pin!(client.system_one(state.as_str(), &questions).no_timeout().send());
+        runtime.block_on(call).expect("the call succeeds")
+    };
+    let once = || {
+        let request = client
+            .system_one(state.as_str(), &questions)
+            .retry(RetryPolicy::default().max_retries(0));
+        runtime.block_on(pin!(request.send())).expect("the call succeeds")
+    };
+    let unpinned = || {
         runtime
             .block_on(client.system_one(state.as_str(), &questions).send())
             .expect("the call succeeds")
     };
-    let untimed = || {
-        runtime
-            .block_on(client.system_one(state.as_str(), &questions).no_timeout().send())
-            .expect("the call succeeds")
+    let unpinned_once = || {
+        let request = client
+            .system_one(state.as_str(), &questions)
+            .retry(RetryPolicy::default().max_retries(0));
+        runtime.block_on(request.send()).expect("the call succeeds")
     };
+    let call_size = size_of_val(&client.system_one(state.as_str(), &questions).send());
+    let list_size = size_of_val(&client.models().list().send());
 
     // Warm-ups: the encode scratch, the promoted `Bytes` of the endpoint and
     // the header values, the timer wheel, the event callsites.
     drop(call());
     drop(untimed());
-    assert_eq!(runtime.block_on(call_directly(prebuilt_request())), StatusCode::OK);
+    drop(once());
+    drop(unpinned());
+    drop(unpinned_once());
+    assert_eq!(runtime.block_on(pin!(call_directly(prebuilt_request()))), StatusCode::OK);
 
     let (whole, response) = measure(call);
     let (whole_untimed, untimed_response) = measure(untimed);
+    let (whole_once, once_response) = measure(once);
+    let (whole_unpinned, unpinned_response) = measure(unpinned);
+    let (whole_unpinned_once, unpinned_once_response) = measure(unpinned_once);
     let request = prebuilt_request();
-    let (direct, status) = measure(|| runtime.block_on(call_directly(request)));
+    let (direct, status) = measure(|| runtime.block_on(pin!(call_directly(request))));
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response.answers().len(), 3);
     assert_eq!(untimed_response.answers(), response.answers());
-    drop((response, untimed_response));
+    assert_eq!(once_response.answers(), response.answers());
+    assert_eq!(unpinned_response.answers(), response.answers());
+    assert_eq!(unpinned_once_response.answers(), response.answers());
+    drop((response, untimed_response, once_response, unpinned_response, unpinned_once_response));
 
     // The steps on their own, through the same code the call runs.
     let (encode, body) = measure(|| {
@@ -192,14 +238,28 @@ fn a_whole_call_costs_its_own_steps_and_nothing_else() {
 
     let sdk_blocks = whole.blocks - direct.blocks;
     let sdk_untimed = whole_untimed.blocks - direct.blocks;
+    let sdk_once = whole_once.blocks - direct.blocks;
     println!("whole call               blocks={:>3} bytes={:>6}", whole.blocks, whole.bytes);
     println!(
         "whole call, no deadline  blocks={:>3} bytes={:>6}",
         whole_untimed.blocks, whole_untimed.bytes
     );
+    println!(
+        "whole call, no retry     blocks={:>3} bytes={:>6}",
+        whole_once.blocks, whole_once.bytes
+    );
     println!("transport called directly blocks={:>3} bytes={:>6}", direct.blocks, direct.bytes);
     println!(
         "SDK's own                blocks={sdk_blocks:>3} (budget {MAX_BLOCKS}); without a deadline {sdk_untimed}"
+    );
+    println!("SDK's own, no retry      blocks={sdk_once:>3} (budget {MAX_BLOCKS_WITHOUT_RETRY})");
+    println!(
+        "  futures                system_one send {call_size} bytes, models send {list_size} bytes"
+    );
+    println!(
+        "unpinned, runtime's box  blocks={:>3} (default policy), {:>3} (no retry); not asserted",
+        whole_unpinned.blocks - direct.blocks,
+        whole_unpinned_once.blocks - direct.blocks
     );
     println!("  encode                 blocks={:>3} bytes={:>6}", encode.blocks, encode.bytes);
     println!(
@@ -207,14 +267,24 @@ fn a_whole_call_costs_its_own_steps_and_nothing_else() {
         header_clone.blocks, header_clone.bytes
     );
     println!("  decode                 blocks={:>3} bytes={:>6}", decode.blocks, decode.bytes);
+    println!(
+        "  retained retry body    blocks={:>3} bytes={:>6}",
+        i128::from(whole.blocks) - i128::from(whole_once.blocks),
+        i128::from(whole.bytes) - i128::from(whole_once.bytes)
+    );
     let itemized = i128::from(encode.blocks + header_clone.blocks + decode.blocks);
     println!(
-        "  the rest               blocks={:>3} (request assembly, frame queue, deadline)",
-        i128::from(sdk_blocks) - itemized
+        "  the rest, no retry     blocks={:>3} (request assembly, frame queue, deadline)",
+        i128::from(sdk_once) - itemized
     );
 
     assert!(
         sdk_blocks <= MAX_BLOCKS,
         "a call costs {sdk_blocks} blocks of its own, over the budget of {MAX_BLOCKS}"
+    );
+    assert!(
+        sdk_once <= MAX_BLOCKS_WITHOUT_RETRY,
+        "a call that cannot retry costs {sdk_once} blocks of its own, over the budget of \
+         {MAX_BLOCKS_WITHOUT_RETRY}"
     );
 }
