@@ -23,11 +23,11 @@ fn headers() -> HeaderMap {
 
 fn decode_as<A: AnswerSet>(body: &[u8], questions: usize) -> Result<SystemOneResponse<A>, Error> {
     let uri = Uri::from_static(ENDPOINT);
-    decode_system_one(
+    decode_system_one_with(
         Bytes::copy_from_slice(body),
         StatusCode::OK,
         headers(),
-        questions,
+        AnswerContext::new(questions),
         Some((&Method::POST, &uri)),
     )
 }
@@ -770,11 +770,11 @@ fn a_body_that_is_not_json_or_too_deep_fails_without_a_path() {
 
 #[test]
 fn a_failure_without_an_endpoint_leaves_it_out() {
-    let result = decode_system_one::<Answers>(
+    let result = decode_system_one_with::<Answers>(
         Bytes::from_static(b"{}"),
         StatusCode::OK,
         HeaderMap::new(),
-        0,
+        AnswerContext::new(0),
         None,
     );
 

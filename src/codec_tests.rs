@@ -1344,11 +1344,11 @@ fn a_success_body_with_a_legend_object_that_is_not_utf8_is_a_validation_error() 
         b"{\"model\":\"m\",\"usage\":{},\"answers\":{\"s\":{\"type\":\"score\",\"score\":0,\
         \"confidence\":0,\"legend\":{\"0\":{\"a\":\"\xC9\"}},\"probabilities\":{\"0\":1}}}}";
     let column = 1 + body.iter().position(|&byte| byte == 0xC9).expect("the bad byte is there");
-    let failure = crate::de::decode_system_one::<crate::response::Answers>(
+    let failure = crate::de::decode_system_one_with::<crate::response::Answers>(
         Bytes::copy_from_slice(body),
         http::StatusCode::OK,
         http::HeaderMap::new(),
-        1,
+        crate::de::AnswerContext::new(1),
         None,
     )
     .expect_err("a body that is not UTF-8 does not decode");

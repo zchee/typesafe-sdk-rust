@@ -88,7 +88,7 @@ where
     codec::decode(bytes)
 }
 
-/// See `de::decode_system_one`: the response decoder whose allocation
+/// See `de::decode_system_one_with`: the response decoder whose allocation
 /// behaviour the decode budget is stated on.
 ///
 /// It passes no level hint. A call passes the largest score its questions
@@ -110,7 +110,13 @@ pub fn decode_system_one<A>(
 where
     A: crate::de::AnswerSet,
 {
-    crate::de::decode_system_one(body, status, headers, questions, None)
+    crate::de::decode_system_one_with(
+        body,
+        status,
+        headers,
+        crate::de::AnswerContext::new(questions),
+        None,
+    )
 }
 
 /// See `models::decode_list_models`: the decoder a models response goes

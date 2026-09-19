@@ -1430,36 +1430,18 @@ const MIN_KEPT_ANSWER_BYTES: usize = r#""":{"type":"noul","noul":0}"#.len();
 
 /// Decodes the body of a successful System One response.
 ///
-/// `questions` is the number of questions the request asked, which sizes the
-/// answer storage once instead of growing it. The count is capped by how many
-/// answers the body can hold, so no count - however large - reserves storage
-/// for answers that cannot be there. `endpoint` names the request in the
-/// error, and is formatted only when there is one.
+/// `asked` carries what the request knows about its answers: the number of
+/// questions, which sizes the answer storage once instead of growing it, and
+/// the largest score's level count. The count is capped by how many answers
+/// the body can hold, so no count - however large - reserves storage for
+/// answers that cannot be there. `endpoint` names the request in the error,
+/// and is formatted only when there is one.
 ///
 /// # Errors
 ///
 /// Returns [`ErrorKind::ResponseValidation`](crate::ErrorKind::ResponseValidation)
 /// carrying the status, the headers, the whole body and the decode failure,
 /// whose path names the field that did not fit.
-// A request knows more than the question count and calls
-// `decode_system_one_with`; this shorter form is kept only for the tests and
-// the `internals` wrapper, and would be dead code in any other build.
-#[cfg(any(test, feature = "internals"))]
-pub(crate) fn decode_system_one<A>(
-    body: Bytes,
-    status: StatusCode,
-    headers: HeaderMap,
-    questions: usize,
-    endpoint: Option<(&Method, &Uri)>,
-) -> Result<SystemOneResponse<A>, Error>
-where
-    A: AnswerSet,
-{
-    decode_system_one_with(body, status, headers, AnswerContext::new(questions), endpoint)
-}
-
-/// Decodes a System One response with everything the request knows about
-/// its answers: the question count and the largest score's level count.
 pub(crate) fn decode_system_one_with<A>(
     body: Bytes,
     status: StatusCode,

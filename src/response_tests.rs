@@ -2,7 +2,10 @@ use http::HeaderValue;
 use serde_json::json;
 
 use super::*;
-use crate::{codec, de::decode_system_one};
+use crate::{
+    codec,
+    de::{AnswerContext, decode_system_one_with},
+};
 
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("../tests/fixtures/result.json");
@@ -10,8 +13,14 @@ const RESULT: &[u8] = include_bytes!("../tests/fixtures/result.json");
 fn decode(body: &[u8]) -> SystemOneResponse {
     let mut headers = HeaderMap::new();
     headers.insert("x-typesafe-request-id", HeaderValue::from_static("req-export"));
-    decode_system_one(Bytes::copy_from_slice(body), StatusCode::OK, headers, 3, None)
-        .expect("the body decodes")
+    decode_system_one_with(
+        Bytes::copy_from_slice(body),
+        StatusCode::OK,
+        headers,
+        AnswerContext::new(3),
+        None,
+    )
+    .expect("the body decodes")
 }
 
 fn through_the_codec<T: Serialize>(value: &T) -> Vec<u8> {
