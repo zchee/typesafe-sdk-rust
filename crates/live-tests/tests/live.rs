@@ -14,7 +14,8 @@ use std::{
 use live_tests::live_client;
 use serde::Serialize;
 use typesafe_sdk::{
-    ChoiceAnswer, Client, Content, NoulAnswer, QuestionSet, Questions, RetryPolicy, ScoreAnswer,
+    ChoiceAnswer, Client, Content, ErrorKind, NoulAnswer, QuestionSet, Questions, RetryPolicy,
+    ScoreAnswer,
     question::{Choice, Noul, Score},
 };
 
@@ -157,21 +158,37 @@ const TIMED_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// No retry, so a request written to a dead connection cannot hide behind a
 /// second attempt on a new one.
+///
+/// # Panics
+///
+/// When the call fails. A call that runs into [`TIMED_CALL_TIMEOUT`] is
+/// reported as what it most likely is: a request stranded on a connection
+/// the far side dropped without telling the client.
 async fn timed_list(client: &Client) -> Duration {
     let started = Instant::now();
-    client
+    let listed = client
         .models()
         .list()
         .timeout(TIMED_CALL_TIMEOUT)
         .retry(RetryPolicy::new().max_retries(0))
         .send()
-        .await
-        .expect("the live API lists its models");
-    started.elapsed()
+        .await;
+    let elapsed = started.elapsed();
+    match listed {
+        Ok(_) => elapsed,
+        Err(error) if matches!(error.kind(), ErrorKind::Timeout { .. }) => panic!(
+            "the listing ran into its {TIMED_CALL_TIMEOUT:?} deadline after {elapsed:?}: the \
+             request was stranded on a connection that was dropped without the client being \
+             told ({error})"
+        ),
+        Err(error) => panic!("the live API did not list its models: {error}"),
+    }
 }
 
 /// After 75 seconds without a request, the next call succeeds on its first
-/// attempt and costs no more than a call on a new client, plus a second.
+/// attempt and costs no more than a call on a new client, plus a second. The
+/// cost of a call on a new client is the slower of two, each on a client of
+/// its own, so that one fast sample does not set the bound.
 ///
 /// The pause is chosen against two clocks. A load balancer commonly closes a
 /// connection idle for 60 seconds, unless it counts the client's HTTP/2 PING
@@ -191,8 +208,13 @@ async fn timed_list(client: &Client) -> Duration {
 /// its deadline would exceed.
 #[tokio::test]
 async fn call_after_idle_pause_succeeds_within_cold_call_plus_one_second() {
+    let first = live_client();
+    let first_cold = timed_list(&first).await;
+    drop(first);
     let client = live_client();
-    let cold = timed_list(&client).await;
+    let second_cold = timed_list(&client).await;
+    let cold = first_cold.max(second_cold);
+    println!("cold calls on two new clients {first_cold:?} and {second_cold:?}");
     let mut warm = Duration::MAX;
     for _ in 0..3 {
         warm = warm.min(timed_list(&client).await);

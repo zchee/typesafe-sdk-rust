@@ -55,8 +55,6 @@ pub fn live_client() -> Client {
     }
     match Client::builder().timeout(LIVE_TIMEOUT).build() {
         Ok(client) => client,
-        Err(error) => panic!(
-            "the live tests need {API_KEY_ENV}; they fail without it rather than skip: {error}"
-        ),
+        Err(error) => panic!("the live client could not be built from the environment: {error}"),
     }
 }
