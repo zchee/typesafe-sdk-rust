@@ -52,23 +52,31 @@ use crate::{
 /// and it never changes what is decoded or whether decoding succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AnswerContext {
-    expected_answers: usize,
+    // Both counts are held as `u32`, saturating: they are capacity hints, and
+    // the context is carried in every call's future twice, where two `usize`
+    // fields instead of one tipped the future over tokio's debug box size.
+    expected_answers: u32,
     /// The most levels any score question of the request has, or 0 when
     /// unknown: the capacity a score's level lists start at, since the codec
     /// gives no size hint for an object.
-    levels: usize,
+    levels: u32,
 }
 
 impl AnswerContext {
     /// A context for a request that asked `expected_answers` questions.
     pub(crate) fn new(expected_answers: usize) -> Self {
-        Self { expected_answers, levels: 0 }
+        Self { expected_answers: saturate(expected_answers), levels: 0 }
     }
 
     /// The same, for a request whose largest score question has `levels`
     /// levels.
     pub(crate) fn with_levels(self, levels: usize) -> Self {
-        Self { levels, ..self }
+        Self { levels: saturate(levels), ..self }
+    }
+
+    /// The level hint, as a capacity.
+    fn levels(self) -> usize {
+        self.levels as usize
     }
 
     /// How many questions the request asked, and so how many answers a
@@ -78,8 +86,13 @@ impl AnswerContext {
     /// It is a capacity hint: a response may carry fewer answers or more.
     #[must_use]
     pub fn expected_answers(&self) -> usize {
-        self.expected_answers
+        self.expected_answers as usize
     }
+}
+
+/// `count` as a `u32`, or `u32::MAX` when it does not fit.
+fn saturate(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// A type the `answers` object of a response decodes into.
@@ -289,7 +302,7 @@ impl AnswerSet for Answers {
     {
         deserializer.deserialize_map(AnswersVisitor {
             capacity: context.expected_answers(),
-            levels: context.levels,
+            levels: context.levels(),
         })
     }
 }
@@ -1374,7 +1387,7 @@ where
     A: AnswerSet,
 {
     let expected = asked.expected_answers().min(body.len() / MIN_KEPT_ANSWER_BYTES);
-    let context = AnswerContext::new(expected).with_levels(asked.levels);
+    let context = AnswerContext::new(expected).with_levels(asked.levels());
     let meta = ResponseMeta::new(status, headers, body);
     let decoded =
         codec::decode_seed(meta.raw_body(), EnvelopeSeed::<A> { context, answers: PhantomData });
