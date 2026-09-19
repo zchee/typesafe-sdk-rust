@@ -24,6 +24,7 @@ use crate::{
     error::Error,
     question::PreparedQuestions,
     response::{Answers, SystemOneResponse},
+    retry::{self, RetryPolicy},
     text,
     transport::{self, Exchange, HttpService},
 };
@@ -117,6 +118,8 @@ pub struct SystemOne<'a, S, T: ?Sized, A = Answers> {
     deadline: Deadline,
     headers: CallHeaders<'a>,
     extra: Vec<ExtraMember<'a>>,
+    /// This call's own policy, in place of the client's.
+    retry: Option<RetryPolicy>,
     /// `fn() -> A` rather than `A`: the request holds no `A`, so it must not
     /// inherit `A`'s auto traits or drop behaviour.
     answers: PhantomData<fn() -> A>,
@@ -139,6 +142,7 @@ where
             deadline: Deadline::Client,
             headers: CallHeaders::default(),
             extra: Vec::new(),
+            retry: None,
             answers: PhantomData,
         }
     }
@@ -171,6 +175,13 @@ where
     /// default, and a later header of the same name replaces an earlier one.
     pub fn header(mut self, name: impl Into<Cow<'a, str>>, value: impl Into<Cow<'a, str>>) -> Self {
         self.headers.push(name.into(), value.into());
+        self
+    }
+
+    /// The retry policy of this call, in place of the client's; the client
+    /// and its other calls keep theirs.
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = Some(policy);
         self
     }
 
@@ -211,6 +222,7 @@ where
             deadline: self.deadline,
             headers: self.headers,
             extra: self.extra,
+            retry: self.retry,
             answers: PhantomData,
         }
     }
@@ -222,7 +234,11 @@ where
     T: Serialize + ?Sized,
     A: AnswerSet,
 {
-    /// Sends the request and decodes the answer.
+    /// Sends the request and decodes the answer, retrying a failure as the
+    /// call's retry policy, or else the client's, says.
+    ///
+    /// The body is encoded once: every attempt sends the same bytes. When
+    /// retrying stops, the error is the one the last attempt failed with.
     ///
     /// # Errors
     ///
@@ -243,7 +259,7 @@ where
         let shared = self.client.shared();
         let deadline = self.deadline.resolve(shared.config.timeout())?;
         let headers = self.headers.parse(true)?;
-        let body = self.encode()?;
+        let mut body = self.encode()?;
 
         let uri = shared.config.endpoints().system_one();
         let exchange = Exchange {
@@ -254,15 +270,23 @@ where
             deadline,
             max_response_bytes: shared.config.max_response_bytes(),
         };
-        let (status, headers, body) =
-            transport::attempt(&shared.service, exchange, 0, Some(body)).await?;
-        de::decode_system_one(
-            body,
-            status,
-            headers,
-            self.questions.len(),
-            Some((&Method::POST, uri)),
-        )
+        let policy = self.retry.as_ref().unwrap_or(&shared.retry);
+        // Every attempt after the first shares these bytes; the first clone
+        // allocates the reference count they are shared through, so a call
+        // that cannot retry hands its one attempt the body itself.
+        let retain = policy.can_retry();
+        let asked = self.questions.len();
+        retry::run(policy, &Method::POST, uri, move |retry| {
+            let body = if retain { body.clone() } else { std::mem::take(&mut body) };
+            async move {
+                let (status, headers, body) =
+                    transport::attempt(&shared.service, exchange, retry, Some(body)).await?;
+                // Decoding is part of the attempt, so a retry predicate sees a
+                // response that did not decode, as the Python SDK's does.
+                de::decode_system_one(body, status, headers, asked, Some((&Method::POST, uri)))
+            }
+        })
+        .await
     }
 
     /// The body: `{"state":<state>,"model":<model>,"questions":<questions>}` and the extra members,
@@ -343,16 +367,20 @@ where
     T: ?Sized,
 {
     /// The request's settings: no state, no header value and no body member,
-    /// which are the caller's data.
+    /// which are the caller's data. A retry policy is shown when the call has
+    /// one of its own.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SystemOne")
+        let mut shown = formatter.debug_struct("SystemOne");
+        shown
             .field("questions", &self.questions.len())
             .field("model", &self.model)
             .field("deadline", &self.deadline)
             .field("headers", &self.headers)
-            .field("extra_body", &self.extra.iter().map(|(name, _)| name).collect::<Vec<_>>())
-            .finish_non_exhaustive()
+            .field("extra_body", &self.extra.iter().map(|(name, _)| name).collect::<Vec<_>>());
+        if let Some(retry) = &self.retry {
+            shown.field("retry", retry);
+        }
+        shown.finish_non_exhaustive()
     }
 }
 

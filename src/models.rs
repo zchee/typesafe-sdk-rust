@@ -25,6 +25,7 @@ use crate::{
     error::Error,
     request::{CallHeaders, Deadline},
     response::ResponseMeta,
+    retry::{self, RetryPolicy},
     transport::{self, Exchange, HttpService},
 };
 
@@ -46,6 +47,7 @@ impl<'a, S> Models<'a, S> {
             client: self.client,
             deadline: Deadline::Client,
             headers: CallHeaders::default(),
+            retry: None,
         }
     }
 }
@@ -65,6 +67,8 @@ pub struct ListModels<'a, S> {
     client: &'a Client<S>,
     deadline: Deadline,
     headers: CallHeaders<'a>,
+    /// This call's own policy, in place of the client's.
+    retry: Option<RetryPolicy>,
 }
 
 impl<'a, S> ListModels<'a, S> {
@@ -86,13 +90,22 @@ impl<'a, S> ListModels<'a, S> {
         self.headers.push(name.into(), value.into());
         self
     }
+
+    /// The retry policy of this call, in place of the client's; see
+    /// [`SystemOne::retry`](crate::request::SystemOne::retry).
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = Some(policy);
+        self
+    }
 }
 
 impl<S> ListModels<'_, S>
 where
     S: HttpService,
 {
-    /// Sends the request and decodes the list.
+    /// Sends the request and decodes the list, retrying a failure as the
+    /// call's retry policy, or else the client's, says. When retrying stops,
+    /// the error is the one the last attempt failed with.
     ///
     /// # Errors
     ///
@@ -122,20 +135,28 @@ where
             deadline,
             max_response_bytes: shared.config.max_response_bytes(),
         };
-        let (status, headers, body) =
-            transport::attempt(&shared.service, exchange, 0, None).await?;
-        decode_list_models(body, status, headers, Some((&Method::GET, uri)))
+        let policy = self.retry.as_ref().unwrap_or(&shared.retry);
+        retry::run(policy, &Method::GET, uri, |retry| async move {
+            let (status, headers, body) =
+                transport::attempt(&shared.service, exchange, retry, None).await?;
+            // Decoding is part of the attempt, so a retry predicate sees a
+            // response that did not decode, as the Python SDK's does.
+            decode_list_models(body, status, headers, Some((&Method::GET, uri)))
+        })
+        .await
     }
 }
 
 impl<S> fmt::Debug for ListModels<'_, S> {
-    /// The deadline and the header names; never a header value.
+    /// The deadline and the header names; never a header value. A retry
+    /// policy is shown when the call has one of its own.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ListModels")
-            .field("deadline", &self.deadline)
-            .field("headers", &self.headers)
-            .finish_non_exhaustive()
+        let mut shown = formatter.debug_struct("ListModels");
+        shown.field("deadline", &self.deadline).field("headers", &self.headers);
+        if let Some(retry) = &self.retry {
+            shown.field("retry", retry);
+        }
+        shown.finish_non_exhaustive()
     }
 }
 

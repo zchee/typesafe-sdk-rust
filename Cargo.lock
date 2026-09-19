@@ -1600,6 +1600,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "dhat",
+ "fastrand",
  "http",
  "http-body",
  "http-body-util",

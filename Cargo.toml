@@ -117,6 +117,8 @@ internals = []
 
 [dependencies]
 bytes = { workspace = true }
+# The random draw of the retry backoff's jitter.
+fastrand = { workspace = true }
 http = { workspace = true }
 # The request body type implements this crate's version of `http_body::Body`,
 # the one bound a custom transport shares with the SDK.

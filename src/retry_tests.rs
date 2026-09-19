@@ -1,11 +1,51 @@
-//! Tests for the backoff schedule and the seconds-to-`Duration` conversion.
+//! Tests for the backoff schedule, the seconds-to-`Duration` conversion, and
+//! the retry loop.
 //!
-//! Expected values are the upstream SDK's own test tables, or were computed by
-//! running its `_backoff` (and Python's `round` and `math.ldexp`) under
-//! CPython with the same inputs. Floating-point results are compared by their
-//! bits, so a sign of zero or a last-place difference fails the test.
+//! Expected values of the schedule are the upstream SDK's own test tables, or
+//! were computed by running its `_backoff` (and Python's `round` and
+//! `math.ldexp`) under CPython with the same inputs. Floating-point results
+//! are compared by their bits, so a sign of zero or a last-place difference
+//! fails the test.
+//!
+//! The loop is tested the way upstream tests it (`tests/test_retry.py`): a
+//! real client against a real loopback server, with the clock and the sleep
+//! replaced. [`FakeTime`] records every delay the loop asks for and moves its
+//! clock by it instead of waiting, and a server handler moves the same clock
+//! to stand for time spent answering, so a budget case runs exactly as
+//! upstream's monkeypatched `tenacity.time.monotonic` makes it run. Every
+//! upstream case is ported and named in the doc comment of its Rust test; a
+//! case the deviation table (plan section 6) lists is tested for the Rust
+//! behaviour, and the comment names the row. A deadline is still real time,
+//! 50 ms against a handler held on a channel.
+
+use std::{
+    convert::Infallible,
+    error::Error as StdError,
+    io,
+    pin::Pin,
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
+};
+
+use bytes::Bytes;
+use http::{
+    HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, header::CONTENT_TYPE,
+};
+use http_body_util::{BodyExt as _, Full};
+use serde::Serialize;
+use test_support::{Protocol, RecordedRequest, TestResponse, TestServer};
+use tokio::sync::{Notify, watch};
+use tower_service::Service;
 
 use super::*;
+use crate::{
+    Client, Noul, PreparedQuestions, Questions, RawQuestion,
+    error::ApiError,
+    transport::{Body, BoxError, HttpVersion, HyperTransport, ResponseBody, TransportSettings},
+};
 
 /// The upstream `RetryPolicy` defaults: `backoff_initial`, `backoff_max` and
 /// `backoff_jitter`.
@@ -279,4 +319,1334 @@ fn seconds_to_duration_saturates_and_maps_nan_and_negatives_to_zero() {
     for (name, seconds, want) in cases {
         assert_eq!(seconds_to_duration(seconds), want, "{name}: {seconds:?} s");
     }
+}
+
+// ------------------------------------------------------------- the fake
+
+/// A clock that stands still until something moves it, a sleep that records
+/// its delay and moves the clock by it instead of waiting, and a draw fixed
+/// by the test.
+pub(super) struct FakeTime {
+    base: Instant,
+    wall: SystemTime,
+    offset: Mutex<Duration>,
+    delays: Mutex<Vec<Duration>>,
+    draw: Mutex<f64>,
+    /// Whether a sleep never ends, to hold a call inside its wait.
+    hang: bool,
+    /// Notified when a hanging sleep is reached.
+    parked: Notify,
+    /// Set when a hanging sleep's future is dropped.
+    sleep_dropped: AtomicBool,
+}
+
+impl FakeTime {
+    /// A clock whose wall time reads `1_000_000` seconds after the epoch, the
+    /// instant upstream's `test_backoff_dates_cap_and_jitter` pins, with a
+    /// draw of one half.
+    fn new() -> Arc<Self> {
+        Arc::new(Self::build(false))
+    }
+
+    /// The same, with a sleep that never ends.
+    fn hanging() -> Arc<Self> {
+        Arc::new(Self::build(true))
+    }
+
+    fn build(hang: bool) -> Self {
+        Self {
+            base: Instant::now(),
+            wall: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
+            offset: Mutex::new(Duration::ZERO),
+            delays: Mutex::new(Vec::new()),
+            draw: Mutex::new(0.5),
+            hang,
+            parked: Notify::new(),
+            sleep_dropped: AtomicBool::new(false),
+        }
+    }
+
+    /// Moves the clock, as time spent elsewhere.
+    fn advance(&self, by: Duration) {
+        let mut offset = lock(&self.offset);
+        *offset = offset.saturating_add(by);
+    }
+
+    /// Every delay slept so far, oldest first.
+    fn delays(&self) -> Vec<Duration> {
+        lock(&self.delays).clone()
+    }
+
+    fn clear_delays(&self) {
+        lock(&self.delays).clear();
+    }
+
+    fn set_draw(&self, draw: f64) {
+        *lock(&self.draw) = draw;
+    }
+}
+
+impl Time for FakeTime {
+    fn now(&self) -> Instant {
+        self.base.checked_add(*lock(&self.offset)).expect("a test clock stays in range")
+    }
+
+    fn system_now(&self) -> SystemTime {
+        self.wall.checked_add(*lock(&self.offset)).expect("a test clock stays in range")
+    }
+
+    fn sleep(&self, delay: Duration) -> impl Future<Output = ()> + Send {
+        lock(&self.delays).push(delay);
+        self.advance(delay);
+        async move {
+            if self.hang {
+                let _dropped = SetOnDrop(&self.sleep_dropped);
+                self.parked.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    fn draw(&self) -> f64 {
+        *lock(&self.draw)
+    }
+}
+
+/// Sets its flag when it is dropped: when the future holding it is dropped
+/// while suspended.
+struct SetOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for SetOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+impl RetryPolicy {
+    /// This policy, run on `time` instead of the real clocks.
+    fn on(mut self, time: &Arc<FakeTime>) -> Self {
+        self.time = Some(Arc::clone(time));
+        self
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().expect("no test thread panicked while holding a lock")
+}
+
+// ----------------------------------------------------------- the harness
+
+/// `RESULT` of upstream `tests/test_clients.py:42-56`.
+const RESULT: &[u8] = include_bytes!("../tests/fixtures/result.json");
+
+/// The deadline of an attempt that is meant to time out, against a handler
+/// that never answers it.
+const SHORT: Duration = Duration::from_millis(50);
+
+/// A JSON response with `status`, `body` and the extra headers.
+fn respond(status: u16, body: &str, headers: &[(&str, &str)]) -> TestResponse {
+    let mut response = Response::new(Full::new(Bytes::copy_from_slice(body.as_bytes())));
+    *response.status_mut() = StatusCode::from_u16(status).expect("a test status is valid");
+    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    for (name, value) in headers {
+        response.headers_mut().insert(
+            HeaderName::from_bytes(name.as_bytes()).expect("a test header name is valid"),
+            HeaderValue::from_str(value).expect("a test header value is valid"),
+        );
+    }
+    response
+}
+
+/// A server answering its `n`th request, counted from 1, with `answer(n)`.
+async fn serve<F>(answer: F) -> TestServer
+where
+    F: Fn(usize, &RecordedRequest) -> TestResponse + Send + Sync + 'static,
+{
+    let served = AtomicUsize::new(0);
+    TestServer::start(Protocol::Http1, move |request| {
+        let response = answer(served.fetch_add(1, Ordering::SeqCst) + 1, &request);
+        async move { response }
+    })
+    .await
+    .expect("the test server starts")
+}
+
+/// A client of `server` with `policy`, reading nothing from the environment.
+fn client(server: &TestServer, policy: RetryPolicy) -> Client {
+    Client::builder()
+        .api_key("test-key")
+        .base_url(server.base_url())
+        .default_model("jev-latest")
+        .retry(policy)
+        .build_with_env(|_: &str| None::<String>)
+        .expect("the client builds")
+}
+
+/// One noul question, `q`, as upstream's helpers ask it.
+fn questions() -> PreparedQuestions {
+    Questions::new().noul("q", Noul::new().instructions("?")).prepare().expect("prepares")
+}
+
+/// The same question written as a raw question.
+fn raw_questions() -> PreparedQuestions {
+    Questions::new()
+        .raw("q", RawQuestion::new("noul").field("instructions", "?"))
+        .prepare()
+        .expect("prepares")
+}
+
+/// The two endpoints upstream parametrizes the loop tests over.
+#[derive(Debug, Clone, Copy)]
+enum Resource {
+    Models,
+    SystemOne,
+}
+
+impl Resource {
+    const ALL: [Self; 2] = [Self::Models, Self::SystemOne];
+
+    /// The endpoint as an error names it.
+    fn endpoint(self, server: &TestServer) -> String {
+        match self {
+            Self::Models => format!("GET {}/v1/models", server.base_url()),
+            Self::SystemOne => format!("POST {}/v1/systemone", server.base_url()),
+        }
+    }
+
+    /// One call, with `retry` in place of the client's policy when given.
+    async fn call(self, client: &Client, retry: Option<RetryPolicy>) -> Result<(), Error> {
+        match self {
+            Self::Models => {
+                let mut request = client.models().list();
+                if let Some(policy) = retry {
+                    request = request.retry(policy);
+                }
+                request.send().await.map(drop)
+            }
+            Self::SystemOne => {
+                let questions = questions();
+                let mut request = client.system_one("x", &questions);
+                if let Some(policy) = retry {
+                    request = request.retry(policy);
+                }
+                request.send().await.map(drop)
+            }
+        }
+    }
+}
+
+/// The `X-TypeSafe-Retry-Count` of each request, `None` where it is absent.
+fn retry_counts(requests: &[RecordedRequest]) -> Vec<Option<String>> {
+    requests
+        .iter()
+        .map(|request| {
+            request
+                .headers
+                .get("x-typesafe-retry-count")
+                .map(|value| value.to_str().expect("the count is text").to_owned())
+        })
+        .collect()
+}
+
+/// What `retry_counts` reads for `attempts` attempts: none, then 1, 2, ...
+fn expected_counts(attempts: usize) -> Vec<Option<String>> {
+    (0..attempts).map(|attempt| (attempt > 0).then(|| attempt.to_string())).collect()
+}
+
+/// An API error with `status`, rendered as `display` in full, and no cause.
+#[track_caller]
+fn assert_api(error: &Error, status: u16, display: &str) {
+    let ErrorKind::Api(api) = error.kind() else {
+        panic!("an API error was expected, not {error:?}");
+    };
+    assert_eq!(api.status().as_u16(), status, "{error:?}");
+    assert_eq!(error.to_string(), display, "{error:?}");
+    assert!(error.source().is_none(), "an API error has no cause: {error:?}");
+}
+
+/// A config error rendered as `display` in full, with no cause.
+#[track_caller]
+fn assert_config(result: Result<RetryPolicy, Error>, display: &str) {
+    let error = result.expect_err("the policy is refused");
+    assert!(matches!(error.kind(), ErrorKind::Config), "a config error was expected: {error:?}");
+    assert_eq!(error.to_string(), display, "{error:?}");
+    assert!(error.source().is_none(), "{error:?}");
+}
+
+/// A transport that fails its first `failures` calls with an I/O error of
+/// `kind` whose text is `attempt <n>`, and hands the rest to the default
+/// transport: a connection that could not be made, or broke, as upstream's
+/// mock transport raises `ConnectError` or `ReadError`.
+#[derive(Clone)]
+struct Flaky {
+    inner: HyperTransport,
+    calls: Arc<AtomicUsize>,
+    failures: usize,
+    kind: io::ErrorKind,
+}
+
+impl Flaky {
+    fn new(failures: usize, kind: io::ErrorKind) -> Self {
+        let settings = TransportSettings {
+            version: HttpVersion::Auto,
+            extra_roots: Vec::new(),
+            connect_timeout: None,
+        };
+        Self {
+            inner: HyperTransport::new(settings).expect("the default transport builds"),
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures,
+            kind,
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+type Answered = Pin<Box<dyn Future<Output = Result<Response<ResponseBody>, BoxError>> + Send>>;
+
+impl Service<Request<Body>> for Flaky {
+    type Response = Response<ResponseBody>;
+    type Error = BoxError;
+    type Future = Answered;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Request<Body>) -> Answered {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call <= self.failures {
+            let error: BoxError = Box::new(io::Error::new(self.kind, format!("attempt {call}")));
+            return Box::pin(std::future::ready(Err(error)));
+        }
+        Box::pin(self.inner.call(request))
+    }
+}
+
+/// A client of `server` through `transport`, with `policy`. Every setting the
+/// environment could supply is given, so none is read.
+fn flaky_client(server: &TestServer, transport: Flaky, policy: RetryPolicy) -> Client<Flaky> {
+    Client::builder()
+        .api_key("test-key")
+        .base_url(server.base_url())
+        .default_model("jev-latest")
+        .retry(policy)
+        .build_with_service(transport)
+        .expect("the client builds")
+}
+
+/// A server that holds its first `held` requests until the test ends and
+/// answers the rest with `{"models": []}`: an attempt with a short deadline
+/// times out on each held one.
+async fn holding(held: usize) -> (TestServer, watch::Sender<bool>) {
+    let (release, released) = watch::channel(false);
+    let served = Arc::new(AtomicUsize::new(0));
+    let server = TestServer::start(Protocol::Http1, move |_| {
+        let mut released = released.clone();
+        let attempt = served.fetch_add(1, Ordering::SeqCst) + 1;
+        async move {
+            if attempt <= held {
+                // Held on a channel the test never sends on before the
+                // attempt gives up, not on a timer.
+                drop(released.wait_for(|released| *released).await);
+            }
+            respond(200, r#"{"models": []}"#, &[])
+        }
+    })
+    .await
+    .expect("the test server starts");
+    (server, release)
+}
+
+// -------------------------------------------------- ports of test_retry.py
+
+/// The defaults are upstream's `RetryPolicy` fields (`_core/retry.py:52-86`),
+/// field by field; `exceptions` has no Rust counterpart (section 6 row
+/// "`RetryPolicy.exceptions`").
+#[test]
+fn the_defaults_are_upstreams_field_by_field() {
+    let policy = RetryPolicy::default();
+    assert_eq!(policy.max_retries, 2);
+    assert_eq!(policy.backoff_initial, Duration::from_millis(500));
+    assert_eq!(policy.backoff_max, Duration::from_secs(5));
+    assert_same_f64(policy.backoff_jitter, 0.25, "backoff_jitter");
+    let mut statuses = vec![408, 429];
+    statuses.extend(500..600);
+    assert_eq!(policy.http_statuses.iter().collect::<Vec<_>>(), statuses);
+    assert!(policy.respect_retry_after);
+    assert!(policy.api_connection_error);
+    assert!(policy.api_timeout_error);
+    assert!(policy.predicate.is_none());
+    assert_eq!(policy.timeout, Some(Duration::from_secs(30)));
+    assert!(policy.time.is_none(), "the default runs on the real clock");
+}
+
+/// `test_retry_policy_invalid_timeout`: a budget of zero is refused with
+/// upstream's message. Its `-1`, `inf` and `nan` cannot be written as a
+/// `Duration` (section 6 row "invalid `RetryPolicy` types").
+#[test]
+fn a_zero_budget_is_refused_as_upstream_test_retry_policy_invalid_timeout() {
+    assert_config(
+        RetryPolicy::default().timeout(Duration::ZERO),
+        "timeout must be a positive, finite number of seconds.",
+    );
+    let smallest = RetryPolicy::default().timeout(Duration::from_nanos(1)).expect("accepted");
+    assert_eq!(smallest.timeout, Some(Duration::from_nanos(1)));
+    assert_eq!(RetryPolicy::default().no_timeout().timeout, None);
+}
+
+/// `test_zero_backoff_retries`: a zero initial delay, a zero cap, or both,
+/// retry at once, whether or not the retry succeeds.
+#[tokio::test]
+async fn zero_backoff_retries_at_once_as_upstream_test_zero_backoff_retries() {
+    let millis = Duration::from_millis;
+    for (initial, max) in
+        [(millis(0), millis(5000)), (millis(500), millis(0)), (millis(0), millis(0))]
+    {
+        for recover in [false, true] {
+            let case = format!("initial {initial:?}, max {max:?}, recover {recover}");
+            let server = serve(move |attempt, _| {
+                if recover && attempt == 2 {
+                    respond(200, r#"{"models": []}"#, &[])
+                } else {
+                    respond(503, r#"{"message": "temporarily unavailable"}"#, &[])
+                }
+            })
+            .await;
+            let time = FakeTime::new();
+            let policy =
+                RetryPolicy::default().max_retries(1).backoff_initial(initial).backoff_max(max);
+            let client = client(&server, policy.on(&time));
+
+            let outcome = client.models().list().send().await;
+            if recover {
+                let response = outcome.unwrap_or_else(|error| panic!("{case}: {error:?}"));
+                assert!(response.models().is_empty(), "{case}");
+            } else {
+                let error = outcome.expect_err("every attempt fails");
+                let display =
+                    format!("GET {}/v1/models: 503 temporarily unavailable", server.base_url());
+                assert_api(&error, 503, &display);
+            }
+            assert_eq!(retry_counts(&server.requests()), expected_counts(2), "{case}");
+            assert_eq!(time.delays(), [Duration::ZERO], "{case}");
+        }
+    }
+}
+
+/// `test_invalid_backoff`: a negative, NaN or infinite delay cannot be written
+/// as a `Duration` (section 6 row "invalid `RetryPolicy` types"). The largest
+/// one can, and it degrades instead of panicking: under a budget it ends the
+/// retrying, and with no budget it is waited out as `Duration::MAX`.
+#[tokio::test]
+async fn the_largest_backoff_degrades_as_upstream_test_invalid_backoff() {
+    let server = serve(|_, _| respond(503, r#"{"message": "down"}"#, &[])).await;
+    let display = format!("GET {}/v1/models: 503 down", server.base_url());
+    let largest =
+        || RetryPolicy::default().backoff_initial(Duration::MAX).backoff_max(Duration::MAX);
+
+    let time = FakeTime::new();
+    let client = client(&server, largest().on(&time));
+    let error = client.models().list().send().await.expect_err("fails");
+    assert_api(&error, 503, &display);
+    assert_eq!(server.request_count(), 1, "a wait of Duration::MAX reaches any budget");
+    assert!(time.delays().is_empty(), "nothing was waited: {:?}", time.delays());
+
+    // With no jitter drawn, the doubling saturates to the largest delay.
+    let time = FakeTime::new();
+    time.set_draw(0.0);
+    let error = client
+        .models()
+        .list()
+        .retry(largest().no_timeout().on(&time))
+        .send()
+        .await
+        .expect_err("fails");
+    assert_api(&error, 503, &display);
+    assert_eq!(server.request_count(), 1 + 3);
+    assert_eq!(time.delays(), [Duration::MAX, Duration::MAX]);
+}
+
+/// `test_invalid_backoff_jitter`: a jitter outside 0 to 1 is refused with
+/// upstream's message; both ends are accepted.
+#[test]
+fn a_jitter_outside_zero_to_one_is_refused_as_upstream_test_invalid_backoff_jitter() {
+    for jitter in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -f64::MIN_POSITIVE] {
+        assert_config(
+            RetryPolicy::default().backoff_jitter(jitter),
+            "backoff_jitter must be between zero and one.",
+        );
+    }
+    for jitter in [0.0, -0.0, 0.5, 1.0] {
+        let policy = RetryPolicy::default().backoff_jitter(jitter).expect("accepted");
+        assert_same_f64(policy.backoff_jitter, jitter, "an accepted jitter is kept as given");
+    }
+}
+
+/// `test_invalid_max_retries`: `-1`, `0.5`, `nan` and `inf` cannot be written
+/// as a `u32` (section 6 row "invalid `RetryPolicy` types"). The largest
+/// count is accepted and counts without overflowing.
+#[tokio::test]
+async fn the_largest_retry_count_is_accepted_as_upstream_test_invalid_max_retries() {
+    let server = serve(|attempt, _| match attempt {
+        1 | 2 => respond(503, "{}", &[("retry-after-ms", "0")]),
+        _ => respond(200, r#"{"models": []}"#, &[]),
+    })
+    .await;
+    let time = FakeTime::new();
+    let client = client(&server, RetryPolicy::default().max_retries(u32::MAX).on(&time));
+
+    client.models().list().send().await.expect("the third attempt succeeds");
+    assert_eq!(retry_counts(&server.requests()), expected_counts(3));
+}
+
+/// `test_retry_policy_timeout_budget`, row by row, on both endpoints: each
+/// attempt takes `duration` on the fake clock and answers 429 with
+/// `Retry-After: <delay>`; retrying stops before a wait that would reach the
+/// budget, and the error is the last attempt's. Each call gets a fresh
+/// budget, so every row runs twice on one client.
+#[tokio::test]
+async fn the_budget_stops_retrying_as_upstream_test_retry_policy_timeout_budget() {
+    let secs = Duration::from_secs_f64;
+    // (budget, time per attempt, Retry-After as Python's `str(float)` writes
+    // it, attempts)
+    let rows = [
+        (None, 1.0, "0.5", 3),
+        (Some(30.0), 10.0, "5.0", 2),
+        (Some(2.5), 0.75, "0.5", 2),
+        (Some(2.0), 1.0, "0.0", 2),
+        (Some(1.0), 0.0, "1.0", 1),
+        (Some(1.0), 0.0, "60.0", 1),
+    ];
+    for resource in Resource::ALL {
+        for (budget, duration, delay, attempts) in rows {
+            let case =
+                format!("{resource:?}, budget {budget:?}, {duration} s per attempt, delay {delay}");
+            let time = FakeTime::new();
+            let served = Arc::new(AtomicUsize::new(0));
+            let server = serve({
+                let time = Arc::clone(&time);
+                let served = Arc::clone(&served);
+                move |_, _| {
+                    time.advance(secs(duration));
+                    let attempt = served.fetch_add(1, Ordering::SeqCst) + 1;
+                    respond(
+                        429,
+                        &format!(r#"{{"message": "attempt {attempt}"}}"#),
+                        &[("Retry-After", delay)],
+                    )
+                }
+            })
+            .await;
+            let policy = match budget {
+                Some(budget) => RetryPolicy::default().timeout(secs(budget)).expect("valid"),
+                None => RetryPolicy::default().no_timeout(),
+            };
+            let client = client(&server, policy.on(&time));
+
+            for call in 0..2 {
+                served.store(0, Ordering::SeqCst);
+                time.clear_delays();
+                let before = server.request_count();
+                let error = resource.call(&client, None).await.expect_err("every attempt fails");
+                let display = format!("{}: 429 attempt {attempts}", resource.endpoint(&server));
+                assert_api(&error, 429, &display);
+                assert_eq!(server.request_count() - before, attempts, "{case}, call {call}");
+                let wait = secs(delay.parse::<f64>().expect("a number"));
+                assert_eq!(time.delays(), vec![wait; attempts - 1], "{case}, call {call}");
+            }
+        }
+    }
+}
+
+/// `test_retry_policy_timeout_override` (AC-F9, AC-F10): each attempt takes
+/// 20 s on the fake clock, so the client's default 30 s budget stops after
+/// two attempts; a call's own policy replaces it for that call alone.
+#[tokio::test]
+async fn a_calls_budget_replaces_the_clients_as_upstream_test_retry_policy_timeout_override() {
+    for resource in Resource::ALL {
+        let time = FakeTime::new();
+        let server = serve({
+            let time = Arc::clone(&time);
+            move |_, _| {
+                time.advance(Duration::from_secs(20));
+                respond(429, "", &[("retry-after-ms", "0")])
+            }
+        })
+        .await;
+        let client = client(&server, RetryPolicy::default().on(&time));
+        let calls = [
+            (None, 2),
+            (Some(RetryPolicy::default().timeout(Duration::from_secs(1)).expect("valid")), 1),
+            (Some(RetryPolicy::default().no_timeout()), 3),
+            (None, 2),
+        ];
+        for (index, (policy, attempts)) in calls.into_iter().enumerate() {
+            let before = server.request_count();
+            let error = resource
+                .call(&client, policy.map(|policy| policy.on(&time)))
+                .await
+                .expect_err("every attempt fails");
+            assert_api(
+                &error,
+                429,
+                &format!("{}: 429 status code (no body)", resource.endpoint(&server)),
+            );
+            assert_eq!(server.request_count() - before, attempts, "{resource:?}, call {index}");
+        }
+    }
+}
+
+/// `test_default_retry_statuses`: 408, 429 and 5xx are retried twice; other
+/// failures, and a redirect the transport does not follow, are not.
+#[tokio::test]
+async fn the_default_statuses_are_retried_as_upstream_test_default_retry_statuses() {
+    let rows = [
+        (408, 3),
+        (429, 3),
+        (500, 3),
+        (503, 3),
+        (599, 3),
+        (400, 1),
+        (401, 1),
+        (403, 1),
+        (404, 1),
+        (409, 1),
+        (422, 1),
+        (302, 1),
+    ];
+    for (status, attempts) in rows {
+        let server = serve(move |_, _| {
+            respond(status, r#"{"message": "failed"}"#, &[("retry-after-ms", "0")])
+        })
+        .await;
+        let time = FakeTime::new();
+        let client = client(&server, RetryPolicy::default().on(&time));
+
+        let error = client.models().list().send().await.expect_err("fails");
+        assert_api(
+            &error,
+            status,
+            &format!("GET {}/v1/models: {status} failed", server.base_url()),
+        );
+        assert_eq!(retry_counts(&server.requests()), expected_counts(attempts), "status {status}");
+    }
+}
+
+/// `test_connection_retry_recovers`, `ConnectError` and `ReadError`: a
+/// transport failure is retried with the backoff, and the third attempt
+/// succeeds. The draw is fixed at one half, inside upstream's asserted
+/// ranges: 0.5 s less an eighth, rounded, then 1 s less an eighth.
+#[tokio::test]
+async fn a_transport_failure_is_retried_as_upstream_test_connection_retry_recovers() {
+    for kind in [io::ErrorKind::ConnectionRefused, io::ErrorKind::ConnectionReset] {
+        let server = serve(|_, _| respond(200, r#"{"models": []}"#, &[])).await;
+        let time = FakeTime::new();
+        let transport = Flaky::new(2, kind);
+        let client = flaky_client(&server, transport.clone(), RetryPolicy::default().on(&time));
+
+        let response = client.models().list().send().await.expect("the third attempt succeeds");
+        assert!(response.models().is_empty());
+        assert_eq!(transport.calls(), 3, "{kind:?}");
+        assert_eq!(retry_counts(&server.requests()), [Some("2".to_owned())], "{kind:?}");
+        let delays = time.delays();
+        assert_eq!(delays, [Duration::from_millis(438), Duration::from_millis(875)], "{kind:?}");
+        assert!((0.375..=0.5).contains(&delays[0].as_secs_f64()));
+        assert!((0.75..=1.0).contains(&delays[1].as_secs_f64()));
+    }
+}
+
+/// `test_connection_retry_recovers`, `ReadTimeout`: an attempt that runs
+/// past its deadline is retried. The deadline is real, 50 ms, against a
+/// handler held on a channel.
+#[tokio::test]
+async fn a_timeout_is_retried_as_upstream_test_connection_retry_recovers() {
+    let (server, release) = holding(2).await;
+    let time = FakeTime::new();
+    let client = client(&server, RetryPolicy::default().on(&time));
+
+    let response =
+        client.models().list().timeout(SHORT).send().await.expect("the third attempt succeeds");
+    assert!(response.models().is_empty());
+    assert_eq!(retry_counts(&server.requests()), expected_counts(3));
+    assert_eq!(time.delays(), [Duration::from_millis(438), Duration::from_millis(875)]);
+    release.send_modify(|released| *released = true);
+}
+
+/// `test_server_delay_through_tenacity`: the server's delay replaces the
+/// backoff, `retry-after-ms` before `Retry-After`, however long it is.
+#[tokio::test]
+async fn the_servers_delay_is_waited_as_upstream_test_server_delay_through_tenacity() {
+    let rows: [(&[(&str, &str)], Duration); 4] = [
+        (&[("Retry-After", "2")], Duration::from_secs(2)),
+        (&[("retry-after-ms", "125")], Duration::from_millis(125)),
+        (&[("retry-after-ms", "0"), ("Retry-After", "50")], Duration::ZERO),
+        (&[("Retry-After", "60")], Duration::from_secs(60)),
+    ];
+    for (headers, delay) in rows {
+        let server = serve(move |attempt, _| match attempt {
+            1 => respond(429, "{}", headers),
+            _ => respond(200, r#"{"models": []}"#, &[]),
+        })
+        .await;
+        let time = FakeTime::new();
+        let client = client(&server, RetryPolicy::default().no_timeout().on(&time));
+
+        client.models().list().send().await.expect("the retry succeeds");
+        assert_eq!(time.delays(), [delay], "{headers:?}");
+    }
+}
+
+/// An error carrying `headers`, as a 429 would.
+fn rate_limited(headers: &[(&str, &str)]) -> Error {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        map.insert(
+            HeaderName::from_bytes(name.as_bytes()).expect("valid"),
+            HeaderValue::from_str(value).expect("valid"),
+        );
+    }
+    ApiError::new(StatusCode::TOO_MANY_REQUESTS, Bytes::from_static(b"{}"), map, None).into()
+}
+
+/// `test_backoff_dates_cap_and_jitter`: the default backoff doubles up to its
+/// cap; a full draw takes a quarter off; a server delay is obeyed however
+/// long, as seconds, as milliseconds or as an HTTP date measured on the wall
+/// clock; an unreadable one falls back to the backoff. (`test_parse_retry_after`
+/// itself is ported with the parser, in `error.rs`'s tests.)
+#[test]
+fn delays_follow_upstream_test_backoff_dates_cap_and_jitter() {
+    let time = FakeTime::new();
+    let policy = RetryPolicy::default();
+    let no_headers = Error::connection("Connection error: refused", None);
+    time.set_draw(0.0);
+    for (attempts, want) in [(1, 500), (2, 1000), (3, 2000), (4, 4000), (5, 5000), (20, 5000)] {
+        assert_eq!(policy.delay(&*time, attempts, &no_headers), Duration::from_millis(want));
+    }
+    time.set_draw(1.0);
+    assert_eq!(policy.delay(&*time, 1, &no_headers), Duration::from_millis(375));
+
+    let future = httpdate::fmt_http_date(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_010));
+    let past = httpdate::fmt_http_date(SystemTime::UNIX_EPOCH + Duration::from_secs(999_990));
+    let rows = [
+        (vec![("Retry-After", "61")], Duration::from_secs(61)),
+        (vec![("retry-after-ms", "60001")], Duration::from_millis(60_001)),
+        (vec![("Retry-After", future.as_str())], Duration::from_secs(10)),
+        (vec![("Retry-After", past.as_str())], Duration::ZERO),
+        (vec![("Retry-After", "bad")], Duration::from_millis(375)),
+    ];
+    for (headers, want) in rows {
+        assert_eq!(policy.delay(&*time, 1, &rate_limited(&headers)), want, "{headers:?}");
+    }
+}
+
+/// `test_system_one_retry_override` (AC-F9): a call's policy - its count and
+/// its statuses - replaces the client's for that call, and the next call
+/// without one is back on the client's.
+#[tokio::test]
+async fn a_calls_policy_replaces_the_clients_as_upstream_test_system_one_retry_override() {
+    for (client_attempts, call_attempts) in [(1_u32, 3_u32), (3, 1)] {
+        let server = serve(|_, request| {
+            let status = if request.headers["x-call"] == "override" { 409 } else { 429 };
+            respond(status, r#"{"message": "failed"}"#, &[("retry-after-ms", "0")])
+        })
+        .await;
+        let time = FakeTime::new();
+        let client =
+            client(&server, RetryPolicy::default().max_retries(client_attempts - 1).on(&time));
+        let call_policy = RetryPolicy::default()
+            .max_retries(call_attempts - 1)
+            .http_statuses([409].into_iter().collect())
+            .on(&time);
+        let questions = raw_questions();
+
+        let calls = [
+            ("override", Some(call_policy.clone()), call_attempts, 409),
+            ("inherited", None, client_attempts, 429),
+            ("override", Some(call_policy), call_attempts, 409),
+        ];
+        for (name, policy, attempts, status) in calls {
+            let before = server.request_count();
+            let mut request = client.system_one("hello", &questions).header("x-call", name);
+            if let Some(policy) = policy {
+                request = request.retry(policy);
+            }
+            let error = request.send().await.expect_err("fails");
+            let display = format!("POST {}/v1/systemone: {status} failed", server.base_url());
+            assert_api(&error, status, &display);
+            let attempts = usize::try_from(attempts).expect("small");
+            assert_eq!(
+                retry_counts(&server.requests()[before..]),
+                expected_counts(attempts),
+                "{name}, client {client_attempts}, call {call_attempts}"
+            );
+        }
+    }
+}
+
+/// `test_async_concurrent_retry_state`: calls in flight together each count
+/// their own retries.
+#[tokio::test]
+async fn concurrent_calls_count_their_own_retries_as_upstream_test_async_concurrent_retry_state() {
+    // Each request's `x-call` key and retry count, in arrival order.
+    type Seen = Arc<Mutex<Vec<(String, Option<String>)>>>;
+    let seen: Seen = Arc::default();
+    let server = TestServer::start(Protocol::Http1, {
+        let seen = Arc::clone(&seen);
+        move |request| {
+            let key = request.headers["x-call"].to_str().expect("text").to_owned();
+            let count = retry_counts(std::slice::from_ref(&request)).remove(0);
+            let first = {
+                let mut seen = lock(&seen);
+                let first = !seen.iter().any(|(known, _)| *known == key);
+                seen.push((key, count));
+                first
+            };
+            async move {
+                tokio::task::yield_now().await;
+                if first {
+                    respond(429, "", &[("retry-after-ms", "0")])
+                } else {
+                    respond(200, r#"{"models": []}"#, &[])
+                }
+            }
+        }
+    })
+    .await
+    .expect("the test server starts");
+    let time = FakeTime::new();
+    let client = client(&server, RetryPolicy::default().on(&time));
+
+    let keys = ["0", "1", "2", "3"];
+    let calls = keys.map(|key| client.models().list().header("x-call", key).send());
+    let [a, b, c, d] = calls;
+    let (a, b, c, d) = tokio::join!(a, b, c, d);
+    for response in [a, b, c, d] {
+        assert!(response.expect("every call recovers").models().is_empty());
+    }
+    let seen = lock(&seen).clone();
+    for key in keys {
+        let counts: Vec<_> =
+            seen.iter().filter(|(known, _)| known == key).map(|(_, count)| count.clone()).collect();
+        assert_eq!(counts, expected_counts(2), "call {key}");
+    }
+}
+
+/// The state upstream's recovery test sends.
+#[derive(Serialize)]
+struct Document {
+    document: &'static str,
+}
+
+/// `test_system_one_retry_recovers_with_overrides`: a call with its own model,
+/// deadline and headers times out, is rate limited, then succeeds; every
+/// attempt sends the same body and headers, and the next call without
+/// overrides is back on the client's settings. Upstream's `httpx.Timeout`
+/// parametrization is a per-phase deadline this SDK does not have (section 6
+/// row "timeout applies per httpx phase"): the Rust call has one deadline per
+/// attempt, 50 ms here so the first attempt times out in real time, and what
+/// the server can observe is asserted instead of the transport's own timeout
+/// settings.
+#[tokio::test]
+async fn a_call_recovers_with_its_overrides_as_upstream_test_system_one_retry_recovers_with_overrides()
+ {
+    for raw in [false, true] {
+        let (release, released) = watch::channel(false);
+        let served = Arc::new(AtomicUsize::new(0));
+        let server = TestServer::start(Protocol::Http1, move |_| {
+            let mut released = released.clone();
+            let attempt = served.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                match attempt {
+                    1 => {
+                        drop(released.wait_for(|released| *released).await);
+                        respond(200, "{}", &[])
+                    }
+                    2 => respond(429, r#"{"message": "slow down"}"#, &[("retry-after-ms", "125")]),
+                    _ => respond(200, std::str::from_utf8(RESULT).expect("UTF-8"), &[]),
+                }
+            }
+        })
+        .await
+        .expect("the test server starts");
+        let time = FakeTime::new();
+        let client = Client::builder()
+            .api_key("test-key")
+            .base_url(server.base_url())
+            .default_model("client-model")
+            .timeout(Duration::from_secs(7))
+            .default_header("x-default", "kept")
+            .retry(RetryPolicy::default().on(&time))
+            .build_with_env(|_: &str| None::<String>)
+            .expect("the client builds");
+        let questions = if raw { raw_questions() } else { questions() };
+
+        let response = client
+            .system_one(&Document { document: "hello" }, &questions)
+            .model("call-model")
+            .timeout(SHORT)
+            .header("x-call", "override")
+            .header("authorization", "must-not-win")
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("raw {raw}: {error:?}"));
+        let score = response.answers().score("quality").expect("answered").score();
+        let confidence = response.answers().choice("tone").expect("answered").confidence();
+        assert_same_f64(score, 1.7, "quality");
+        assert_same_f64(confidence, 0.9, "tone");
+
+        let requests = server.requests();
+        let expected = concat!(
+            r#"{"state":{"document":"hello"},"model":"call-model","#,
+            r#""questions":{"q":{"type":"noul","instructions":"?"}}}"#,
+        );
+        for request in &requests {
+            assert_eq!(request.body, expected.as_bytes(), "raw {raw}");
+            assert_eq!(request.headers["authorization"], "Bearer test-key");
+            assert_eq!(request.headers["x-default"], "kept");
+            assert_eq!(request.headers["x-call"], "override");
+        }
+        assert_eq!(retry_counts(&requests), expected_counts(3), "raw {raw}");
+        let delays = time.delays();
+        assert_eq!(delays, [Duration::from_millis(438), Duration::from_millis(125)]);
+        assert!((0.375..=0.5).contains(&delays[0].as_secs_f64()));
+
+        client.system_one("next", &questions).send().await.expect("the next call succeeds");
+        let last = server.requests().pop().expect("one more request");
+        let body = std::str::from_utf8(&last.body).expect("UTF-8");
+        assert!(body.contains(r#""model":"client-model""#), "{body}");
+        assert!(!last.headers.contains_key("x-call"));
+        assert!(!last.headers.contains_key("x-typesafe-retry-count"));
+        release.send_modify(|released| *released = true);
+    }
+}
+
+/// `test_concurrent_system_one_overrides` (AC-F9): three calls in flight
+/// together, two with a policy of their own, each keep their own count,
+/// state and model. Upstream also reads each attempt's timeout off the
+/// request; a Rust deadline never reaches the server, so it is not asserted.
+#[tokio::test]
+async fn concurrent_calls_keep_their_own_policies_as_upstream_test_concurrent_system_one_overrides()
+{
+    let server = TestServer::start(Protocol::Http1, |_| async {
+        tokio::task::yield_now().await;
+        respond(429, r#"{"message": "retry"}"#, &[("retry-after-ms", "0")])
+    })
+    .await
+    .expect("the test server starts");
+    let time = FakeTime::new();
+    let client = Client::builder()
+        .api_key("test-key")
+        .base_url(server.base_url())
+        .default_model("jev-latest")
+        .timeout(Duration::from_secs(9))
+        .retry(RetryPolicy::default().max_retries(1).on(&time))
+        .build_with_env(|_: &str| None::<String>)
+        .expect("the client builds");
+    let questions = questions();
+
+    let call = |name: &'static str, retries: Option<u32>, seconds: u64| {
+        let mut request = client
+            .system_one(name, &questions)
+            .model(name)
+            .header("x-call", name)
+            .timeout(Duration::from_secs(seconds));
+        if let Some(retries) = retries {
+            request = request.retry(RetryPolicy::default().max_retries(retries - 1).on(&time));
+        }
+        request.send()
+    };
+    let (one, three, default) =
+        tokio::join!(call("one", Some(1), 1), call("three", Some(3), 3), call("default", None, 2));
+    for (name, outcome) in [("one", one), ("three", three), ("default", default)] {
+        let Err(error) = outcome else { panic!("{name}: every attempt is rate limited") };
+        assert_api(&error, 429, &format!("POST {}/v1/systemone: 429 retry", server.base_url()));
+    }
+    let requests = server.requests();
+    for (name, count) in [("one", 1), ("three", 3), ("default", 2)] {
+        let mine: Vec<_> =
+            requests.iter().filter(|request| request.headers["x-call"] == name).cloned().collect();
+        assert_eq!(retry_counts(&mine), expected_counts(count), "{name}");
+        let body = format!(r#"{{"state":"{name}","model":"{name}","#);
+        for request in &mine {
+            let sent = std::str::from_utf8(&request.body).expect("UTF-8");
+            assert!(sent.starts_with(&body), "{name}: {sent}");
+        }
+    }
+}
+
+/// `test_exhausted_transport_retry`, `ReadTimeout`: every attempt times out,
+/// and the call fails with the last timeout. Upstream also finds httpx's own
+/// `ReadTimeout` as the cause; the Rust deadline is the SDK's own, so a
+/// timeout has no cause, and it carries the deadline it was given.
+#[tokio::test]
+async fn the_last_timeout_is_returned_as_upstream_test_exhausted_transport_retry() {
+    let (server, release) = holding(usize::MAX).await;
+    let time = FakeTime::new();
+    let client = client(&server, RetryPolicy::default().on(&time));
+    let policy = RetryPolicy::default()
+        .backoff_initial(Duration::from_millis(1))
+        .backoff_max(Duration::from_millis(1))
+        .on(&time);
+    let questions = questions();
+
+    let error = client
+        .system_one("x", &questions)
+        .retry(policy)
+        .timeout(SHORT)
+        .send()
+        .await
+        .expect_err("every attempt times out");
+    assert!(
+        matches!(error.kind(), ErrorKind::Timeout { timeout } if *timeout == SHORT),
+        "{error:?}"
+    );
+    assert_eq!(error.to_string(), "Request timed out (timeout=0.05s).");
+    assert!(error.source().is_none(), "{error:?}");
+    assert_eq!(server.request_count(), 3);
+    release.send_modify(|released| *released = true);
+}
+
+/// `test_exhausted_transport_retry`, `ConnectError`: every attempt fails to
+/// connect, and the call fails with the last failure, whose cause is the
+/// transport's own error from the third attempt.
+#[tokio::test]
+async fn the_last_connection_failure_is_returned_as_upstream_test_exhausted_transport_retry() {
+    let server = serve(|_, _| respond(200, "{}", &[])).await;
+    let time = FakeTime::new();
+    let transport = Flaky::new(usize::MAX, io::ErrorKind::ConnectionRefused);
+    let policy = RetryPolicy::default()
+        .backoff_initial(Duration::from_millis(1))
+        .backoff_max(Duration::from_millis(1))
+        .on(&time);
+    let client = flaky_client(&server, transport.clone(), RetryPolicy::default().on(&time));
+    let questions = questions();
+
+    let error = client
+        .system_one("x", &questions)
+        .retry(policy)
+        .send()
+        .await
+        .expect_err("every attempt fails");
+    assert!(matches!(error.kind(), ErrorKind::Connection), "{error:?}");
+    assert_eq!(error.to_string(), "Connection error: attempt 3");
+    let cause = error
+        .source()
+        .and_then(|cause| cause.downcast_ref::<io::Error>())
+        .unwrap_or_else(|| panic!("the transport's error is the cause: {error:?}"));
+    assert_eq!(cause.kind(), io::ErrorKind::ConnectionRefused);
+    assert_eq!(cause.to_string(), "attempt 3");
+    assert_eq!(transport.calls(), 3);
+    assert_eq!(server.request_count(), 0, "no attempt reached the server");
+    assert_eq!(time.delays(), [Duration::from_millis(1), Duration::from_millis(1)]);
+}
+
+/// `test_exhausted_retry_preserves_final_http_error` (AC-F10): the error of
+/// the last attempt is returned whole - status, body, request id, message -
+/// not wrapped and not the first one.
+#[tokio::test]
+async fn the_last_api_error_is_returned_whole_as_upstream_test_exhausted_retry_preserves_final_http_error()
+ {
+    let server = serve(|attempt, _| {
+        let status = [429, 500, 503][attempt - 1];
+        let id = format!("request-{attempt}");
+        respond(
+            status,
+            &format!(r#"{{"message": "attempt {attempt}"}}"#),
+            &[("x-typesafe-request-id", id.as_str()), ("retry-after-ms", "0")],
+        )
+    })
+    .await;
+    let time = FakeTime::new();
+    let client = client(&server, RetryPolicy::default().on(&time));
+    let questions = questions();
+
+    let error = client.system_one("x", &questions).send().await.expect_err("fails");
+    assert_eq!(server.request_count(), 3);
+    let display =
+        format!("POST {}/v1/systemone: 503 attempt 3 (request_id=request-3)", server.base_url());
+    assert_api(&error, 503, &display);
+    let ErrorKind::Api(api) = error.kind() else { unreachable!("asserted above") };
+    assert_eq!(api.body(), br#"{"message": "attempt 3"}"#);
+    assert_eq!(api.request_id(), Some("request-3"));
+    assert_eq!(api.message(), "attempt 3");
+}
+
+/// `test_cancel_pending_retry` (AC-F8): dropping a call while it waits to
+/// retry drops the wait itself - no task was spawned to hold it - and
+/// nothing more is sent.
+#[tokio::test]
+async fn dropping_a_waiting_call_cancels_its_retry_as_upstream_test_cancel_pending_retry() {
+    let server = serve(|_, _| respond(429, "", &[])).await;
+    let time = FakeTime::hanging();
+    let client = client(&server, RetryPolicy::default().on(&time));
+
+    let mut call = Box::pin(client.models().list().send());
+    tokio::select! {
+        outcome = &mut call => panic!("the call ended instead of waiting: {outcome:?}"),
+        () = time.parked.notified() => {}
+    }
+    assert!(!time.sleep_dropped.load(Ordering::SeqCst), "the wait is still pending");
+    drop(call);
+    assert!(time.sleep_dropped.load(Ordering::SeqCst), "dropping the call dropped the wait");
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(server.request_count(), 1);
+    assert_eq!(time.delays().len(), 1);
+}
+
+/// `test_retry_policy_max_retries`: `max_retries` more attempts after the
+/// first, and none for 0.
+#[tokio::test]
+async fn max_retries_counts_attempts_as_upstream_test_retry_policy_max_retries() {
+    for (retries, attempts) in [(0, 1), (1, 2), (4, 5)] {
+        let server =
+            serve(|_, _| respond(429, r#"{"message": "slow"}"#, &[("retry-after-ms", "0")])).await;
+        let time = FakeTime::new();
+        let client = client(&server, RetryPolicy::default().max_retries(retries).on(&time));
+
+        let error = client.models().list().send().await.expect_err("fails");
+        assert_api(&error, 429, &format!("GET {}/v1/models: 429 slow", server.base_url()));
+        assert_eq!(server.request_count(), attempts, "max_retries {retries}");
+    }
+}
+
+/// `test_retry_policy_custom_statuses`: a policy's own statuses replace the
+/// default ones.
+#[tokio::test]
+async fn custom_statuses_replace_the_default_as_upstream_test_retry_policy_custom_statuses() {
+    for (status, attempts) in [(409, 3), (500, 1)] {
+        let server =
+            serve(move |_, _| respond(status, r#"{"message": "x"}"#, &[("retry-after-ms", "0")]))
+                .await;
+        let time = FakeTime::new();
+        let policy = RetryPolicy::default().http_statuses([409].into_iter().collect()).on(&time);
+        let client = client(&server, policy);
+
+        let error = client.models().list().send().await.expect_err("fails");
+        assert_api(&error, status, &format!("GET {}/v1/models: {status} x", server.base_url()));
+        assert_eq!(server.request_count(), attempts, "status {status}");
+    }
+}
+
+/// `test_retry_policy_per_call_override` (AC-F9): a call's `max_retries(0)`
+/// replaces the client's 2.
+#[tokio::test]
+async fn a_calls_count_replaces_the_clients_as_upstream_test_retry_policy_per_call_override() {
+    let server = serve(|_, _| respond(429, "{}", &[("retry-after-ms", "0")])).await;
+    let time = FakeTime::new();
+    let client = client(&server, RetryPolicy::default().max_retries(2).on(&time));
+
+    let error = client
+        .models()
+        .list()
+        .retry(RetryPolicy::default().max_retries(0).on(&time))
+        .send()
+        .await
+        .expect_err("fails");
+    assert_api(&error, 429, &format!("GET {}/v1/models: 429 {{}}", server.base_url()));
+    assert_eq!(server.request_count(), 1);
+}
+
+/// `test_retry_policy_exceptions_and_predicate`: a predicate opts a 404 in.
+/// Upstream's `exceptions={TypeSafeAPIError}` is dropped (section 6 row
+/// "`RetryPolicy.exceptions`"); the Rust spelling of it is a predicate that
+/// matches the kind, tested as the second row.
+#[tokio::test]
+async fn a_predicate_opts_a_failure_in_as_upstream_test_retry_policy_exceptions_and_predicate() {
+    let by_status = |error: &Error| matches!(error.kind(), ErrorKind::Api(api) if api.status() == StatusCode::NOT_FOUND);
+    let by_kind = |error: &Error| matches!(error.kind(), ErrorKind::Api(_));
+    type Named = (&'static str, fn(&Error) -> bool);
+    let predicates: [Named; 2] = [("status", by_status), ("kind", by_kind)];
+    for (name, predicate) in predicates {
+        let server =
+            serve(|_, _| respond(404, r#"{"message": "gone"}"#, &[("retry-after-ms", "0")])).await;
+        let time = FakeTime::new();
+        let policy = RetryPolicy::default().max_retries(1).predicate(predicate).on(&time);
+        let client = client(&server, policy);
+
+        let error = client.models().list().send().await.expect_err("fails");
+        assert_api(&error, 404, &format!("GET {}/v1/models: 404 gone", server.base_url()));
+        assert_eq!(server.request_count(), 2, "by {name}: a 404 is retried only because it asks");
+    }
+}
+
+/// `test_retry_policy_wait_options`: the server's delay unless it is not
+/// respected, then the backoff from its own initial delay.
+#[test]
+fn the_delay_follows_the_wait_options_as_upstream_test_retry_policy_wait_options() {
+    let time = FakeTime::new();
+    time.set_draw(0.0);
+    let error = rate_limited(&[("Retry-After", "5")]);
+    let respected = RetryPolicy::default();
+    let ignored = RetryPolicy::default().respect_retry_after(false);
+    let short = RetryPolicy::default()
+        .backoff_initial(Duration::from_millis(200))
+        .respect_retry_after(false);
+    assert_eq!(respected.delay(&*time, 1, &error), Duration::from_secs(5));
+    assert_eq!(ignored.delay(&*time, 1, &error), Duration::from_millis(500));
+    assert_eq!(short.delay(&*time, 1, &error), Duration::from_millis(200));
+}
+
+/// `test_backoff_extreme_values` is ported on the pure schedule above, where
+/// its `1e-300` and `1e300` can be written; a policy holds `Duration`s, whose
+/// extremes are zero and `Duration::MAX`. Both come through the policy as the
+/// schedule gives them.
+#[test]
+fn extreme_durations_come_through_the_policy_as_upstream_test_backoff_extreme_values() {
+    let time = FakeTime::new();
+    time.set_draw(0.0);
+    let error = Error::connection("Connection error: refused", None);
+    let largest = RetryPolicy::default().backoff_initial(Duration::MAX).backoff_max(Duration::MAX);
+    assert_eq!(largest.delay(&*time, 1, &error), Duration::MAX);
+    assert_eq!(largest.delay(&*time, u32::MAX, &error), Duration::MAX);
+    let smallest =
+        RetryPolicy::default().backoff_initial(Duration::from_nanos(1)).backoff_max(Duration::MAX);
+    assert_eq!(smallest.delay(&*time, 1, &error), Duration::ZERO, "rounded to milliseconds");
+    let capped = RetryPolicy::default().backoff_max(Duration::from_micros(600));
+    assert_eq!(capped.delay(&*time, 1, &error), Duration::from_micros(600));
+}
+
+// ------------------------------------------------------- beyond upstream
+
+/// Which failures are retried on their own, and that a predicate is asked
+/// about every other one - the order of `retry.py:100-109`.
+#[test]
+fn only_timeouts_connections_and_listed_statuses_are_retried_on_their_own() {
+    let policy = RetryPolicy::default();
+    let too_large = Error::response_too_large(1024);
+    let cases: [(&str, Error, bool); 7] = [
+        ("timeout", Error::timeout(SHORT), true),
+        ("connection", Error::connection("Connection error: x", None), true),
+        ("429", rate_limited(&[]), true),
+        ("too large", Error::response_too_large(1024), false),
+        ("invalid request", Error::invalid_request("x"), false),
+        ("config", Error::config("x"), false),
+        (
+            "404",
+            ApiError::new(StatusCode::NOT_FOUND, Bytes::new(), HeaderMap::new(), None).into(),
+            false,
+        ),
+    ];
+    for (name, error, retried) in &cases {
+        assert_eq!(policy.retryable(error), *retried, "{name}");
+    }
+    let off = policy.clone().api_timeout_error(false).api_connection_error(false);
+    assert!(!off.retryable(&Error::timeout(SHORT)));
+    assert!(!off.retryable(&Error::connection("Connection error: x", None)));
+
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counting = RetryPolicy::default().predicate({
+        let asked = Arc::clone(&asked);
+        move |error| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            matches!(error.kind(), ErrorKind::ResponseTooLarge { .. })
+        }
+    });
+    assert!(counting.retryable(&too_large), "the predicate can ask for any failure");
+    assert!(counting.retryable(&Error::timeout(SHORT)));
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "a failure retried on its own skips the predicate");
+}
+
+/// The count is checked after the predicate, and the budget after the count,
+/// as tenacity checks `retry` before `stop`: a predicate sees the failure of
+/// the last attempt too.
+#[test]
+fn the_predicate_is_asked_before_the_count_and_the_budget() {
+    let time = FakeTime::new();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let policy = RetryPolicy::default().max_retries(0).predicate({
+        let asked = Arc::clone(&asked);
+        move |_| {
+            asked.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+    });
+    let error = Error::invalid_request("x");
+    assert_eq!(policy.next_delay(&*time, 0, &error, Some(time.now())), None);
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    assert!(time.delays().is_empty(), "nothing slept: {:?}", time.delays());
+}
+
+/// A budget is reached when the wait would carry the call exactly to it, as
+/// tenacity's `stop_before_delay` compares with `>=`.
+#[test]
+fn a_wait_that_reaches_the_budget_exactly_ends_the_retrying() {
+    let time = FakeTime::new();
+    time.set_draw(0.0);
+    let started = time.now();
+    let policy = RetryPolicy::default().timeout(Duration::from_secs(10)).expect("valid");
+    let error = rate_limited(&[("retry-after-ms", "2000")]);
+    time.advance(Duration::from_millis(7_999));
+    assert_eq!(policy.next_delay(&*time, 0, &error, Some(started)), Some(Duration::from_secs(2)));
+    time.advance(Duration::from_millis(1));
+    assert_eq!(policy.next_delay(&*time, 0, &error, Some(started)), None);
+}
+
+/// A transport that answers `failures` times with 503 and then with the
+/// fixture, and records where each request's body bytes live.
+#[derive(Clone)]
+struct Recording {
+    pointers: Arc<Mutex<Vec<usize>>>,
+    failures: usize,
+}
+
+type InMemory = Pin<Box<dyn Future<Output = Result<Response<Body>, Infallible>> + Send>>;
+
+impl Service<Request<Body>> for Recording {
+    type Response = Response<Body>;
+    type Error = Infallible;
+    type Future = InMemory;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Request<Body>) -> InMemory {
+        let pointers = Arc::clone(&self.pointers);
+        let failures = self.failures;
+        Box::pin(async move {
+            let mut body = request.into_body();
+            let frame = body.frame().await.expect("one frame");
+            let data = frame.unwrap_or_else(|never| match never {}).into_data().expect("data");
+            let attempt = {
+                let mut pointers = lock(&pointers);
+                pointers.push(data.as_ptr().addr());
+                pointers.len()
+            };
+            if attempt <= failures {
+                let mut response = Response::new(Body::from(Bytes::from_static(b"{}")));
+                *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+                response.headers_mut().insert("retry-after-ms", HeaderValue::from_static("0"));
+                return Ok(response);
+            }
+            Ok(Response::new(Body::from(Bytes::from_static(RESULT))))
+        })
+    }
+}
+
+/// The body is encoded once, and every attempt sends the very same bytes:
+/// one allocation shared, not a copy per attempt.
+#[tokio::test]
+async fn every_attempt_sends_the_same_bytes_of_one_encoded_body() {
+    let time = FakeTime::new();
+    let transport = Recording { pointers: Arc::default(), failures: 2 };
+    let client = Client::builder()
+        .api_key("test-key")
+        .base_url("http://127.0.0.1:9")
+        .default_model("jev-latest")
+        .retry(RetryPolicy::default().on(&time))
+        .build_with_service(transport.clone())
+        .expect("the client builds");
+    let questions = questions();
+
+    let response = client.system_one("hello", &questions).send().await.expect("recovers");
+    assert_eq!(response.answers().len(), 3);
+    let pointers = lock(&transport.pointers).clone();
+    assert_eq!(pointers.len(), 3);
+    assert!(pointers.iter().all(|pointer| *pointer == pointers[0]), "{pointers:?}");
 }

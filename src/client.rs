@@ -20,6 +20,7 @@ use crate::{
     models::Models,
     question::PreparedQuestions,
     request::SystemOne,
+    retry::RetryPolicy,
     transport::{self, HttpService, HttpVersion, HyperTransport, TransportSettings},
 };
 
@@ -52,6 +53,8 @@ pub(crate) struct Shared<S> {
     pub(crate) post_headers: HeaderMap,
     /// The default model as a JSON string, escaped once.
     pub(crate) model_json: Bytes,
+    /// The retry policy of every call that does not bring its own.
+    pub(crate) retry: RetryPolicy,
 }
 
 impl<S> Clone for Client<S> {
@@ -95,7 +98,7 @@ impl Client<HyperTransport> {
 
 impl<S> Client<S> {
     /// Assembles a client around a resolved configuration.
-    fn assemble(config: Config, service: S) -> Self {
+    fn assemble(config: Config, retry: RetryPolicy, service: S) -> Self {
         let get_headers = transport::base_headers(&config, false);
         let post_headers = transport::base_headers(&config, true);
         let mut model = Vec::with_capacity(config.default_model().len() + 2);
@@ -107,6 +110,7 @@ impl<S> Client<S> {
                 get_headers,
                 post_headers,
                 model_json: Bytes::from(model),
+                retry,
             }),
         }
     }
@@ -177,6 +181,7 @@ pub struct ClientBuilder {
     extra_roots: Vec<Vec<u8>>,
     http_version: Option<HttpVersion>,
     connect_timeout: Option<Duration>,
+    retry: Option<RetryPolicy>,
 }
 
 impl ClientBuilder {
@@ -284,6 +289,15 @@ impl ClientBuilder {
         self
     }
 
+    /// The retry policy of every call made through the client;
+    /// [`RetryPolicy::default`] unless set. A call can replace it for itself
+    /// with its own `retry`.
+    #[must_use]
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = Some(policy);
+        self
+    }
+
     /// Builds a client with the default transport.
     ///
     /// Settings left unset are read from the environment. Nothing connects
@@ -348,9 +362,9 @@ impl ClientBuilder {
                 unused.join(", ")
             )));
         }
-        let (explicit, _) = self.split()?;
+        let (explicit, _, retry) = self.split()?;
         let config = Config::resolve(explicit, |name: &str| std::env::var_os(name))?;
-        Ok(Client::assemble(config, service))
+        Ok(Client::assemble(config, retry, service))
     }
 
     /// [`build`](Self::build) with the environment read through `env`.
@@ -361,7 +375,7 @@ impl ClientBuilder {
     where
         V: Into<OsString>,
     {
-        let (explicit, transport) = self.split()?;
+        let (explicit, transport, retry) = self.split()?;
         let config = Config::resolve(explicit, env)?;
         let https = config.endpoints().system_one().scheme() == Some(&Scheme::HTTPS);
         let settings = TransportSettings {
@@ -373,12 +387,13 @@ impl ClientBuilder {
             extra_roots: transport.extra_roots,
             connect_timeout: transport.connect_timeout,
         };
-        Ok(Client::assemble(config, HyperTransport::new(settings)?))
+        Ok(Client::assemble(config, retry, HyperTransport::new(settings)?))
     }
 
     /// Checks what only the builder can check and separates the settings of
-    /// the configuration from those of the default transport.
-    fn split(self) -> Result<(Explicit, TransportChoices), Error> {
+    /// the configuration from those of the default transport and the retry
+    /// policy.
+    fn split(self) -> Result<(Explicit, TransportChoices, RetryPolicy), Error> {
         let Self {
             api_key,
             base_url,
@@ -389,6 +404,7 @@ impl ClientBuilder {
             extra_roots,
             http_version,
             connect_timeout,
+            retry,
         } = self;
 
         if connect_timeout.is_some_and(|timeout| timeout.is_zero()) {
@@ -419,7 +435,11 @@ impl ClientBuilder {
         if let Some(limit) = max_response_bytes {
             explicit = explicit.max_response_bytes(limit);
         }
-        Ok((explicit, TransportChoices { version: http_version, extra_roots, connect_timeout }))
+        Ok((
+            explicit,
+            TransportChoices { version: http_version, extra_roots, connect_timeout },
+            retry.unwrap_or_default(),
+        ))
     }
 }
 
@@ -436,14 +456,14 @@ impl fmt::Debug for ClientBuilder {
     /// roots as a count. The base URL is shown only once it has passed the
     /// checks [`build`](ClientBuilder::build) runs, and then as its endpoints,
     /// the way an error names them: a URL that failed them may still hold
-    /// userinfo.
+    /// userinfo. A retry policy is shown when one was set.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let base_url = self.base_url.as_deref().map(|url| {
             crate::config::endpoints(url.trim_end_matches('/'))
                 .map_or_else(|_| Shown::Text("<not a usable URL>"), Shown::Endpoints)
         });
-        formatter
-            .debug_struct("ClientBuilder")
+        let mut shown = formatter.debug_struct("ClientBuilder");
+        shown
             .field("api_key", &self.api_key.as_ref().map(|_| Shown::Text("<redacted>")))
             .field("base_url", &base_url)
             .field("default_model", &self.default_model)
@@ -455,8 +475,11 @@ impl fmt::Debug for ClientBuilder {
             .field("max_response_bytes", &self.max_response_bytes)
             .field("extra_roots", &self.extra_roots.len())
             .field("http_version", &self.http_version)
-            .field("connect_timeout", &self.connect_timeout)
-            .finish()
+            .field("connect_timeout", &self.connect_timeout);
+        if let Some(retry) = &self.retry {
+            shown.field("retry", retry);
+        }
+        shown.finish()
     }
 }
 

@@ -13,7 +13,8 @@
 //! all of them. At `INFO` each attempt gets one line, as the Python SDK
 //! writes it: `GET <url> <- 200 in 12ms (request <id>)` for a response of any
 //! status, or `GET <url> <- timeout` - a fixed word per kind of failure, never
-//! its message - for an attempt that ended without one. At `DEBUG` a request
+//! its message - for an attempt that ended without one; a retry is announced
+//! as `GET <url> retry 1` before it is sent. At `DEBUG` a request
 //! is reported as it leaves and as its answer arrives - method, endpoint,
 //! status, request id, the headers with their secrets redacted, and the
 //! body's length. At `TRACE` the bodies themselves follow.
@@ -207,6 +208,19 @@ pub(crate) fn failed(exchange: Exchange<'_>, error: &Error, started: Started) {
 /// An attempt ended without a response this crate could read.
 #[cfg(not(feature = "tracing"))]
 pub(crate) fn failed(_: Exchange<'_>, _: &Error, _: Started) {}
+
+/// A failed request is about to be sent again: the `INFO` line
+/// `POST https://api.typesafe.ai/v1/systemone retry 1`, the retry numbered as
+/// `X-TypeSafe-Retry-Count` numbers it. What the last attempt failed with has
+/// its own line already.
+#[cfg(feature = "tracing")]
+pub(crate) fn retrying(exchange: Exchange<'_>) {
+    tracing::info!(target: TARGET, "{} retry {}", Endpoint(exchange), exchange.retry);
+}
+
+/// A failed request is about to be sent again.
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn retrying(_: Exchange<'_>) {}
 
 /// The word a failure is logged as.
 #[cfg(feature = "tracing")]

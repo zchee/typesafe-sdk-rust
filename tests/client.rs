@@ -34,7 +34,7 @@ use tokio::{
 use tower_service::Service;
 use typesafe_sdk::{
     ApiError, ApiErrorKind, Body, Choice, Client, ClientBuilder, Content, Error, ErrorKind,
-    HttpVersion, Noul, PreparedQuestions, Questions, RawQuestion, Score,
+    HttpVersion, Noul, PreparedQuestions, Questions, RawQuestion, RetryPolicy, Score,
 };
 
 // ------------------------------------------------------------- fixtures
@@ -69,7 +69,10 @@ fn builder_for(server: &TestServer, protocol: Protocol) -> ClientBuilder {
     let mut builder = Client::builder()
         .api_key("test-key")
         .base_url(server.base_url())
-        .default_model("jev-latest");
+        .default_model("jev-latest")
+        // One attempt per call, as upstream's `clients` fixture builds them
+        // (`tests/conftest.py:34-35`); retries are tested in `tests/retry.rs`.
+        .retry(RetryPolicy::default().max_retries(0));
     if let Some(certificate) = server.certificate_der() {
         builder = builder.add_root_certificate(certificate.to_vec());
     }
@@ -1440,7 +1443,13 @@ mod logging {
                 builder_for(&held.server, Protocol::Http1).timeout(Duration::from_millis(50)),
                 "timeout",
             ),
-            (Client::builder().api_key("test-key").base_url(refused.as_str()), "connection error"),
+            (
+                Client::builder()
+                    .api_key("test-key")
+                    .base_url(refused.as_str())
+                    .retry(RetryPolicy::default().max_retries(0)),
+                "connection error",
+            ),
             (builder_for(&big, Protocol::Http1).max_response_bytes(1024), "response too large"),
         ];
         for (builder, word) in cases {

@@ -97,6 +97,7 @@ pub use crate::{
         Answer, Answers, ChoiceAnswer, NoulAnswer, ResponseMeta, ScoreAnswer, SystemOneResponse,
         Usage,
     },
+    retry::{RetryPolicy, StatusSet},
     transport::{
         Body, BoxError, HttpService, HttpVersion, HyperResponseFuture, HyperTransport, ResponseBody,
     },
