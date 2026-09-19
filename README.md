@@ -277,6 +277,8 @@ first three fall back to the environment, then to a default:
 | `max_response_bytes` | - | 16 MiB |
 | `default_header(name, value)` | - | none |
 | `retry` | - | `RetryPolicy::default()` |
+| `user_agent_product("my-app/1.2.0")` | - | none: `User-Agent` names the SDK alone |
+| `send_runtime_header` | - | `true` |
 | `add_root_certificate(der)`, `http_version`, `connect_timeout` | - | none, see below |
 
 These three are the only environment variables the SDK reads, and only for a setting the caller
@@ -295,6 +297,14 @@ merged as client defaults < per-call headers < the SDK's own (`Authorization`, `
 body), and a caller's `X-TypeSafe-Retry-Count` and framing or connection headers are dropped
 (see [Security notes](#security-notes)). A base URL's path appears in `Debug`
 and in error messages, so do not put a credential there.
+
+Every request names the SDK in `User-Agent` and `X-TypeSafe-SDK` (`typesafe-sdk-rust/<version>`)
+and its platform in `X-TypeSafe-Runtime` (`rust (<os>; <arch>)`). Two settings, and nothing
+else, change that. `user_agent_product("my-app/1.2.0")` puts the application's product in front
+of the SDK's in `User-Agent` (`my-app/1.2.0 typesafe-sdk-rust/<version>`); `X-TypeSafe-SDK` still
+names the SDK alone. The product must be `name/version`, both parts RFC 9110 tokens, at most 64
+bytes; anything else is a `Config` error from `build()`. `send_runtime_header(false)` leaves
+`X-TypeSafe-Runtime` out of every request.
 
 ## Custom transport
 
@@ -514,6 +524,7 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | `TYPESAFE_LOG_LEVEL` sets the logger level | Not read | A library must not configure the application's subscriber; filter the `typesafe_sdk` target instead. |
 | DEBUG logs full bodies | `DEBUG` logs the body length; `TRACE` logs the body | A `state` may carry personal data. |
 | `X-TypeSafe-SDK: typesafe-sdk/<version>` | `typesafe-sdk-rust/<version>`, and `X-TypeSafe-Runtime: rust (<os>; <arch>)` | A port must not be counted as the official SDK. |
+| `User-Agent` names the SDK alone; `X-TypeSafe-Runtime` is always sent | `user_agent_product("name/version")` puts the application's product in front of the SDK's in `User-Agent`, checked when the client is built; `send_runtime_header(false)` leaves `X-TypeSafe-Runtime` out. The defaults are unchanged, and a caller's header of either name is still dropped | An application built on the SDK must be able to name itself, and must be able not to disclose its operating system and architecture to the vendor. |
 | `RetryPolicy.exceptions` | Dropped; `predicate` kept | There are no exception classes; a predicate sees the `Error`. |
 | Raw dict questions | The `RawQuestion` builder, with the same three checks | Forward compatibility with question types this version does not model. |
 | `response_model=` | `SystemOneResponse<A>` with `.typed::<A>()`, or `#[derive(QuestionSet)]` and `ask::<T>()` | Static typing. |
