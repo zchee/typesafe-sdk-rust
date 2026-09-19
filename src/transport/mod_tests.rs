@@ -23,11 +23,13 @@ fn config(base_url: &str, defaults: &[(&str, &str)]) -> Config {
             HeaderValue::from_str(value).expect("a test header value is valid"),
         );
     }
-    let explicit = Explicit::default()
-        .api_key("test-key")
-        .base_url(base_url)
-        .default_model("jev-latest")
-        .default_headers(headers);
+    let explicit = Explicit {
+        api_key: Some("test-key".into()),
+        base_url: Some(base_url.into()),
+        default_model: Some("jev-latest".into()),
+        default_headers: headers,
+        ..Explicit::default()
+    };
     Config::resolve(explicit, |_: &str| None::<String>)
         .unwrap_or_else(|error| panic!("the test configuration resolves: {error:?}"))
 }

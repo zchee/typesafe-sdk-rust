@@ -32,7 +32,7 @@ fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> +
 
 /// Resolves with only an explicit API key and the given environment.
 fn with_key(lookup: impl Fn(&str) -> Option<String>) -> Config {
-    Config::resolve(Explicit::default().api_key("test-key"), lookup)
+    Config::resolve(Explicit { api_key: Some("test-key".into()), ..Explicit::default() }, lookup)
         .unwrap_or_else(|error| panic!("a configuration with a key failed to resolve: {error:?}"))
 }
 
@@ -96,7 +96,7 @@ fn each_setting_comes_from_the_caller_then_the_environment_then_the_default() {
     let cases = [
         Case {
             source: "default",
-            explicit: Explicit::default().api_key("test-key"),
+            explicit: Explicit { api_key: Some("test-key".into()), ..Explicit::default() },
             environment: &[],
             expected: ["Bearer test-key", "https://api.typesafe.ai/v1/systemone", "jev-latest"],
         },
@@ -108,10 +108,12 @@ fn each_setting_comes_from_the_caller_then_the_environment_then_the_default() {
         },
         Case {
             source: "constructor",
-            explicit: Explicit::default()
-                .api_key("code-key")
-                .base_url("https://code.test///")
-                .default_model("code-model"),
+            explicit: Explicit {
+                api_key: Some("code-key".into()),
+                base_url: Some("https://code.test///".into()),
+                default_model: Some("code-model".into()),
+                ..Explicit::default()
+            },
             environment: &environment,
             expected: ["Bearer code-key", "https://code.test/v1/systemone", "code-model"],
         },
@@ -170,11 +172,13 @@ fn explicit_settings_are_used_without_consulting_the_environment() {
     let lookup = |name: &str| -> Option<String> {
         panic!("the environment was consulted for {name} although every setting was explicit")
     };
-    let explicit = Explicit::default()
-        .api_key(SecretString::from("code-key"))
-        .base_url("https://code.test")
-        .default_model("code-model")
-        .timeout(Duration::from_millis(1500));
+    let explicit = Explicit {
+        api_key: Some(SecretString::from("code-key")),
+        base_url: Some("https://code.test".into()),
+        default_model: Some("code-model".into()),
+        timeout: Some(Some(Duration::from_millis(1500))),
+        ..Explicit::default()
+    };
 
     let config = Config::resolve(explicit, lookup)
         .unwrap_or_else(|error| panic!("explicit settings failed to resolve: {error:?}"));
@@ -205,8 +209,11 @@ const BLANK: [&str; 5] = ["", " ", " \t\n ", "\u{1c}", "\u{1d}\u{1f} \u{1e}"];
 fn an_explicit_blank_key_is_a_config_error_even_with_a_key_in_the_environment() {
     let environment = [("TYPESAFE_API_KEY", "env-key")];
     for given in BLANK {
-        let error = Config::resolve(Explicit::default().api_key(given), env(&environment))
-            .expect_err("an explicit blank key must not resolve");
+        let error = Config::resolve(
+            Explicit { api_key: Some(given.into()), ..Explicit::default() },
+            env(&environment),
+        )
+        .expect_err("an explicit blank key must not resolve");
         assert!(matches!(error.kind(), ErrorKind::Config), "{given:?}: {error:?}");
         assert_eq!(error.to_string(), BLANK_KEY, "{given:?}");
         assert_eq!(format!("{error:?}"), config_debug(BLANK_KEY), "{given:?}");
@@ -219,7 +226,11 @@ fn an_explicit_blank_key_is_a_config_error_even_with_a_key_in_the_environment() 
 fn an_explicit_blank_default_model_is_a_config_error_even_with_one_in_the_environment() {
     let environment = [("TYPESAFE_DEFAULT_MODEL", "env-model")];
     for given in BLANK {
-        let explicit = Explicit::default().api_key("test-key").default_model(given);
+        let explicit = Explicit {
+            api_key: Some("test-key".into()),
+            default_model: Some(given.into()),
+            ..Explicit::default()
+        };
         let error = Config::resolve(explicit, env(&environment))
             .expect_err("an explicit blank model must not resolve");
         assert!(matches!(error.kind(), ErrorKind::Config), "{given:?}: {error:?}");
@@ -236,7 +247,11 @@ fn a_padded_non_blank_explicit_key_and_model_are_kept_byte_for_byte() {
     let environment = [("TYPESAFE_API_KEY", "env-key"), ("TYPESAFE_DEFAULT_MODEL", "env-model")];
     let cases = [("  k  ", "Bearer   k  "), ("\tk\t", "Bearer \tk\t"), (" a b ", "Bearer  a b ")];
     for (given, header) in cases {
-        let explicit = Explicit::default().api_key(given).default_model(given);
+        let explicit = Explicit {
+            api_key: Some(given.into()),
+            default_model: Some(given.into()),
+            ..Explicit::default()
+        };
         let config = Config::resolve(explicit, env(&environment))
             .unwrap_or_else(|error| panic!("explicit {given:?} failed to resolve: {error:?}"));
         assert_eq!(authorization(&config).as_bytes(), header.as_bytes(), "key {given:?}");
@@ -268,7 +283,11 @@ fn default_headers_are_kept_as_given_including_repeated_names() {
     headers.append("x-tag", HeaderValue::from_static("b"));
 
     let config = Config::resolve(
-        Explicit::default().api_key("test-key").default_headers(headers.clone()),
+        Explicit {
+            api_key: Some("test-key".into()),
+            default_headers: headers.clone(),
+            ..Explicit::default()
+        },
         no_env,
     )
     .unwrap_or_else(|error| panic!("{error:?}"));
@@ -284,7 +303,11 @@ fn default_headers_are_kept_as_given_including_repeated_names() {
 #[test]
 fn trailing_slashes_are_stripped_and_a_path_prefix_is_kept() {
     let config = Config::resolve(
-        Explicit::default().api_key("test-key").base_url("https://example.test/prefix///"),
+        Explicit {
+            api_key: Some("test-key".into()),
+            base_url: Some("https://example.test/prefix///".into()),
+            ..Explicit::default()
+        },
         no_env,
     )
     .unwrap_or_else(|error| panic!("{error:?}"));
@@ -344,7 +367,14 @@ fn an_unusable_base_url_is_a_config_error_that_does_not_repeat_it() {
         ),
     ];
     for (base, message) in cases {
-        let rendered = config_error(Explicit::default().api_key("test-key").base_url(base), no_env);
+        let rendered = config_error(
+            Explicit {
+                api_key: Some("test-key".into()),
+                base_url: Some(base.into()),
+                ..Explicit::default()
+            },
+            no_env,
+        );
         assert_eq!(rendered, message, "base {base:?}");
         assert!(!rendered.contains("sk-"), "base {base:?} leaked into {rendered:?}");
     }
@@ -353,14 +383,24 @@ fn an_unusable_base_url_is_a_config_error_that_does_not_repeat_it() {
 /// A base URL of slashes only is empty once they are stripped.
 #[test]
 fn a_base_url_of_slashes_only_is_not_a_url() {
-    let rendered = config_error(Explicit::default().api_key("test-key").base_url("///"), no_env);
+    let rendered = config_error(
+        Explicit {
+            api_key: Some("test-key".into()),
+            base_url: Some("///".into()),
+            ..Explicit::default()
+        },
+        no_env,
+    );
     assert_eq!(rendered, "The base URL is not a valid URL.");
 }
 
 #[test]
 fn an_unusable_environment_base_url_fails_the_same_way() {
     let environment = [("TYPESAFE_BASE_URL", " https://user:sk-in-env@example.test/ ")];
-    let rendered = config_error(Explicit::default().api_key("test-key"), env(&environment));
+    let rendered = config_error(
+        Explicit { api_key: Some("test-key".into()), ..Explicit::default() },
+        env(&environment),
+    );
     assert_eq!(
         rendered,
         "The base URL must not carry credentials; pass the API key on its own instead."
@@ -374,14 +414,26 @@ fn an_unusable_environment_base_url_fails_the_same_way() {
 #[test]
 fn a_zero_timeout_is_the_upstream_error_and_any_positive_one_is_kept() {
     let message = "timeout must be a positive, finite number of seconds.";
-    let rendered =
-        config_error(Explicit::default().api_key("test-key").timeout(Duration::ZERO), no_env);
+    let rendered = config_error(
+        Explicit {
+            api_key: Some("test-key".into()),
+            timeout: Some(Some(Duration::ZERO)),
+            ..Explicit::default()
+        },
+        no_env,
+    );
     assert_eq!(rendered, message);
 
     for timeout in [Duration::from_nanos(1), Duration::from_secs(7), Duration::MAX] {
-        let config =
-            Config::resolve(Explicit::default().api_key("test-key").timeout(timeout), no_env)
-                .unwrap_or_else(|error| panic!("{timeout:?}: {error:?}"));
+        let config = Config::resolve(
+            Explicit {
+                api_key: Some("test-key".into()),
+                timeout: Some(Some(timeout)),
+                ..Explicit::default()
+            },
+            no_env,
+        )
+        .unwrap_or_else(|error| panic!("{timeout:?}: {error:?}"));
         assert_eq!(config.timeout(), Some(timeout));
     }
 }
@@ -390,17 +442,23 @@ fn a_zero_timeout_is_the_upstream_error_and_any_positive_one_is_kept() {
 /// never spelled as a very long deadline, which a clock can overflow.
 #[test]
 fn no_timeout_is_no_deadline_and_the_last_setting_wins() {
-    let none = Config::resolve(Explicit::default().api_key("test-key").no_timeout(), no_env)
-        .unwrap_or_else(|error| panic!("{error:?}"));
+    let none = Config::resolve(
+        Explicit { api_key: Some("test-key".into()), timeout: Some(None), ..Explicit::default() },
+        no_env,
+    )
+    .unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(none.timeout(), None);
 
-    let explicit =
-        Explicit::default().api_key("test-key").no_timeout().timeout(Duration::from_secs(3));
+    let explicit = Explicit {
+        api_key: Some("test-key".into()),
+        timeout: Some(Some(Duration::from_secs(3))),
+        ..Explicit::default()
+    };
     let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(config.timeout(), Some(Duration::from_secs(3)));
 
     let explicit =
-        Explicit::default().api_key("test-key").timeout(Duration::from_secs(3)).no_timeout();
+        Explicit { api_key: Some("test-key".into()), timeout: Some(None), ..Explicit::default() };
     let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(config.timeout(), None);
 }
@@ -409,12 +467,22 @@ fn no_timeout_is_no_deadline_and_the_last_setting_wins() {
 
 #[test]
 fn the_response_limit_is_the_default_or_what_the_caller_set_and_never_zero() {
-    let explicit = Explicit::default().api_key("test-key").max_response_bytes(1);
+    let explicit = Explicit {
+        api_key: Some("test-key".into()),
+        max_response_bytes: Some(1),
+        ..Explicit::default()
+    };
     let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(config.max_response_bytes(), 1);
 
-    let rendered =
-        config_error(Explicit::default().api_key("test-key").max_response_bytes(0), no_env);
+    let rendered = config_error(
+        Explicit {
+            api_key: Some("test-key".into()),
+            max_response_bytes: Some(0),
+            ..Explicit::default()
+        },
+        no_env,
+    );
     assert_eq!(rendered, "max_response_bytes must be at least 1: every response carries a body.");
 }
 
@@ -465,10 +533,12 @@ fn a_variable_that_is_not_utf8_is_a_config_error_naming_the_variable() {
     // A variable the caller's explicit setting makes unnecessary is not read,
     // so an unreadable value there is no error.
     let lookup = |_: &str| Some(not_unicode("unread"));
-    let explicit = Explicit::default()
-        .api_key("code-key")
-        .base_url("https://code.test")
-        .default_model("code-model");
+    let explicit = Explicit {
+        api_key: Some("code-key".into()),
+        base_url: Some("https://code.test".into()),
+        default_model: Some("code-model".into()),
+        ..Explicit::default()
+    };
     Config::resolve(explicit, lookup).unwrap_or_else(|error| panic!("{error:?}"));
 }
 
@@ -495,8 +565,9 @@ fn a_key_that_cannot_be_a_header_value_is_a_config_error_that_does_not_repeat_it
         "sk-secret\u{201c}",
     ];
     for key in cases {
-        let error = Config::resolve(Explicit::default().api_key(key), no_env)
-            .expect_err("an unsendable key must not resolve");
+        let error =
+            Config::resolve(Explicit { api_key: Some(key.into()), ..Explicit::default() }, no_env)
+                .expect_err("an unsendable key must not resolve");
         assert!(matches!(error.kind(), ErrorKind::Config), "{key:?}: {error:?}");
         assert_eq!(error.to_string(), message, "{key:?}");
         let debug = format!("{error:?}");
@@ -510,8 +581,11 @@ fn a_key_that_cannot_be_a_header_value_is_a_config_error_that_does_not_repeat_it
 #[test]
 fn a_key_of_printable_ascii_is_sent_byte_for_byte() {
     let key: String = (b' '..=b'~').map(char::from).chain(['\t']).collect();
-    let config = Config::resolve(Explicit::default().api_key(key.as_str()), no_env)
-        .unwrap_or_else(|error| panic!("{error:?}"));
+    let config = Config::resolve(
+        Explicit { api_key: Some(key.as_str().into()), ..Explicit::default() },
+        no_env,
+    )
+    .unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(authorization(&config), format!("Bearer {key}"));
 }
 
@@ -536,11 +610,13 @@ fn debug_prints_neither_the_key_nor_any_default_header_value() {
         HeaderValue::from_static("client-secret-value"),
     );
     headers.append("x-team", HeaderValue::from_static("second-team-value"));
-    let explicit = Explicit::default()
-        .api_key(key)
-        .base_url("https://example.test/prefix/")
-        .default_model("jev-latest")
-        .default_headers(headers);
+    let explicit = Explicit {
+        api_key: Some(key.into()),
+        base_url: Some("https://example.test/prefix/".into()),
+        default_model: Some("jev-latest".into()),
+        default_headers: headers,
+        ..Explicit::default()
+    };
 
     let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
     let debug = format!("{config:?}");

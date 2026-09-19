@@ -29,59 +29,13 @@ use crate::{
 /// its environment variable, then to the SDK's default.
 #[derive(Default)]
 pub(crate) struct Explicit {
-    api_key: Option<SecretString>,
-    base_url: Option<String>,
-    default_model: Option<String>,
+    pub(crate) api_key: Option<SecretString>,
+    pub(crate) base_url: Option<String>,
+    pub(crate) default_model: Option<String>,
     /// `None` leaves the default; `Some(None)` asks for no deadline at all.
-    timeout: Option<Option<Duration>>,
-    default_headers: HeaderMap,
-    max_response_bytes: Option<usize>,
-}
-
-impl Explicit {
-    /// The API key, used as given: an explicit key is not trimmed, and a blank
-    /// one is refused when the configuration is resolved.
-    pub(crate) fn api_key(mut self, key: impl Into<SecretString>) -> Self {
-        self.api_key = Some(key.into());
-        self
-    }
-
-    /// The API root, used as given apart from losing its trailing slashes.
-    pub(crate) fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = Some(url.into());
-        self
-    }
-
-    /// The model a request names when the call names none, used as given; a
-    /// blank one is refused when the configuration is resolved.
-    pub(crate) fn default_model(mut self, model: impl Into<String>) -> Self {
-        self.default_model = Some(model.into());
-        self
-    }
-
-    /// The deadline of each attempt.
-    pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(Some(timeout));
-        self
-    }
-
-    /// No deadline on any attempt.
-    pub(crate) fn no_timeout(mut self) -> Self {
-        self.timeout = Some(None);
-        self
-    }
-
-    /// The largest response body a request reads.
-    pub(crate) fn max_response_bytes(mut self, limit: usize) -> Self {
-        self.max_response_bytes = Some(limit);
-        self
-    }
-
-    /// Headers sent on every request unless a call or the SDK overrides them.
-    pub(crate) fn default_headers(mut self, headers: HeaderMap) -> Self {
-        self.default_headers = headers;
-        self
-    }
+    pub(crate) timeout: Option<Option<Duration>>,
+    pub(crate) default_headers: HeaderMap,
+    pub(crate) max_response_bytes: Option<usize>,
 }
 
 /// A client's settings once every source has been consulted and every value

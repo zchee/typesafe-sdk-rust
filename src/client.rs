@@ -428,24 +428,14 @@ impl ClientBuilder {
             headers.insert(name, value);
         }
 
-        let mut explicit = Explicit::default().default_headers(headers);
-        if let Some(key) = api_key {
-            explicit = explicit.api_key(key);
-        }
-        if let Some(url) = base_url {
-            explicit = explicit.base_url(url);
-        }
-        if let Some(model) = default_model {
-            explicit = explicit.default_model(model);
-        }
-        match timeout {
-            Some(Some(timeout)) => explicit = explicit.timeout(timeout),
-            Some(None) => explicit = explicit.no_timeout(),
-            None => {}
-        }
-        if let Some(limit) = max_response_bytes {
-            explicit = explicit.max_response_bytes(limit);
-        }
+        let explicit = Explicit {
+            api_key,
+            base_url,
+            default_model,
+            timeout,
+            default_headers: headers,
+            max_response_bytes,
+        };
         Ok((
             explicit,
             TransportChoices { version: http_version, extra_roots, connect_timeout },
