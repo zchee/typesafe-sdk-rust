@@ -679,21 +679,13 @@ async fn system_one_timeout_override() {
 async fn a_response_over_the_limit_is_refused() {
     let big = Bytes::from(vec![b' '; 4096]);
     for protocol in [Protocol::Http1, Protocol::H2c] {
-        // A success response: a connection error, since nothing was read that
-        // could be decoded, with the limit named.
+        // A success response whose declared length is over the limit: its
+        // own kind, naming the limit, with no cause.
         let server = answering(protocol, big.clone()).await;
         let client =
             builder_for(&server, protocol).max_response_bytes(1024).build().expect("builds");
         let error = client.models().list().send().await.expect_err("over the limit");
-        assert!(matches!(error.kind(), ErrorKind::Connection), "{protocol:?}: {error:?}");
-        assert_eq!(
-            error.to_string(),
-            "The response body exceeded the limit of 1024 bytes and was not read."
-        );
-        assert_eq!(
-            error.source().map(ToString::to_string).as_deref(),
-            Some("the response body is larger than 1024 bytes")
-        );
+        assert_too_large(&error, 1024);
 
         // A failure response keeps its status and headers, and no body.
         let failing = big.clone();
@@ -735,6 +727,34 @@ async fn a_response_over_the_limit_is_refused() {
     assert!(response.models().is_empty());
 }
 
+/// The error a success response over `limit` must be.
+fn assert_too_large(error: &Error, limit: usize) {
+    assert!(
+        matches!(error.kind(), ErrorKind::ResponseTooLarge { limit: at } if *at == limit),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        format!("The response body exceeded the limit of {limit} bytes and was not read.")
+    );
+    assert!(error.source().is_none(), "{error:?}");
+}
+
+/// A `content-length` over the limit is refused before a byte of the body is
+/// read - even when the server then sends far less than it declared.
+#[tokio::test]
+async fn a_declared_length_over_the_limit_is_refused_whatever_follows_it() {
+    let url = raw_server(b"HTTP/1.1 200 OK\r\ncontent-length: 5000\r\n\r\n{\"models\":[]}").await;
+    let client = Client::builder()
+        .api_key("test-key")
+        .base_url(url)
+        .max_response_bytes(1024)
+        .build()
+        .expect("builds");
+    let error = client.models().list().send().await.expect_err("declared over the limit");
+    assert_too_large(&error, 1024);
+}
+
 /// A body with no declared length is cut off by the limit as it streams.
 #[tokio::test]
 async fn a_streamed_response_over_the_limit_is_refused_as_it_arrives() {
@@ -751,11 +771,7 @@ async fn a_streamed_response_over_the_limit_is_refused_as_it_arrives() {
         .build()
         .expect("builds");
     let error = client.models().list().send().await.expect_err("over the limit");
-    assert!(matches!(error.kind(), ErrorKind::Connection), "{error:?}");
-    assert_eq!(
-        error.to_string(),
-        "The response body exceeded the limit of 100 bytes and was not read."
-    );
+    assert_too_large(&error, 100);
 }
 
 // -------------------------------------------------------------- headers
@@ -1195,6 +1211,109 @@ mod logging {
         assert_eq!(trace.len(), 2, "{trace:#?}");
         assert!(trace[0].contains(r#"body={"state":"hello","#), "{}", trace[0]);
         assert!(trace[1].contains(r#"body={"model":"jev-latest","#), "{}", trace[1]);
+    }
+
+    /// The `INFO` line an attempt's single `INFO` event renders as, without
+    /// the target.
+    fn only_info_line(recorder: &Recorder) -> String {
+        let lines = recorder.at(Level::INFO);
+        let [line] = &lines[..] else { panic!("one INFO line expected: {lines:#?}") };
+        line.strip_prefix("typesafe_sdk message=").unwrap_or_else(|| panic!("{line}")).to_owned()
+    }
+
+    /// `<prefix><digits>ms<suffix>`, and nothing else.
+    fn assert_timed(line: &str, prefix: &str, suffix: &str) {
+        let millis = line
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+            .and_then(|rest| rest.strip_suffix("ms"))
+            .unwrap_or_else(|| panic!("{line:?} is not {prefix:?}<n>ms{suffix:?}"));
+        assert!(millis.bytes().all(|byte| byte.is_ascii_digit()) && !millis.is_empty(), "{line}");
+    }
+
+    /// Upstream `test_logger_level_controls_output`'s INFO summary, and its
+    /// failure line: one `INFO` event per attempt, as upstream words it, for
+    /// a response of any status and for an attempt that got none. No INFO or
+    /// DEBUG event carries a body, a header value or an error's own message.
+    #[tokio::test]
+    async fn every_attempt_gets_one_info_line_and_no_body_reaches_info_or_debug() {
+        // A success.
+        let recorder = Recorder::default();
+        let default = tracing::subscriber::set_default(recorder.clone());
+        let server = logging_server(Protocol::Http1).await;
+        let questions = one_raw_question();
+        client_for(&server, Protocol::Http1)
+            .system_one("secret-state", &questions)
+            .send()
+            .await
+            .expect("answered");
+        let base = server.base_url();
+        assert_timed(
+            &only_info_line(&recorder),
+            &format!("POST {base}/v1/systemone <- 200 in "),
+            " (request req_log)",
+        );
+        let quiet = [recorder.at(Level::INFO), recorder.at(Level::DEBUG)].concat();
+        assert!(quiet.iter().all(|line| !line.contains("secret-state")), "{quiet:#?}");
+        drop(default);
+
+        // A failure status, with a body that says something private.
+        let recorder = Recorder::default();
+        let default = tracing::subscriber::set_default(recorder.clone());
+        let server = TestServer::start(Protocol::Http1, |_| async {
+            json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"message":"secret-body"}"#)
+        })
+        .await
+        .expect("the test server starts");
+        let error =
+            client_for(&server, Protocol::Http1).models().list().send().await.expect_err("503");
+        assert_eq!(api_error(&error).message(), "secret-body");
+        assert_timed(
+            &only_info_line(&recorder),
+            &format!("GET {}/v1/models <- 503 in ", server.base_url()),
+            " (request -)",
+        );
+        let quiet = [recorder.at(Level::INFO), recorder.at(Level::DEBUG)].concat();
+        assert!(quiet.iter().all(|line| !line.contains("secret-body")), "{quiet:#?}");
+        drop(default);
+
+        // No response: a timeout, a refused connection, a body over the limit.
+        let held = held(Protocol::Http1, br#"{"models":[]}"#).await;
+        let refused = closed_port().await;
+        let big = answering(Protocol::Http1, vec![b' '; 4096]).await;
+        let cases: [(ClientBuilder, &str); 3] = [
+            (
+                builder_for(&held.server, Protocol::Http1).timeout(Duration::from_millis(50)),
+                "timeout",
+            ),
+            (Client::builder().api_key("test-key").base_url(refused.as_str()), "connection error"),
+            (builder_for(&big, Protocol::Http1).max_response_bytes(1024), "response too large"),
+        ];
+        for (builder, word) in cases {
+            let recorder = Recorder::default();
+            let _default = tracing::subscriber::set_default(recorder.clone());
+            let client = builder.build().expect("the client builds");
+            let error = client.models().list().send().await.expect_err(word);
+            let endpoint = format!("GET {}/v1/models", client_base(&client));
+            assert_eq!(only_info_line(&recorder), format!("{endpoint} <- {word}"));
+            // The DEBUG failure event names the kind by the same word and
+            // carries no message: a connection error's message is the
+            // transport's chain, which can hold text the server chose.
+            let debug = recorder.at(Level::DEBUG);
+            let failure = debug.last().expect("a DEBUG failure event");
+            assert!(failure.contains(&format!("failure=\"{word}\"")), "{failure}");
+            assert!(!failure.contains(&error.to_string()), "{failure}");
+        }
+        held.release.notify_waiters();
+    }
+
+    /// The base URL a client sends to, read back from its `Debug`, which
+    /// prints its endpoints as an error names them.
+    fn client_base(client: &Client) -> String {
+        let debug = format!("{client:?}");
+        let start = debug.find("\"GET ").expect("the models endpoint") + "\"GET ".len();
+        let end = debug[start..].find("/v1/models").expect("the models path") + start;
+        debug[start..end].to_owned()
     }
 
     /// Upstream `test_secret_headers_redacted`, the nine spellings of a secret

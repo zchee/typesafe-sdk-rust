@@ -518,6 +518,22 @@ fn nothing_that_could_be_a_secret_reaches_a_debug_rendering() {
 
 // ------------------------------------------------------- the wrapping error
 
+/// A success response larger than the client's limit: its own kind, so that
+/// a retry predicate can see it without reaching into a cause, and no cause.
+#[test]
+fn a_response_too_large_names_its_limit_and_has_no_cause() {
+    let error = Error::response_too_large(1024);
+
+    assert!(matches!(error.kind(), ErrorKind::ResponseTooLarge { limit: 1024 }), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "The response body exceeded the limit of 1024 bytes and was not read."
+    );
+    assert_eq!(format!("{error:?}"), "Error { kind: ResponseTooLarge { limit: 1024 } }");
+    assert!(error.source().is_none());
+    assert_eq!(std::mem::size_of::<Error>(), std::mem::size_of::<usize>());
+}
+
 #[test]
 fn each_kind_renders_and_chains_the_way_its_caller_will_read_it() {
     let config = Error::config("TYPESAFE_API_KEY is not set");

@@ -262,15 +262,10 @@ fn a_chain_longer_than_eight_links_is_cut() {
 }
 
 #[test]
-fn a_body_over_the_limit_is_named_by_the_limit() {
-    assert_eq!(
-        BodyTooLarge { limit: 1024 }.to_string(),
-        "the response body is larger than 1024 bytes"
-    );
-    assert_eq!(
-        too_large_message(1024),
-        "The response body exceeded the limit of 1024 bytes and was not read."
-    );
+fn a_body_over_the_limit_reads_the_same_for_either_status() {
+    // A failure response carries the sentence as its message; a success
+    // response is its own kind, which renders the same sentence.
+    assert_eq!(too_large_message(1024), Error::response_too_large(1024).to_string());
 }
 
 /// An error with a message of its own and a cause under it.

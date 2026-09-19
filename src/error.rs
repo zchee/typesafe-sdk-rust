@@ -61,8 +61,9 @@ pub struct Error(Box<Inner>);
 struct Inner {
     kind: ErrorKind,
     /// The sentence for the kinds that do not carry a payload of their own.
-    /// Empty for [`ErrorKind::Api`], [`ErrorKind::ResponseValidation`] and
-    /// [`ErrorKind::Timeout`], which render from their payload instead.
+    /// Empty for [`ErrorKind::Api`], [`ErrorKind::ResponseValidation`],
+    /// [`ErrorKind::Timeout`] and [`ErrorKind::ResponseTooLarge`], which render
+    /// from their payload instead.
     message: Box<str>,
     source: Option<Cause>,
 }
@@ -93,6 +94,19 @@ pub enum ErrorKind {
     /// The server answered with a success status and a body this SDK could
     /// not read as the response it expected.
     ResponseValidation(ResponseValidationError),
+    /// The server answered with a success status and a body larger than the
+    /// client's limit, so the body was not read past the limit and nothing
+    /// was decoded.
+    ///
+    /// The limit is 16 MiB unless
+    /// [`ClientBuilder::max_response_bytes`](crate::ClientBuilder::max_response_bytes)
+    /// set another. Retrying the same request cannot help: the answer will be
+    /// as large again. A failure status with a body over the limit is an
+    /// [`ErrorKind::Api`] instead, which keeps its status and headers.
+    ResponseTooLarge {
+        /// The limit the body exceeded, in bytes.
+        limit: usize,
+    },
 }
 
 impl Error {
@@ -124,6 +138,11 @@ impl Error {
         Self::plain(ErrorKind::Timeout { timeout }, "", None)
     }
 
+    /// A success response's body was larger than `limit` bytes.
+    pub(crate) fn response_too_large(limit: usize) -> Self {
+        Self::plain(ErrorKind::ResponseTooLarge { limit }, "", None)
+    }
+
     /// Builds one of the kinds whose sentence is not derived from a payload.
     fn plain(kind: ErrorKind, message: impl Into<Box<str>>, source: Option<Cause>) -> Self {
         Self(Box::new(Inner { kind, message: message.into(), source }))
@@ -150,6 +169,10 @@ impl fmt::Display for Error {
             ErrorKind::Timeout { timeout } => {
                 write!(formatter, "Request timed out (timeout={}s).", timeout.as_secs_f64())
             }
+            ErrorKind::ResponseTooLarge { limit } => write!(
+                formatter,
+                "The response body exceeded the limit of {limit} bytes and was not read."
+            ),
             ErrorKind::Config | ErrorKind::InvalidRequest | ErrorKind::Connection => {
                 formatter.write_str(&self.0.message)
             }

@@ -25,7 +25,7 @@ use std::{
     future::{Future, poll_fn},
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -325,11 +325,12 @@ pub(crate) type Received = (StatusCode, HeaderMap, Bytes);
 ///   passes first.
 /// - [`ErrorKind::Api`](crate::ErrorKind::Api) for any status outside 2xx.
 /// - [`ErrorKind::Connection`](crate::ErrorKind::Connection) when the
-///   transport fails, when the body cannot be read, and when a success
-///   response's body is larger than the limit; the transport's own error is
-///   the [`source`](StdError::source). A body over the limit is not read past
-///   it, and a failure response whose body is over the limit is an API error
-///   with the status and headers and no body.
+///   transport fails or the body cannot be read; the transport's own error is
+///   the [`source`](StdError::source).
+/// - [`ErrorKind::ResponseTooLarge`](crate::ErrorKind::ResponseTooLarge) when
+///   a success response's body is larger than the limit. A body over the
+///   limit is not read past it, and a failure response whose body is over the
+///   limit is an API error with the status and headers and no body.
 pub(crate) async fn attempt<S>(
     service: &S,
     exchange: Exchange<'_>,
@@ -349,7 +350,7 @@ where
 
     let events = telemetry::Exchange::new(exchange.method, exchange.uri, retry);
     telemetry::sending(events, &headers, body.as_ref());
-    let started = Instant::now();
+    let started = telemetry::clock();
 
     let mut request = Request::new(body.map_or_else(Body::empty, Body::from));
     *request.method_mut() = exchange.method.clone();
@@ -364,38 +365,42 @@ where
         None => exchanged.await,
     };
 
-    let result = match outcome {
-        Ok((status, headers, body)) if status.is_success() => {
-            telemetry::received(events, status, &headers, &body, started.elapsed());
-            return Ok((status, headers, body));
-        }
+    // A response is reported by its status; an attempt that ended without
+    // one is reported by what ended it. An API error is not reported a second
+    // time as a failure: its message can come from the body.
+    let failure = match outcome {
         Ok((status, headers, body)) => {
-            telemetry::received(events, status, &headers, &body, started.elapsed());
-            Error::from(ApiError::new(status, body, headers, Some(endpoint(exchange))))
+            telemetry::responded(events, status, &headers, started);
+            telemetry::received(events, status, &headers, &body, started);
+            if status.is_success() {
+                return Ok((status, headers, body));
+            }
+            return Err(ApiError::new(status, body, headers, Some(endpoint(exchange))).into());
         }
+        Err(Failure::TooLarge { status, headers }) if !status.is_success() => {
+            telemetry::responded(events, status, &headers, started);
+            return Err(ApiError::with_message(
+                status,
+                Bytes::new(),
+                headers,
+                Some(endpoint(exchange)),
+                too_large_message(exchange.max_response_bytes),
+            )
+            .into());
+        }
+        Err(Failure::TooLarge { .. }) => Error::response_too_large(exchange.max_response_bytes),
         Err(Failure::Error(error)) => error,
-        Err(Failure::TooLarge { status, headers: _ }) if status.is_success() => Error::connection(
-            too_large_message(exchange.max_response_bytes),
-            Some(Box::new(BodyTooLarge { limit: exchange.max_response_bytes })),
-        ),
-        Err(Failure::TooLarge { status, headers }) => Error::from(ApiError::with_message(
-            status,
-            Bytes::new(),
-            headers,
-            Some(endpoint(exchange)),
-            too_large_message(exchange.max_response_bytes),
-        )),
     };
-    telemetry::failed(events, &result, started.elapsed());
-    Err(result)
+    telemetry::failed(events, &failure, started);
+    Err(failure)
 }
 
 /// How an attempt can end short of a response body.
 enum Failure {
     /// Anything that becomes an [`Error`] without needing the response.
     Error(Error),
-    /// The body was larger than the limit. Whether that is a connection
-    /// failure or an API one depends on the status, which is kept.
+    /// The body was larger than the limit. Whether that is a response too
+    /// large or an API error depends on the status, which is kept.
     TooLarge { status: StatusCode, headers: HeaderMap },
 }
 
@@ -468,7 +473,9 @@ fn connection_message(error: &(dyn StdError + 'static)) -> String {
     message
 }
 
-/// The sentence for a response body over the limit.
+/// The sentence for a failure response whose body was over the limit; a
+/// success response over it is [`Error::response_too_large`], which renders
+/// the same sentence.
 fn too_large_message(limit: usize) -> String {
     format!("The response body exceeded the limit of {limit} bytes and was not read.")
 }
@@ -477,24 +484,6 @@ fn too_large_message(limit: usize) -> String {
 fn endpoint(exchange: Exchange<'_>) -> Box<str> {
     format_endpoint(exchange.method, exchange.uri).into_boxed_str()
 }
-
-/// The cause kept under a connection error for a success response whose body
-/// was over the limit.
-///
-/// It is crate-private on purpose: its only reader is the retry decision,
-/// which must not repeat a request whose answer will be too large again.
-#[derive(Debug)]
-pub(crate) struct BodyTooLarge {
-    limit: usize,
-}
-
-impl fmt::Display for BodyTooLarge {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "the response body is larger than {} bytes", self.limit)
-    }
-}
-
-impl StdError for BodyTooLarge {}
 
 #[cfg(test)]
 #[path = "mod_tests.rs"]

@@ -10,10 +10,13 @@
 //! they are printed.
 //!
 //! Every event has the target `typesafe_sdk`, so one filter directive selects
-//! all of them. At `DEBUG` a request is reported as it leaves and as its
-//! answer arrives - method, endpoint, status, request id, the headers with
-//! their secrets redacted, and the body's length. At `TRACE` the bodies
-//! themselves follow.
+//! all of them. At `INFO` each attempt gets one line, as the Python SDK
+//! writes it: `GET <url> <- 200 in 12ms (request <id>)` for a response of any
+//! status, or `GET <url> <- timeout` - a fixed word per kind of failure, never
+//! its message - for an attempt that ended without one. At `DEBUG` a request
+//! is reported as it leaves and as its answer arrives - method, endpoint,
+//! status, request id, the headers with their secrets redacted, and the
+//! body's length. At `TRACE` the bodies themselves follow.
 //!
 //! Without the `tracing` feature every function here is empty and the
 //! compiler removes the calls. With it, and with no subscriber interested, a
@@ -22,7 +25,8 @@
 //! is recorded.
 
 #[cfg(feature = "tracing")]
-use std::{fmt, time::Duration};
+use std::fmt;
+use std::time::Instant;
 
 #[cfg(feature = "tracing")]
 use bytes::Bytes;
@@ -31,8 +35,14 @@ use http::{HeaderMap, Method, StatusCode, Uri};
 use http::{HeaderName, HeaderValue};
 
 #[cfg(feature = "tracing")]
-use crate::constants::{REQUEST_ID_HEADER, SECRET_HEADERS};
+use tracing::Level;
+
 use crate::error::Error;
+#[cfg(feature = "tracing")]
+use crate::{
+    constants::{REQUEST_ID_HEADER, SECRET_HEADERS},
+    error::{ErrorKind, format_endpoint},
+};
 
 /// The target every event of this crate is emitted under.
 #[cfg(feature = "tracing")]
@@ -93,6 +103,47 @@ pub(crate) fn sending(exchange: Exchange<'_>, headers: &HeaderMap, body: Option<
 #[cfg(not(feature = "tracing"))]
 pub(crate) fn sending(_: Exchange<'_>, _: &HeaderMap, _: Option<&bytes::Bytes>) {}
 
+/// When an attempt started, read only when an `INFO` event of this crate can
+/// be recorded: the elapsed time is printed by events and by nothing else.
+pub(crate) type Started = Option<Instant>;
+
+/// The start of an attempt, if anything will print how long it took.
+#[cfg(feature = "tracing")]
+pub(crate) fn clock() -> Started {
+    // `INFO` is the least verbose level this crate's timed events use, so
+    // when it is off every one of them is off.
+    tracing::enabled!(target: TARGET, Level::INFO).then(Instant::now)
+}
+
+/// The start of an attempt, if anything will print how long it took.
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn clock() -> Started {
+    None
+}
+
+/// A response arrived, whatever its status: the `INFO` summary line,
+/// `GET https://api.typesafe.ai/v1/models <- 200 in 12ms (request req_1)`.
+#[cfg(feature = "tracing")]
+pub(crate) fn responded(
+    exchange: Exchange<'_>,
+    status: StatusCode,
+    headers: &HeaderMap,
+    started: Started,
+) {
+    tracing::info!(
+        target: TARGET,
+        "{} <- {} in {} (request {})",
+        Endpoint(exchange),
+        status.as_u16(),
+        Elapsed(started),
+        headers.get(REQUEST_ID_HEADER).and_then(|id| id.to_str().ok()).unwrap_or("-"),
+    );
+}
+
+/// A response arrived, whatever its status.
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn responded(_: Exchange<'_>, _: StatusCode, _: &HeaderMap, _: Started) {}
+
 /// A response arrived and its body was read in full.
 #[cfg(feature = "tracing")]
 pub(crate) fn received(
@@ -100,7 +151,7 @@ pub(crate) fn received(
     status: StatusCode,
     headers: &HeaderMap,
     body: &Bytes,
-    elapsed: Duration,
+    started: Started,
 ) {
     tracing::debug!(
         target: TARGET,
@@ -108,7 +159,7 @@ pub(crate) fn received(
         endpoint = %exchange.uri,
         status = status.as_u16(),
         request_id = headers.get(REQUEST_ID_HEADER).and_then(|id| id.to_str().ok()).unwrap_or("-"),
-        elapsed_ms = elapsed.as_millis(),
+        elapsed = %Elapsed(started),
         headers = ?redact(headers),
         body_len = body.len(),
         "received response"
@@ -129,29 +180,73 @@ pub(crate) fn received(
     _: StatusCode,
     _: &HeaderMap,
     _: &bytes::Bytes,
-    _: std::time::Duration,
+    _: Started,
 ) {
 }
 
-/// An attempt ended without a response this crate could read.
+/// An attempt ended without a response this crate could read: the `INFO`
+/// line `POST https://api.typesafe.ai/v1/systemone <- timeout`.
 ///
-/// The error's `Display` is written by this crate and carries no header value
-/// and no body, so it is safe to record.
+/// Only a fixed word for the kind is printed, never the error's message or
+/// cause: a connection failure's message is the transport's chain, and that
+/// can carry text the server chose.
 #[cfg(feature = "tracing")]
-pub(crate) fn failed(exchange: Exchange<'_>, error: &Error, elapsed: Duration) {
+pub(crate) fn failed(exchange: Exchange<'_>, error: &Error, started: Started) {
+    tracing::info!(target: TARGET, "{} <- {}", Endpoint(exchange), failure_word(error));
     tracing::debug!(
         target: TARGET,
         method = %exchange.method,
         endpoint = %exchange.uri,
-        elapsed_ms = elapsed.as_millis(),
-        error = %error,
+        elapsed = %Elapsed(started),
+        failure = failure_word(error),
         "request failed"
     );
 }
 
 /// An attempt ended without a response this crate could read.
 #[cfg(not(feature = "tracing"))]
-pub(crate) fn failed(_: Exchange<'_>, _: &Error, _: std::time::Duration) {}
+pub(crate) fn failed(_: Exchange<'_>, _: &Error, _: Started) {}
+
+/// The word a failure is logged as.
+#[cfg(feature = "tracing")]
+fn failure_word(error: &Error) -> &'static str {
+    match error.kind() {
+        ErrorKind::Timeout { .. } => "timeout",
+        ErrorKind::Connection => "connection error",
+        ErrorKind::ResponseTooLarge { .. } => "response too large",
+        ErrorKind::Api(_) => "api error",
+        ErrorKind::ResponseValidation(_) => "invalid response",
+        ErrorKind::InvalidRequest => "invalid request",
+        ErrorKind::Config => "config error",
+    }
+}
+
+/// A request's method and URL, as an error names its endpoint. Built only
+/// when an event that prints it is recorded.
+#[cfg(feature = "tracing")]
+struct Endpoint<'a>(Exchange<'a>);
+
+#[cfg(feature = "tracing")]
+impl fmt::Display for Endpoint<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&format_endpoint(self.0.method, self.0.uri))
+    }
+}
+
+/// How long an attempt took, in whole milliseconds, or `-` when the start was
+/// not read because no event could print it then.
+#[cfg(feature = "tracing")]
+struct Elapsed(Started);
+
+#[cfg(feature = "tracing")]
+impl fmt::Display for Elapsed {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(started) => write!(formatter, "{}ms", started.elapsed().as_millis()),
+            None => formatter.write_str("-"),
+        }
+    }
+}
 
 /// A body as text, with anything that is not UTF-8 replaced, written straight
 /// into the formatter so that nothing is copied unless an event is recorded.

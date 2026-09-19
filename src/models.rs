@@ -104,6 +104,8 @@ where
     ///   ran past its deadline.
     /// - [`ErrorKind::Connection`](crate::ErrorKind::Connection) when no
     ///   response could be read.
+    /// - [`ErrorKind::ResponseTooLarge`](crate::ErrorKind::ResponseTooLarge)
+    ///   when a success response's body was larger than the client's limit.
     /// - [`ErrorKind::ResponseValidation`](crate::ErrorKind::ResponseValidation)
     ///   when the body is not a model list.
     pub async fn send(self) -> Result<ListModelsResponse, Error> {

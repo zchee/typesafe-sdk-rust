@@ -233,8 +233,9 @@ where
     /// - [`ErrorKind::Timeout`](crate::ErrorKind::Timeout) when the attempt
     ///   ran past its deadline.
     /// - [`ErrorKind::Connection`](crate::ErrorKind::Connection) when no
-    ///   response could be read: the connection failed or broke, or the
-    ///   response body was larger than the client's limit.
+    ///   response could be read: the connection failed or broke.
+    /// - [`ErrorKind::ResponseTooLarge`](crate::ErrorKind::ResponseTooLarge)
+    ///   when a success response's body was larger than the client's limit.
     /// - [`ErrorKind::ResponseValidation`](crate::ErrorKind::ResponseValidation)
     ///   when the body does not decode into `A`.
     pub async fn send(self) -> Result<SystemOneResponse<A>, Error> {

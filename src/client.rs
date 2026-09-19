@@ -239,7 +239,9 @@ impl ClientBuilder {
     }
 
     /// The largest response body a request reads, in bytes; 16 MiB unless
-    /// set. A larger body is not read past the limit, and the request fails.
+    /// set. A larger body is not read past the limit: a success response
+    /// fails with [`ErrorKind::ResponseTooLarge`](crate::ErrorKind::ResponseTooLarge),
+    /// a failure response is an API error without its body.
     #[must_use]
     pub fn max_response_bytes(mut self, limit: usize) -> Self {
         self.max_response_bytes = Some(limit);
