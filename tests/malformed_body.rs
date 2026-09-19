@@ -17,8 +17,8 @@ use typesafe_sdk::{
 };
 
 /// An error body whose one member holds a byte that is not UTF-8: the error
-/// reader keeps each member as raw text, which is where the codec took the
-/// bytes as text unchecked.
+/// reader keeps each member as raw text, so the codec must check that the
+/// bytes are UTF-8 before it reads them as text.
 const ERROR_BODY: &[u8] = b"{\"error\":\"\xC9\"}";
 
 /// A success body whose score legend holds an object with such a byte: the
