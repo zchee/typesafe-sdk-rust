@@ -16,18 +16,19 @@ It fails on:
   recursively) does not exist or has no ``fn name`` carrying a test attribute;
 * a quoted deviation that is not the first cell of a row of the deviations
   table in README.md;
-* per-file counts that differ from the ones the matrix states, stated function
-  counts that differ from upstream's (``UPSTREAM_FUNCTIONS``, pinned so that a
-  dropped row fails without an upstream checkout), and an upstream test named
-  twice.
+* an upstream test (``UPSTREAM_TESTS``, the ``(file, name)`` of every upstream
+  ``test_*`` function, pinned so that no upstream checkout is needed) without a
+  row, a row naming a pair that is not in it, and an upstream test named twice;
+* per-file counts that differ from the ones the matrix states, and stated
+  function counts that differ from upstream's (derived from ``UPSTREAM_TESTS``).
 
 A row is one of three kinds: mapped to Rust tests, mapped to a deviation row,
 or excluded with a reason (only the functions of the upstream files that test
 the Python repository's own tooling).
 
-With ``--upstream <checkout>`` it also checks that every upstream ``test_*``
-function has exactly one row and that no row names a function upstream does not
-define.
+With ``--upstream <checkout>`` it also checks ``UPSTREAM_TESTS`` itself: every
+``test_*`` function the checkout defines is pinned, and every pinned one is
+defined.
 
 Run it from the repository root.
 """
@@ -37,6 +38,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -67,25 +69,159 @@ EXCLUDED_FILES = frozenset(
         "tests/test_typing.py",
     }
 )
-#: How many ``test_*`` functions each upstream file defines at the ported
-#: release (typesafe-sdk-python 2ce5c65, v0.7.0).
-UPSTREAM_FUNCTIONS = {
-    "tests/test_clients.py": 21,
-    "tests/test_config.py": 8,
-    "tests/test_docs.py": 2,
-    "tests/test_errors.py": 6,
-    "tests/test_integration.py": 3,
-    "tests/test_logging.py": 3,
-    "tests/test_public_api_surface.py": 3,
-    "tests/test_public_sync.py": 10,
-    "tests/test_pydantic_response_models.py": 5,
-    "tests/test_questions.py": 11,
-    "tests/test_release_notes.py": 2,
-    "tests/test_responses.py": 15,
-    "tests/test_retry.py": 25,
-    "tests/test_types.py": 6,
-    "tests/test_typing.py": 1,
-}
+#: Every ``test_*`` function the upstream files define at the ported release
+#: (typesafe-sdk-python 2ce5c65, v0.7.0), as ``(file, name)``. Pinned so that a
+#: dropped, renamed or made-up row fails without an upstream checkout;
+#: ``--upstream`` checks the pin itself against a checkout.
+UPSTREAM_TESTS = frozenset(
+    {
+        ("tests/test_clients.py", "test_cancellation_propagates"),
+        ("tests/test_clients.py", "test_error_mapping"),
+        ("tests/test_clients.py", "test_error_messages"),
+        ("tests/test_clients.py", "test_exceptional_context_closes_http_client"),
+        ("tests/test_clients.py", "test_extra_body_shallow_override"),
+        ("tests/test_clients.py", "test_headers_timeout_and_logging"),
+        ("tests/test_clients.py", "test_http_client_settings"),
+        ("tests/test_clients.py", "test_invalid_models_response"),
+        ("tests/test_clients.py", "test_models_ignore_unknown_fields"),
+        ("tests/test_clients.py", "test_models_shape"),
+        ("tests/test_clients.py", "test_owned_http_client_closed"),
+        ("tests/test_clients.py", "test_question_schema_validation_is_left_to_api"),
+        ("tests/test_clients.py", "test_raw_question_passthrough"),
+        ("tests/test_clients.py", "test_rich_descriptions"),
+        ("tests/test_clients.py", "test_round_trip"),
+        ("tests/test_clients.py", "test_supplied_network_resources_closed"),
+        ("tests/test_clients.py", "test_system_one_timeout_override"),
+        ("tests/test_clients.py", "test_task_cancellation_closes_context"),
+        ("tests/test_clients.py", "test_transport_errors"),
+        ("tests/test_clients.py", "test_unserializable_request_body_raises"),
+        ("tests/test_clients.py", "test_validation_before_network"),
+        ("tests/test_config.py", "test_empty_env_unset"),
+        ("tests/test_config.py", "test_http_client_timeout_precedence"),
+        ("tests/test_config.py", "test_invalid_timeout"),
+        ("tests/test_config.py", "test_missing_key"),
+        ("tests/test_config.py", "test_model_override"),
+        ("tests/test_config.py", "test_resolution"),
+        ("tests/test_config.py", "test_timeout_object"),
+        ("tests/test_config.py", "test_transport_and_http_client_mutually_exclusive"),
+        ("tests/test_docs.py", "test_markdown"),
+        ("tests/test_docs.py", "test_python_doctests"),
+        ("tests/test_errors.py", "test_api_error_endpoint_omits_url_credentials"),
+        ("tests/test_errors.py", "test_api_error_from_process_pool"),
+        ("tests/test_errors.py", "test_api_error_request_context"),
+        ("tests/test_errors.py", "test_error_body_edge_cases"),
+        ("tests/test_errors.py", "test_exception_reconstruction"),
+        ("tests/test_errors.py", "test_message_override"),
+        ("tests/test_integration.py", "test_live_models"),
+        ("tests/test_integration.py", "test_live_pydantic_response"),
+        ("tests/test_integration.py", "test_live_questions"),
+        ("tests/test_logging.py", "test_logger_level_controls_output"),
+        ("tests/test_logging.py", "test_secret_headers_redacted"),
+        ("tests/test_logging.py", "test_setup_logging_from_env"),
+        ("tests/test_public_api_surface.py", "test_constructor_kwargs"),
+        ("tests/test_public_api_surface.py", "test_package_exports"),
+        ("tests/test_public_api_surface.py", "test_public_members"),
+        ("tests/test_public_sync.py", "test_atomic_push_rejects_concurrent_update"),
+        ("tests/test_public_sync.py", "test_dry_run_skips_github"),
+        (
+            "tests/test_public_sync.py",
+            "test_existing_history_deletions_and_immutable_tags",
+        ),
+        ("tests/test_public_sync.py", "test_invalid_includes"),
+        ("tests/test_public_sync.py", "test_release_contributors"),
+        ("tests/test_public_sync.py", "test_sign_snapshot_and_push"),
+        ("tests/test_public_sync.py", "test_signing_failure_keeps_refs"),
+        ("tests/test_public_sync.py", "test_snapshot_and_push_retries"),
+        ("tests/test_public_sync.py", "test_unsafe_snapshots"),
+        ("tests/test_public_sync.py", "test_version_mismatch"),
+        (
+            "tests/test_pydantic_response_models.py",
+            "test_custom_response_preserves_api_errors",
+        ),
+        (
+            "tests/test_pydantic_response_models.py",
+            "test_explicit_default_response_model",
+        ),
+        ("tests/test_pydantic_response_models.py", "test_pydantic_response_validation"),
+        (
+            "tests/test_pydantic_response_models.py",
+            "test_pydantic_system_one_response_subclass",
+        ),
+        (
+            "tests/test_pydantic_response_models.py",
+            "test_standalone_pydantic_response_model",
+        ),
+        ("tests/test_questions.py", "test_covariant_question_mappings"),
+        ("tests/test_questions.py", "test_direct_encoding_omits_only_default_fields"),
+        ("tests/test_questions.py", "test_discriminators_are_automatic"),
+        ("tests/test_questions.py", "test_empty_score_criteria_is_rejected"),
+        (
+            "tests/test_questions.py",
+            "test_invalid_typed_question_is_rejected_on_construction",
+        ),
+        ("tests/test_questions.py", "test_normalization_preserves_objects"),
+        ("tests/test_questions.py", "test_normalization_preserves_raw_questions"),
+        ("tests/test_questions.py", "test_optional_noul_criteria"),
+        ("tests/test_questions.py", "test_raw_questions_require_structural_keys"),
+        ("tests/test_questions.py", "test_typed_noul_criteria_reject_unknown_fields"),
+        ("tests/test_questions.py", "test_typed_questions_reject_unknown_fields"),
+        ("tests/test_release_notes.py", "test_invalid_release_notes"),
+        ("tests/test_release_notes.py", "test_release_notes"),
+        ("tests/test_responses.py", "test_answer_attributes_and_dictionary_types"),
+        ("tests/test_responses.py", "test_answer_fields_are_frozen"),
+        ("tests/test_responses.py", "test_answer_groups_are_cached_and_not_serialized"),
+        ("tests/test_responses.py", "test_copied_response_preserves_metadata"),
+        ("tests/test_responses.py", "test_malformed_response_raises_validation_error"),
+        ("tests/test_responses.py", "test_missing_raw_raises_on_access"),
+        ("tests/test_responses.py", "test_missing_request_id_raises_on_access"),
+        ("tests/test_responses.py", "test_nested_missing_field_path"),
+        ("tests/test_responses.py", "test_public_response_types_ignore_unknown_fields"),
+        ("tests/test_responses.py", "test_response_carries_raw_http_response"),
+        ("tests/test_responses.py", "test_response_carries_request_id"),
+        ("tests/test_responses.py", "test_response_preserves_nested_json"),
+        (
+            "tests/test_responses.py",
+            "test_response_serialization_excludes_http_metadata",
+        ),
+        ("tests/test_responses.py", "test_unknown_answer_type_ignored"),
+        ("tests/test_responses.py", "test_unknown_extra_fields_tolerated"),
+        ("tests/test_retry.py", "test_async_concurrent_retry_state"),
+        ("tests/test_retry.py", "test_backoff_dates_cap_and_jitter"),
+        ("tests/test_retry.py", "test_backoff_extreme_values"),
+        ("tests/test_retry.py", "test_cancel_pending_retry"),
+        ("tests/test_retry.py", "test_concurrent_system_one_overrides"),
+        ("tests/test_retry.py", "test_connection_retry_recovers"),
+        ("tests/test_retry.py", "test_default_retry_statuses"),
+        ("tests/test_retry.py", "test_exhausted_retry_preserves_final_http_error"),
+        ("tests/test_retry.py", "test_exhausted_transport_retry"),
+        ("tests/test_retry.py", "test_invalid_backoff"),
+        ("tests/test_retry.py", "test_invalid_backoff_jitter"),
+        ("tests/test_retry.py", "test_invalid_max_retries"),
+        ("tests/test_retry.py", "test_parse_retry_after"),
+        ("tests/test_retry.py", "test_retry_policy_custom_statuses"),
+        ("tests/test_retry.py", "test_retry_policy_exceptions_and_predicate"),
+        ("tests/test_retry.py", "test_retry_policy_invalid_timeout"),
+        ("tests/test_retry.py", "test_retry_policy_max_retries"),
+        ("tests/test_retry.py", "test_retry_policy_per_call_override"),
+        ("tests/test_retry.py", "test_retry_policy_timeout_budget"),
+        ("tests/test_retry.py", "test_retry_policy_timeout_override"),
+        ("tests/test_retry.py", "test_retry_policy_wait_options"),
+        ("tests/test_retry.py", "test_server_delay_through_tenacity"),
+        ("tests/test_retry.py", "test_system_one_retry_override"),
+        ("tests/test_retry.py", "test_system_one_retry_recovers_with_overrides"),
+        ("tests/test_retry.py", "test_zero_backoff_retries"),
+        ("tests/test_types.py", "test_abstract_input_containers_encode"),
+        ("tests/test_types.py", "test_array_inputs"),
+        ("tests/test_types.py", "test_explicitly_nullable_json_values"),
+        ("tests/test_types.py", "test_json_value_and_state_exclude_top_level_none"),
+        ("tests/test_types.py", "test_raw_optional_fields_preserve_explicit_null"),
+        ("tests/test_types.py", "test_str_subclasses_fallback_to_strings"),
+        ("tests/test_typing.py", "test_public_typing"),
+    }
+)
+#: How many ``test_*`` functions each upstream file defines, derived from
+#: ``UPSTREAM_TESTS`` so that the names are the one source of truth.
+UPSTREAM_FUNCTIONS = Counter(file for file, _ in UPSTREAM_TESTS)
 
 
 @dataclass
@@ -284,13 +420,36 @@ def check_row(row: Row, deviations: set[str]) -> tuple[str | None, list[str]]:
     return "rust", faults
 
 
-def check_upstream(matrix: Matrix, upstream: Path) -> list[str]:
-    """Compare the rows with the test functions the upstream files define.
+def check_names(matrix: Matrix) -> list[str]:
+    """Compare the rows' ``(file, name)`` pairs with ``UPSTREAM_TESTS``.
 
-    Every upstream ``test_*`` function must have exactly one row - mapped to a
-    Rust test, mapped to a deviation, or excluded with a reason - and every row
-    must name an upstream function. A second row for one function is reported
-    by :func:`main` whether or not upstream is given.
+    Every pinned upstream function must have a row, and every row must name a
+    pinned function; a row that renames one, or swaps it for a made-up name,
+    fails both ways. A second row for one function is reported by :func:`main`.
+
+    Args:
+        matrix: The parsed matrix.
+
+    Returns:
+        One message per missing and per unknown pair, sorted.
+    """
+    named = {(row.file, row.name) for row in matrix.rows}
+    faults = [
+        f"{MATRIX}: upstream {file}::{name} has no row"
+        for file, name in UPSTREAM_TESTS - named
+    ]
+    faults.extend(
+        f"{MATRIX}: {file}::{name} is not an upstream test"
+        for file, name in named - UPSTREAM_TESTS
+    )
+    return sorted(faults)
+
+
+def check_upstream(matrix: Matrix, upstream: Path) -> list[str]:
+    """Compare ``UPSTREAM_TESTS`` with the functions a checkout defines.
+
+    :func:`check_names` holds the rows to the pin in both forms; this holds the
+    pin to upstream, so that the rows are checked against upstream through it.
 
     Args:
         matrix: The parsed matrix.
@@ -310,14 +469,13 @@ def check_upstream(matrix: Matrix, upstream: Path) -> list[str]:
         for file in files
         for name in UPSTREAM_TEST.findall((upstream / file).read_text(encoding="utf-8"))
     }
-    named = {(row.file, row.name) for row in matrix.rows}
     faults = [
-        f"{MATRIX}: upstream {file}::{name} has no row"
-        for file, name in defined - named
+        f"{upstream}: {file}::{name} is defined upstream but not in UPSTREAM_TESTS"
+        for file, name in defined - UPSTREAM_TESTS
     ]
     faults.extend(
-        f"{MATRIX}: {file}::{name} is not an upstream test"
-        for file, name in named - defined
+        f"{upstream}: {file}::{name} is in UPSTREAM_TESTS but not defined upstream"
+        for file, name in UPSTREAM_TESTS - defined
     )
     faults.sort()
     faults.extend(
@@ -392,6 +550,7 @@ def main(argv: list[str]) -> int:
                 f"defines {upstream}"
             )
 
+    faults.extend(check_names(matrix))
     if arguments.upstream is not None:
         faults.extend(check_upstream(matrix, arguments.upstream))
 
