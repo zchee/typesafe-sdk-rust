@@ -289,6 +289,8 @@ def faults(path: str) -> list[str]:
                 )
         if (opener := COMMENT.search(line)) is not None:
             for hit in COMMENT_TASK.finditer(line, opener.end()):
+                if hit.group(0).isupper():
+                    continue
                 found.append(
                     f"{path}:{number}:{hit.start() + 1}: "
                     f"a task marker in a comment: {hit.group(0)}"

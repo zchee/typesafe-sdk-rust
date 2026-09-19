@@ -60,10 +60,7 @@ LINE_PATTERN_CASES: dict[str, tuple[str, list[str]]] = {
     ),
     "capital task marker after a comment opener": (
         f"// {UPPER_TASK}: fix the loop",
-        [
-            f"1:4: a task marker: {UPPER_TASK}",
-            f"1:4: a task marker in a comment: {UPPER_TASK}",
-        ],
+        [f"1:4: a task marker: {UPPER_TASK}"],
     ),
     "lower-case marker after a line comment": (
         f"let x = 1; // {LOWER_TASK} later",
