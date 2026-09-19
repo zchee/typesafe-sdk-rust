@@ -156,13 +156,19 @@ def read_matrix(text: str) -> Matrix:
         if cells is None or section is None:
             continue
         if section == "Counts" and cells[0].startswith("`tests/"):
-            matrix.counts[cells[0].strip("`")] = Counts(*(int(cell) for cell in cells[1:5]))
+            matrix.counts[cells[0].strip("`")] = Counts(
+                *(int(cell) for cell in cells[1:5])
+            )
         elif section.startswith("Excluded") and cells[0].startswith("`tests/"):
             reason = EXCLUDED_PREFIX + (cells[2] if len(cells) > 2 else "")
-            matrix.rows.append(Row(cells[0].strip("`"), number, cells[1].strip("`"), "", reason))
+            matrix.rows.append(
+                Row(cells[0].strip("`"), number, cells[1].strip("`"), "", reason)
+            )
         elif section.startswith("tests/") and cells[0].startswith("`test_"):
             target = cells[2] if len(cells) > 2 else ""
-            matrix.rows.append(Row(section, number, cells[0].strip("`"), cells[1], target))
+            matrix.rows.append(
+                Row(section, number, cells[0].strip("`"), cells[1], target)
+            )
     return matrix
 
 
@@ -206,7 +212,9 @@ def defines_test(path: Path, name: str) -> bool:
         True when such a test exists.
     """
     files = sorted(path.rglob("*.rs")) if path.is_dir() else [path]
-    signature = re.compile(rf"^\s*(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?fn\s+{name}\s*[(<]")
+    signature = re.compile(
+        rf"^\s*(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?fn\s+{name}\s*[(<]"
+    )
     for file in files:
         lines = file.read_text(encoding="utf-8").split("\n")
         for index, line in enumerate(lines):
@@ -263,7 +271,10 @@ def check_row(row: Row, deviations: set[str]) -> tuple[str | None, list[str]]:
     targets = RUST_TARGET.findall(row.target)
     leftover = RUST_TARGET.sub("", row.target).replace(",", "").strip()
     if not targets or leftover:
-        return None, [*faults, f"{where}: {row.target!r} is neither Rust tests nor a deviation"]
+        return None, [
+            *faults,
+            f"{where}: {row.target!r} is neither Rust tests nor a deviation",
+        ]
     for path_text, name in targets:
         path = Path(path_text)
         if not path.exists():
@@ -289,7 +300,8 @@ def check_upstream(matrix: Matrix, upstream: Path) -> list[str]:
         One message per fault.
     """
     files = sorted(
-        path.relative_to(upstream).as_posix() for path in upstream.glob("tests/test_*.py")
+        path.relative_to(upstream).as_posix()
+        for path in upstream.glob("tests/test_*.py")
     )
     if not files:
         return [f"{upstream}: no tests/test_*.py found"]
@@ -299,9 +311,13 @@ def check_upstream(matrix: Matrix, upstream: Path) -> list[str]:
         for name in UPSTREAM_TEST.findall((upstream / file).read_text(encoding="utf-8"))
     }
     named = {(row.file, row.name) for row in matrix.rows}
-    faults = [f"{MATRIX}: upstream {file}::{name} has no row" for file, name in defined - named]
+    faults = [
+        f"{MATRIX}: upstream {file}::{name} has no row"
+        for file, name in defined - named
+    ]
     faults.extend(
-        f"{MATRIX}: {file}::{name} is not an upstream test" for file, name in named - defined
+        f"{MATRIX}: {file}::{name} is not an upstream test"
+        for file, name in named - defined
     )
     faults.sort()
     faults.extend(
@@ -322,7 +338,9 @@ def main(argv: list[str]) -> int:
         The process exit status: 0 when every check passes.
     """
     parser = argparse.ArgumentParser(description="Check docs/port-test-matrix.md.")
-    parser.add_argument("--upstream", type=Path, help="a checkout of typesafe-sdk-python")
+    parser.add_argument(
+        "--upstream", type=Path, help="a checkout of typesafe-sdk-python"
+    )
     arguments = parser.parse_args(argv)
 
     matrix = read_matrix(MATRIX.read_text(encoding="utf-8"))
@@ -337,7 +355,9 @@ def main(argv: list[str]) -> int:
     seen: set[tuple[str, str]] = set()
     for row in matrix.rows:
         if (row.file, row.name) in seen:
-            faults.append(f"{MATRIX}:{row.line}: {row.file}::{row.name} has a second row")
+            faults.append(
+                f"{MATRIX}:{row.line}: {row.file}::{row.name} has a second row"
+            )
         seen.add((row.file, row.name))
         kind, row_faults = check_row(row, deviations)
         faults.extend(row_faults)
