@@ -17,17 +17,24 @@ use std::{
 use http::{Request, Response};
 use tower_service::Service;
 use typesafe_sdk::{
-    Body, Client, Error, HttpService, HyperResponseFuture, HyperTransport, Noul, PreparedQuestions,
-    QuestionSet, Questions, ResponseBody, RetryPolicy, StatusSet, SystemOneResponse,
+    ApiError, Body, Client, Error, ErrorKind, HttpService, HyperResponseFuture, HyperTransport,
+    Noul, PreparedQuestions, QuestionSet, Questions, ResponseBody, ResponseValidationError,
+    RetryPolicy, StatusSet, SystemOneResponse,
     de::{AnswerContext, AnswerSet},
     response::{Answer, Answers, ChoiceAnswer, NoulAnswer},
 };
 
 // `Result<T, Error>` costs a pointer beside `T`.
 const _: () = assert!(size_of::<Error>() == size_of::<usize>());
+// A niche in the box makes the success case of a `Result` free as well,
+// which is what keeps the hot path from paying for the error path.
+const _: () = assert!(size_of::<Result<(), Error>>() == size_of::<usize>());
 
 const fn error_is_shareable<T: Send + Sync + 'static>() {}
 const _: () = error_is_shareable::<Error>();
+const _: () = error_is_shareable::<ErrorKind>();
+const _: () = error_is_shareable::<ApiError>();
+const _: () = error_is_shareable::<ResponseValidationError>();
 
 const fn client_is_shareable<T: Clone + Send + Sync>() {}
 const _: () = client_is_shareable::<Client>();

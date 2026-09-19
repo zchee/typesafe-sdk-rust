@@ -65,29 +65,6 @@ fn uri(text: &str) -> Uri {
     text.parse::<Uri>().expect("invariant: the test uses a URL the http crate accepts")
 }
 
-// ----------------------------------------------------- shape and marker traits
-
-const _: () = assert!(size_of::<Error>() == size_of::<usize>());
-const _: () = assert!(size_of::<Result<(), Error>>() == size_of::<usize>());
-
-#[test]
-fn an_error_is_one_pointer_wide_and_crosses_threads() {
-    fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-    assert_send_sync_static::<Error>();
-    assert_send_sync_static::<ErrorKind>();
-    assert_send_sync_static::<ApiError>();
-    assert_send_sync_static::<ResponseValidationError>();
-
-    assert_eq!(
-        size_of::<Error>(),
-        size_of::<usize>(),
-        "a Result of this error must cost one pointer"
-    );
-    // A niche in the box makes the success case of a `Result` free as well,
-    // which is what keeps the hot path from paying for the error path.
-    assert_eq!(size_of::<Result<(), Error>>(), size_of::<usize>());
-}
-
 // --------------------------------------------------------- status mapping
 
 #[test]
@@ -721,7 +698,6 @@ fn a_response_too_large_names_its_limit_and_has_no_cause() {
     );
     assert_eq!(format!("{error:?}"), "Error { kind: ResponseTooLarge { limit: 1024 } }");
     assert!(error.source().is_none());
-    assert_eq!(std::mem::size_of::<Error>(), std::mem::size_of::<usize>());
 }
 
 #[test]
