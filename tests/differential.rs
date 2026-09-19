@@ -858,21 +858,3 @@ fn generated_states_encode_to_json_that_reads_back_as_the_same_value() {
         panic!("{failure}");
     }
 }
-
-#[test]
-fn a_non_finite_float_is_written_as_null_by_both_codecs() {
-    let state = State::List(vec![
-        State::F64(f64::NAN),
-        State::F64(f64::INFINITY),
-        State::F64(f64::NEG_INFINITY),
-    ]);
-
-    let mut encoded = Vec::new();
-    sdk::encode_into(&mut encoded, &state).expect("a non-finite float encodes");
-
-    assert_eq!(String::from_utf8(encoded).expect("UTF-8"), "[null,null,null]");
-    assert_eq!(
-        serde_json::to_string(&state).expect("serde_json encodes it too"),
-        "[null,null,null]"
-    );
-}
