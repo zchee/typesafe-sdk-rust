@@ -108,7 +108,7 @@ pub(crate) fn sending(_: Exchange<'_>, _: &HeaderMap, _: Option<&bytes::Bytes>) 
 
 /// When an attempt started, read only when an `INFO` event of this crate can
 /// be recorded: the elapsed time is printed by events and by nothing else.
-pub(crate) type Started = Option<Instant>;
+type Started = Option<Instant>;
 
 /// The start of an attempt, if anything will print how long it took.
 #[cfg(feature = "tracing")]
@@ -345,14 +345,14 @@ const REDACTED: &str = "***";
 /// Nothing is copied: the view borrows the map and redacts as it writes, so a
 /// log event that is filtered out costs nothing beyond building the view.
 #[cfg(feature = "tracing")]
-pub(crate) fn redact(headers: &HeaderMap) -> RedactedHeaders<'_> {
+fn redact(headers: &HeaderMap) -> RedactedHeaders<'_> {
     RedactedHeaders(headers)
 }
 
 /// Headers as the logs show them. See [`redact`].
 #[cfg(feature = "tracing")]
 #[derive(Clone, Copy)]
-pub(crate) struct RedactedHeaders<'a>(&'a HeaderMap);
+struct RedactedHeaders<'a>(&'a HeaderMap);
 
 #[cfg(feature = "tracing")]
 impl RedactedHeaders<'_> {

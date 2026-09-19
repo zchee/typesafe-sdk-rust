@@ -315,7 +315,7 @@ pub(crate) struct Exchange<'a> {
 
 /// What a successful attempt returns: a success status, the headers and the
 /// whole body.
-pub(crate) type Received = (StatusCode, HeaderMap, Bytes);
+type Received = (StatusCode, HeaderMap, Bytes);
 
 /// Sends one attempt of a request and reads its response.
 ///

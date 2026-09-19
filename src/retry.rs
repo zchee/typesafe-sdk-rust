@@ -586,7 +586,7 @@ impl fmt::Debug for StatusSet {
 ///
 /// A call runs on [`Tokio`]'s; the crate's own tests run it on a fake whose
 /// clock stands still until the fake sleep or the test server moves it.
-pub(crate) trait Time {
+trait Time {
     /// Now, on the clock the budget is measured on.
     fn now(&self) -> Instant;
     /// Now, on the wall clock.
@@ -753,7 +753,7 @@ pub(crate) fn backoff_seconds(attempt: u32, initial: f64, max: f64, jitter: f64,
 ///
 /// NaN, zero and negative values become [`Duration::ZERO`]; a value too large
 /// for a `Duration`, infinity included, becomes [`Duration::MAX`].
-pub(crate) fn seconds_to_duration(seconds: f64) -> Duration {
+fn seconds_to_duration(seconds: f64) -> Duration {
     if seconds.is_nan() || seconds <= 0.0 {
         return Duration::ZERO;
     }
