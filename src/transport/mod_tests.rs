@@ -11,9 +11,8 @@ use crate::{
     ErrorKind,
     config::Explicit,
     constants::{RUNTIME_HEADER, SDK_HEADER},
+    test_rendering::assert_printable,
 };
-
-include!("../printable_tests.rs");
 
 /// A configuration with a key, a base URL and the given default headers.
 fn config(base_url: &str, defaults: &[(&str, &str)]) -> Config {

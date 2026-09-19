@@ -32,7 +32,10 @@ use typesafe_sdk::{
     HttpVersion, Noul, PreparedQuestions, Questions, RawQuestion, RetryPolicy, Score,
 };
 
-include!("../src/printable_tests.rs");
+#[path = "../src/test_rendering.rs"]
+mod test_rendering;
+
+use test_rendering::assert_printable;
 
 // ------------------------------------------------------------- fixtures
 

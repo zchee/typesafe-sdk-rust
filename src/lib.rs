@@ -78,6 +78,8 @@ pub mod request;
 pub mod response;
 pub mod retry;
 mod telemetry;
+#[cfg(test)]
+mod test_rendering;
 mod text;
 pub mod transport;
 

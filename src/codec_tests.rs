@@ -14,8 +14,7 @@ use proptest::prelude::*;
 use serde::{Deserialize, de::IgnoredAny};
 
 use super::*;
-
-include!("printable_tests.rs");
+use crate::test_rendering::assert_printable;
 
 // ------------------------------------------------------------- fixtures
 

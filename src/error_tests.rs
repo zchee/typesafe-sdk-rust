@@ -10,9 +10,7 @@ use std::{error::Error as StdError, time::UNIX_EPOCH};
 use http::{HeaderName, HeaderValue};
 
 use super::*;
-use crate::DecodeErrorKind;
-
-include!("printable_tests.rs");
+use crate::{DecodeErrorKind, test_rendering::assert_printable};
 
 // ------------------------------------------------------------- fixtures
 
