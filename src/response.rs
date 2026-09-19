@@ -318,11 +318,7 @@ impl Serialize for Answers {
     where
         S: Serializer,
     {
-        let mut out = serializer.serialize_map(Some(self.entries.len()))?;
-        for (name, answer) in &self.entries {
-            out.serialize_entry(name, answer)?;
-        }
-        out.end()
+        Pairs(&self.entries).serialize(serializer)
     }
 }
 
