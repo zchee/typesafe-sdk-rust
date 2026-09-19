@@ -835,3 +835,63 @@ for that pinned scenario. The plan's own assumptions inside AC-P6 - "`HeaderMap`
   picture but not to the per-call block count; a 1 MB `state` moves only the bytes, not the blocks.
 - `tracing` is off in all of these runs. A subscriber's own allocations are not part of any budget here, which matches
   AC-P6's wording ("no `tracing` subscriber").
+
+---
+
+## Allocation harness
+
+### 2026-09-19 - libtest's own allocations in a measured section
+
+**What flaked.** CI run 35416188952 on `6658076`, job `coverage`, step "Line coverage"
+(`cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85`): exit 100, a failed test, after
+63 s. The same step passed on `383e2fb`, and the uninstrumented `check` job passed on the same commit.
+
+**Reproduced** on a Linux x86_64 host (Debian 13, 44 CPUs) at `6658076`, built as cargo-llvm-cov builds
+(`-C instrument-coverage --cfg=coverage`, `--target-dir <repo>/target/llvm-cov-target`). Every test of
+`-p typesafe-sdk-rust` ran in its own process, as nextest runs it, 4 at a time, each under `taskset -c 0-3`: 4
+failures in 31 rounds x 390 tests. All four were allocation budgets, and all four had the same extra charge:
+
+| Round | Test | Measured | Normally |
+| --- | --- | --- | --- |
+| 11, 26 | `alloc_call` whole call, SDK's own | 23 blocks (the retained-body line 5 / 924) | 19 (1 / 24) |
+| 25, 27 | `alloc_encode` 64 KB string | 5 blocks, 69,508 bytes | 1, 68,608 |
+
+**+4 blocks, +900 bytes** each time. No timing-dependent test failed in those rounds.
+
+**Root cause.** dhat's `HeapStats` counts every thread of the process, and each budget is a delta of those counters.
+libtest runs a test on a thread it spawns. Right after the spawn, its main thread allocates its own bookkeeping, once
+per process: rustc 1.98.1 `library/test/src/lib.rs` lines 460-463, `running_tests.insert(id, RunningTest {
+join_handle })` and `timeout_queue.push_back(TimeoutEntry { id, desc, timeout })`, then it waits in
+`rx.recv_timeout`. A nextest process is the same libtest binary running one test, so it does the same. On a loaded
+machine the main thread can be descheduled between the spawn and those allocations, and they land in the section the
+test is measuring. The SDK's allocations did not change; the budgets were sound.
+
+**Method now used** (`tests/support/mod.rs`, shared by the four `alloc_*` tests):
+- Each asserted section runs five times after its warm-up call, and the budget is held to the **minimum**.
+- At least **three of the five** runs must equal that minimum in blocks and bytes.
+- Every run is printed (`runs of <section> blocks/bytes: ...`).
+
+Why this cannot hide a regression:
+- Another thread can only add to a process-wide count, never remove one. The SDK's cost of a repeated identical call
+  is the same every time by design, so the minimum is that cost.
+- An allocation the SDK makes on every call raises all five runs, and so the minimum.
+- One it makes on only some calls leaves fewer than three runs at the minimum and fails the stability rule.
+- The foreign bookkeeping happens once per process, and its two allocations can reach at most two runs.
+
+What is not repeated, and why:
+- `prepared()`'s first call is measured once, because only the first call is a first call.
+- The mixed-size sequence of `alloc_encode` repeats as a whole, five times from an empty scratch, and each call of it
+  is held to its own stable minimum. Its 1 MB line stays printed-only.
+
+**The frozen budgets did not move:** encode 1 block per call; decode 14 blocks / 626 bytes (budget 14 / 700), struct
+set 10 / 347; a call 19 blocks (18 without retry) above the transport's 3; `prepared()` 0 / 0;
+`Questions::prepare()` 3 / 1,524. Every one of them, measured on this machine (see **Environment**) with the harness
+above, was the same in all five runs.
+
+**Proof** on the same Linux host at `cb57396`, the same instrumented, pinned, 4-at-a-time loop: **0 failures in
+35 rounds x 390 tests**. The alloc tests ran with `--nocapture`, 140 runs of them in all. **46 windows** had one
+polluted run, never two, and it always carried the same +4 blocks / +900 bytes, e.g. `whole call 22/3405 26/4305
+22/3405 22/3405 22/3405`. That is more than the four failures before because every section now runs five times, so
+the process's one foreign charge has more windows to land in. The minimum filtered every one of them. One
+platform difference, not a pollution: the naive comparator's bytes are 2,704 on Linux x86_64 against 2,672 on the
+M3, the same 26 blocks.
