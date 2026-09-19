@@ -3,8 +3,7 @@
 //!
 //! The questions are serialized at compile time and the response decodes
 //! straight into the struct. It needs the `macros` feature, which is on by
-//! default; the manifest declares that, so cargo skips the example when the
-//! feature is off. Run it with
+//! default. Run it with
 //!
 //! ```sh
 //! TYPESAFE_API_KEY=... cargo run --example typed_answers
