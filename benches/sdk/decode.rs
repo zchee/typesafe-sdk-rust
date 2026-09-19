@@ -30,7 +30,7 @@ use crate::support::RESULT;
 
 /// A 20-answer response, built once and kept for the process so that it can
 /// be handed out as a `Bytes` that costs nothing to create.
-static TWENTY: LazyLock<Vec<u8>> = LazyLock::new(|| response_of(20));
+pub(crate) static TWENTY: LazyLock<Vec<u8>> = LazyLock::new(|| response_of(20));
 
 /// The questions `RESULT` answers, as a struct.
 #[derive(Debug, QuestionSet)]
