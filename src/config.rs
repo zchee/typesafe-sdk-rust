@@ -366,9 +366,9 @@ pub(crate) fn endpoints(base_url: &str) -> Result<Endpoints, Error> {
 
 /// Builds the `Authorization` value for `key`, flagged sensitive.
 ///
-/// This is the one place the key is read out of its secret wrapper. The value
-/// is assembled in a buffer that becomes the header's own storage, so no
-/// second copy of the key is left behind in freed memory.
+/// This is the one place the key is read out of its secret wrapper. The key
+/// is copied once, into a buffer that becomes the header value's own storage;
+/// that value is not zeroed and lives as long as the client.
 ///
 /// # Errors
 ///

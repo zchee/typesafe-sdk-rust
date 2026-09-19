@@ -197,9 +197,10 @@ impl ClientBuilder {
     /// removed and a path prefix is kept.
     ///
     /// It must be an absolute `http` or `https` URL without userinfo, query or
-    /// fragment. Do not put a credential in its path: the path is printed by
-    /// the client's `Debug` and in every error message that names an
-    /// endpoint, as the Python SDK prints it.
+    /// fragment. An `http://` base URL sends the API key unencrypted; use it
+    /// only for a local proxy or a test server. Do not put a credential in its
+    /// path: the path is printed by the client's `Debug` and in every error
+    /// message that names an endpoint, as the Python SDK prints it.
     #[must_use]
     pub fn base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = Some(url.into());

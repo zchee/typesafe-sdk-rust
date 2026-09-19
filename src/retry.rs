@@ -201,6 +201,11 @@ impl RetryPolicy {
 
     /// Whether a delay the server asks for in `retry-after-ms` or
     /// `Retry-After` replaces the backoff. On unless turned off.
+    ///
+    /// The budget set with [`timeout`](Self::timeout) is what bounds such a
+    /// delay: without a budget ([`no_timeout`](Self::no_timeout)) a server's
+    /// `Retry-After` is obeyed however long it is. Keep a budget, or turn
+    /// this off, when the server is not trusted.
     #[must_use]
     pub fn respect_retry_after(mut self, respect: bool) -> Self {
         self.respect_retry_after = respect;
@@ -261,6 +266,11 @@ impl RetryPolicy {
     }
 
     /// No budget for the whole call: only the attempt count stops retrying.
+    ///
+    /// The budget is also what bounds a delay the server asks for: without
+    /// it, a server's `Retry-After` is obeyed however long it is. Keep a
+    /// budget, or turn [`respect_retry_after`](Self::respect_retry_after)
+    /// off, when the server is not trusted.
     #[must_use]
     pub fn no_timeout(mut self) -> Self {
         self.timeout = None;

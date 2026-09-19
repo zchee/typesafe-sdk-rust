@@ -1238,10 +1238,14 @@ impl<'de> de::Visitor<'de> for RenderKey<'_> {
 ///
 /// # Invariant
 ///
-/// The text is always exactly one complete JSON value. Nothing builds a
-/// `RawJson` without the codec having established that, because the text is
-/// written into a request body unread: a second value in it would become a
-/// field of the enclosing object.
+/// The text is always exactly one complete JSON value whose structure is
+/// valid. Nothing builds a `RawJson` without the codec having established
+/// that, because the text is written into a request body unread: a second
+/// value in it would become a field of the enclosing object. Escapes inside
+/// strings are passed through unchecked: a `\u` escape with bad hex digits,
+/// or a lone surrogate half, is kept as it was written, and a strict server
+/// refuses the request that carries it. String boundaries are found the same
+/// way either way, so such an escape cannot end a string early.
 ///
 /// # Serialization
 ///

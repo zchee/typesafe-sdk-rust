@@ -244,7 +244,9 @@ async fn ask_twice(questions: &PreparedQuestions) -> Result<(), Error> {
 - **Budget rule**: before each retry, if the time the call has already taken plus the next delay
   reaches the budget, retrying stops and the call fails with the last attempt's error, unchanged.
   `RetryPolicy::no_timeout()` removes the budget. The budget is separate from the per-attempt
-  deadline set with the client's or the call's `timeout`.
+  deadline set with the client's or the call's `timeout`. Without a budget a server's
+  `Retry-After` is obeyed however long it is; keep a budget, or turn `respect_retry_after` off,
+  when the server is not trusted.
 - `predicate(|error| ...)` adds failures of the caller's choosing; it sees every failure,
   including a response that did not decode or was over the size limit.
 - **A 2xx status in the status set retries nothing**: a success response whose body does not
@@ -275,7 +277,9 @@ left unset: an explicit value always wins. A value from the environment is trimm
 Python's `str.strip()` rules), a blank one counts as unset, and one that is not UTF-8 is a
 `Config` error naming the variable. An explicit key or default model that is blank is refused
 instead of sent. Trailing slashes come off the base URL, and a path prefix is kept
-(`https://example.test/prefix///` sends to `https://example.test/prefix/v1/systemone`). The
+(`https://example.test/prefix///` sends to `https://example.test/prefix/v1/systemone`). An
+`http://` base URL is accepted but sends the API key unencrypted: use one only for a local proxy
+or a test server. The
 per-attempt deadline runs from the first byte sent to the last byte received: a multi-megabyte
 `state` on a slow link can exceed 10 s and be retried, so raise the deadline for large states.
 
@@ -390,7 +394,8 @@ application's own filter on the `typesafe_sdk` target.
 
 - **The API key** is held as a `secrecy::SecretString` until it becomes the `Authorization`
   header value, which is flagged sensitive; no `Debug` or `Display` of this crate prints it, and
-  no error message repeats it.
+  no error message repeats it. An `http://` base URL sends it unencrypted, so use one only for a
+  local proxy or a test server.
 - **Server text is escaped and cut.** Every message read from a response body (whichever member
   it came from, or the body itself when no member holds one) has its control characters and
   text-hiding format characters written as Rust escapes (`\n`, `\u{1b}`, `\u{202e}`) and is cut
