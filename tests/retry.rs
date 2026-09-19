@@ -171,6 +171,9 @@ fn a_status_set_holds_0_to_639_and_prints_runs_as_ranges() {
     assert!(set.is_empty());
     assert_eq!(format!("{set:?}"), "{}");
     assert!(set.insert(639), "the last status it can hold");
+    assert!(!set.is_empty(), "a set holding only 639, in its last word, is not empty");
+    let first_word: StatusSet = [0].into_iter().collect();
+    assert!(!first_word.is_empty(), "a set holding only 0, in its first word, is not empty");
     assert!(!set.insert(639), "already there");
     assert!(!set.insert(640), "beyond the last status");
     assert!(!set.insert(u16::MAX));
