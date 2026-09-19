@@ -289,51 +289,18 @@ fn a_struct_cannot_be_named_like_a_helper_of_the_expansion() {
              struct"
         )
     };
-    let cases: [DeriveInput; 7] = [
+    // A struct asking one yes/no question, named `name`.
+    let named = |name: &str| -> DeriveInput {
+        let ident: Ident = syn::parse_str(name)
+            .unwrap_or_else(|error| panic!("{name:?} is not an identifier: {error}"));
         parse_quote!(
-            struct __QuestionSetField {
+            struct #ident {
                 #[noul]
                 a: NoulAnswer,
             }
-        ),
-        parse_quote!(
-            struct __QuestionSetFieldVisitor {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct __QuestionSetVisitor {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct __D {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct __M {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct __private {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct r#__D {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-    ];
-    let names = [
+        )
+    };
+    let reserved_inputs = [
         "__QuestionSetField",
         "__QuestionSetFieldVisitor",
         "__QuestionSetVisitor",
@@ -342,47 +309,16 @@ fn a_struct_cannot_be_named_like_a_helper_of_the_expansion() {
         "__private",
         "r#__D",
     ];
-    for (input, name) in cases.iter().zip(names) {
-        assert_eq!(refused(input), [message(name)], "input `{name}`");
+    for name in reserved_inputs {
+        assert_eq!(refused(&named(name)), [message(name)], "input `{name}`");
     }
     assert_eq!(reserved_names(), reserved);
 
     // Helpers that never share a scope with the struct's name, and names
     // that only resemble the reserved ones, are free.
-    let free: [DeriveInput; 5] = [
-        parse_quote!(
-            struct __D2 {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct __E {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct PREPARED {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct __QuestionSet {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-        parse_quote!(
-            struct __Private {
-                #[noul]
-                a: NoulAnswer,
-            }
-        ),
-    ];
-    for input in &free {
-        assert_eq!(parsed(input).ident, input.ident);
+    for name in ["__D2", "__E", "PREPARED", "__QuestionSet", "__Private"] {
+        let input = named(name);
+        assert_eq!(parsed(&input).ident, input.ident, "input `{name}`");
     }
 
     // The problems of the rest of the input are still reported with it.
