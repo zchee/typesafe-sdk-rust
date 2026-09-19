@@ -328,7 +328,7 @@ fn a_caller_supplied_message_replaces_the_one_in_the_body() {
         assert_eq!(error.to_string(), rendered);
         assert_eq!(error.status(), status(429));
         assert_eq!(error.request_id(), None);
-        assert_eq!(error.retry_after_at(now()), Some(Duration::from_millis(125)));
+        assert_eq!(parse_retry_after(error.headers(), now()), Some(Duration::from_millis(125)));
     }
 }
 
@@ -918,10 +918,10 @@ fn retry_after_is_read_for_any_status_that_carries_it() {
         None,
     );
     assert_eq!(error.kind(), ApiErrorKind::InternalServer);
-    assert_eq!(error.retry_after_at(now()), Some(Duration::from_millis(60_001)));
+    assert_eq!(parse_retry_after(error.headers(), now()), Some(Duration::from_millis(60_001)));
 
     let none = api(500, "{}");
-    assert_eq!(none.retry_after_at(now()), None);
+    assert_eq!(parse_retry_after(none.headers(), now()), None);
     // The public accessor reads the clock; with no date in the headers the
     // answer does not depend on it.
     assert_eq!(none.retry_after(), None);

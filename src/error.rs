@@ -415,12 +415,7 @@ impl ApiError {
     /// Read for any status, not only 429: a 503 may carry the same headers.
     /// Reads the system clock, because `Retry-After` may be an HTTP date.
     pub fn retry_after(&self) -> Option<Duration> {
-        self.retry_after_at(SystemTime::now())
-    }
-
-    /// The same, measuring an HTTP date against `now` instead of the clock.
-    pub(crate) fn retry_after_at(&self, now: SystemTime) -> Option<Duration> {
-        parse_retry_after(&self.headers, now)
+        parse_retry_after(&self.headers, SystemTime::now())
     }
 }
 

@@ -313,7 +313,7 @@ impl RetryPolicy {
             };
             let asked = match error.kind() {
                 ErrorKind::Api(api) if names_delay(api.headers()) => {
-                    api.retry_after_at(time.system_now())
+                    parse_retry_after(api.headers(), time.system_now())
                 }
                 // A response that did not decode is still a response, and a
                 // predicate may have asked for it to be retried.

@@ -1323,7 +1323,7 @@ fn an_error_body_that_is_not_utf8_becomes_its_own_lossy_message() {
         // 200-character cut.
         assert_eq!(error.message(), String::from_utf8_lossy(body), "{case}");
         assert_eq!(
-            error.retry_after_at(std::time::SystemTime::UNIX_EPOCH),
+            crate::error::parse_retry_after(error.headers(), std::time::SystemTime::UNIX_EPOCH),
             Some(std::time::Duration::from_secs(3)),
             "{case}: the headers are still read"
         );
