@@ -43,13 +43,6 @@ use crate::{
     text,
 };
 
-/// How much of the server's text an API failure's message holds before it is
-/// cut, whichever part of the body the text came from.
-///
-/// Counted in characters after escaping, not in bytes, so a multi-byte body is
-/// cut at the same place a reader would see it cut.
-const MAX_ERROR_BODY_LENGTH: usize = text::MAX_MESSAGE_CHARS;
-
 /// What a failure this crate could not attribute to itself was caused by.
 type Cause = Box<dyn StdError + Send + Sync>;
 
@@ -943,7 +936,7 @@ fn unparsed_message(body: &[u8], failure: &DecodeError) -> Box<str> {
 
 /// The server's `text` as a message holds it: escaped through the one helper
 /// for text this SDK did not write, with a backslash kept as it is, and cut at
-/// [`MAX_ERROR_BODY_LENGTH`] characters, counted after escaping and marked with
+/// [`text::MAX_MESSAGE_CHARS`] characters, counted after escaping and marked with
 /// U+2026 when anything was left off. A cut never splits an escape, and the
 /// text past it is not copied into the message.
 ///
@@ -952,7 +945,7 @@ fn unparsed_message(body: &[u8], failure: &DecodeError) -> Box<str> {
 /// one of them into `\\n`; what the message loses in exactness `body_text`
 /// keeps.
 fn bounded(text: &str) -> Box<str> {
-    text::bounded(&text, MAX_ERROR_BODY_LENGTH).into_boxed_str()
+    text::bounded(&text, text::MAX_MESSAGE_CHARS).into_boxed_str()
 }
 
 /// The first byte of `body` that is not JSON whitespace.

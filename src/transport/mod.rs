@@ -472,10 +472,6 @@ fn connection(error: impl Into<BoxError>) -> Error {
     }
 }
 
-/// The most characters of a transport's own text a connection error's message
-/// holds after its `Connection error: ` prefix, as for an error body.
-const MAX_CONNECTION_MESSAGE_CHARS: usize = 200;
-
 /// `Connection error: ` and then every message of the error chain, joined
 /// with `: `.
 ///
@@ -489,7 +485,7 @@ const MAX_CONNECTION_MESSAGE_CHARS: usize = 200;
 /// platform refused, and whatever a caller's own transport puts in its
 /// `Display`. So every link is written as text this SDK did not write -
 /// control and format characters escaped - and the whole of it after the
-/// prefix is cut at [`MAX_CONNECTION_MESSAGE_CHARS`] characters and marked
+/// prefix is cut at [`text::MAX_MESSAGE_CHARS`] characters and marked
 /// with U+2026; the full chain stays reachable through
 /// [`source`](StdError::source). A backslash is written as it is: h2 and
 /// rustls already print their own text through `Debug`, where a doubled
@@ -500,7 +496,7 @@ fn connection_message(error: &(dyn StdError + 'static)) -> String {
 
     let mut message = SafeText::after(
         String::from("Connection error: "),
-        MAX_CONNECTION_MESSAGE_CHARS,
+        text::MAX_MESSAGE_CHARS,
         Backslash::Keep,
     );
     let mut link = Some(error);

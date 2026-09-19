@@ -284,10 +284,7 @@ fn text_a_transport_chose_is_escaped_and_cut_and_its_error_kept_whole() {
     assert!(matches!(error.kind(), ErrorKind::Connection), "{error:?}");
     let rendered = error.to_string();
     assert_eq!(rendered, loud_message());
-    assert_eq!(
-        rendered.chars().count(),
-        "Connection error: ".len() + MAX_CONNECTION_MESSAGE_CHARS + 1
-    );
+    assert_eq!(rendered.chars().count(), "Connection error: ".len() + text::MAX_MESSAGE_CHARS + 1);
     for shown in [rendered.clone(), format!("{rendered:?}")] {
         assert_printable(&shown);
     }
