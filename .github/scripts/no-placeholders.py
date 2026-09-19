@@ -65,14 +65,14 @@ IGNORE = "ign" + "ore"
 #: attempt never splits a run of whitespace two ways.
 CFG_ATTR = re.compile(r"#\s*+(?:!\s*+)?\[\s*+cfg_attr\s*+\(")
 
-#: One token of Rust source, read both in a whole ``.rs`` file and in an
-#: attribute's arguments. The literals and comments are opaque: nothing inside
-#: them opens or closes a delimiter, is a word or starts an attribute. A
-#: string or raw string left open runs to the end of the file. Escapes are
-#: read, not checked: a ``\u{..}`` takes any run of hex digits and underscores,
-#: since Rust caps its digits at six but not its underscores. Every unbounded
-#: repetition is possessive and every alternative starts on a character that
-#: it then consumes, so a match never backtracks over what it has read.
+#: One token of an attribute's arguments, read as Rust source. The literals
+#: and comments are opaque: nothing inside them opens or closes a delimiter or
+#: is a word. A string or raw string left open runs to the end of the file.
+#: Escapes are read, not checked: a ``\u{..}`` takes any run of hex digits and
+#: underscores, since Rust caps its digits at six but not its underscores.
+#: Every unbounded repetition is possessive and every alternative starts on a
+#: character that it then consumes, so a match never backtracks over what it
+#: has read.
 TOKEN = re.compile(
     r"""
       (?P<space>\s++)
@@ -94,17 +94,17 @@ TOKEN = re.compile(
 #: What opens or closes a block comment; Rust nests them.
 BLOCK_COMMENT = re.compile(r"/\*|\*/")
 
-#: A run of the characters rustc reads as whitespace. It is not ``\s``, which
-#: leaves out two of them and takes in others, such as a no-break space.
-RUST_SPACE = re.compile(
-    r"[\t\n\v\f\r \x85"
-    + "".join(chr(code) for code in (0x200E, 0x200F, 0x2028, 0x2029))
-    + "]++"
-)
+#: The characters the walks over one file's attribute arguments may read in
+#: total: this many times the file's length, plus ``WALK_ALLOWANCE``. The
+#: walks of a file's own attributes read it about once, so this leaves room
+#: for three walks that run to its end, and a small file for many more.
+WALK_BUDGET = 4
 
-#: The start of a doc comment, outer or inner: ``///`` but not ``////``,
-#: ``/**`` but neither ``/***`` nor ``/**/``, and ``//!`` and ``/*!``.
-DOC_COMMENT = re.compile(r"//(?:/(?!/)|!)|/\*(?:\*(?![*/])|!)")
+#: The part of the walks' budget that does not grow with the file: 64 KiB.
+WALK_ALLOWANCE = 1 << 16
+
+#: The most characters of an attribute a hit shows; a longer one is cut.
+SHOWN_WIDTH = 100
 
 
 def block_comment_end(text: str, start: int) -> int:
@@ -156,58 +156,26 @@ def token_at(text: str, start: int) -> tuple[re.Match[str], int]:
     return token, token.end()
 
 
-def source_start(text: str) -> int:
-    """Where rustc starts reading the tokens of a Rust source file.
-
-    rustc drops a byte-order mark at the start of the file, and then a first
-    line that starts with ``#!``, unless the next thing after the ``#!``,
-    past whitespace and comments that are not doc comments (on any number of
-    lines), is a ``[``: that is an inner attribute, read as tokens. Anything
-    else, the end of the file and a doc comment included, makes the line a
-    shebang for the shell, and a quote or a ``/*`` in it opens nothing.
-
-    Args:
-        text: The whole file.
-
-    Returns:
-        The position after a byte-order mark, and after it the end of a
-        shebang line, or 0 when the file starts with neither.
-    """
-    start = 1 if text.startswith(chr(0xFEFF)) else 0
-    if not text.startswith("#!", start):
-        return start
-    position = start + 2
-    while position < len(text):
-        if (space := RUST_SPACE.match(text, position)) is not None:
-            position = space.end()
-        elif text.startswith(("//", "/*"), position) and not DOC_COMMENT.match(
-            text, position
-        ):
-            position = token_at(text, position)[1]
-        else:
-            break
-    if text.startswith("[", position):
-        return start
-    line_end = text.find("\n", start)
-    return len(text) if line_end < 0 else line_end
-
-
-def attribute_end(text: str, start: int) -> tuple[int, int | None]:
+def attribute_end(text: str, start: int, stop: int) -> tuple[int, int | None] | None:
     """Walk an attribute's arguments once, up to the parenthesis closing them.
 
     Args:
         text: The whole file.
         start: The position just after the ``(`` that opens the arguments.
+        stop: The position at or after which the walk starts no token.
 
     Returns:
         The position just after the closing parenthesis (the end of the file
         when there is none), and the end of the first ``ignore`` word among
-        the arguments outside every literal and comment, or ``None``.
+        the arguments outside every literal and comment, or ``None``; or
+        ``None`` alone when the walk reached ``stop`` before either end.
     """
     depth = 1
     hit: int | None = None
     position = start
     while position < len(text):
+        if position >= stop:
+            return None
         token, position = token_at(text, position)
         match token.lastgroup:
             case "open":
@@ -223,7 +191,7 @@ def attribute_end(text: str, start: int) -> tuple[int, int | None]:
     return len(text), hit
 
 
-def switched_off(text: str, rust: bool) -> Iterator[tuple[int, int]]:
+def switched_off(text: str) -> Iterator[tuple[int, int | None]]:
     """Every ``cfg_attr`` attribute that switches a test off.
 
     rustfmt writes a long ``cfg_attr`` over several lines, and its arguments
@@ -235,48 +203,50 @@ def switched_off(text: str, rust: bool) -> Iterator[tuple[int, int]]:
     (``ignore = "reason"``, a nested ``cfg_attr`` and the raw identifier
     ``r#ignore`` included) outside every literal and comment.
 
-    Where an opener may start depends on the file. In Rust source the whole
-    file is walked once, one ``TOKEN`` at a time, from where rustc starts
-    reading it (``source_start``: past a byte-order mark and a shebang), and an
-    attribute is tried only where a token starts, so an opener quoted in a
-    string, a char literal or a comment (a doc comment included) is not an
-    attribute, and it cannot throw the walk out of step with the file's
-    literals and hide a real attribute after it. Any other file has no Rust
-    structure to trust, so an opener is searched for anywhere in it, and one
-    quoted in prose is reported: the safe side.
+    Every opener in the file is walked, each on its own, in every kind of
+    file: where one walk stopped has no say in which openers are tried, and
+    nothing outside an attribute's arguments is lexed. So neither a walk
+    thrown out of step with the file's literals nor a mis-read of Rust
+    elsewhere in the file (whose lexing depends on its edition) can hide a
+    later attribute. Two costs of that are accepted, both on the safe side:
+    an attribute quoted whole in a string, a comment or a doc comment is
+    reported; and a walk from an opener quoted without its closing
+    parenthesis reads what follows as arguments, out of step with the file's
+    literals, and may report an ``ignore`` far from it, at the quoted
+    opener's line. A hit shows at most ``SHOWN_WIDTH`` characters for that.
 
-    The file is read a constant number of times. Two positions only move
-    forward. One is the file's walk in Rust source, since each token ends
-    after it starts, or the opener search in any other file. The other is an
-    attribute's walk: it starts after its opener, and the file's walk or the
-    search resumes where it stopped. So no position is read by two walks, and
-    an attribute left open ends at the end of the file and reads what follows
-    it once, as its arguments. In Rust source the opener is tried where each
-    token starts. A try fails at its first character unless that is a ``#``;
-    after a ``#`` it reads only whitespace runs, one ``!``, one ``[`` and one
-    ``cfg_attr``, never another ``#``, so no character is read by two tries
-    from a ``#``, and what a failed try read the file's walk then reads once
-    more as its next tokens. Finding where Rust source starts reads a first
-    line that starts with ``#!``, and the whitespace and comments after it,
-    once before the walk does.
+    The work is linear in the file. ``finditer`` reads it once: a try fails
+    at its first character unless that is a ``#``, and after one reads only
+    whitespace runs, one ``!``, one ``[`` and ``cfg_attr``, never another
+    ``#``, so no character is read by two tries. A walk reads each token of
+    its arguments once, but walks overlap: an attribute left open reads to
+    the end of the file, and so may every opener after it. So all the walks
+    share one budget of characters, ``WALK_BUDGET`` times the file's length
+    plus ``WALK_ALLOWANCE``. A walk starts no token beyond what is left of
+    it, and the last token it reads ends at the end of the file at most, so
+    the walks read at most the budget and the file once more. Once the
+    budget is spent the walk that ran out is reported, and no later opener
+    is walked: a file that cannot be read in that time fails the scan rather
+    than passing unread. Real code stays far below it: a walk overlaps
+    another only when its opener lies inside the other's arguments, quoted
+    or nested, or after one left open.
 
     Args:
         text: The whole file.
-        rust: Whether the file is Rust source.
 
     Yields:
-        The start of each such attribute and the end of its ``ignore``.
+        The start of each such attribute and the end of its ``ignore``; last,
+        if the budget runs out, the start of the opener whose walk it stopped,
+        and ``None``.
     """
-    position = source_start(text) if rust else 0
-    while position < len(text):
-        if rust:
-            opener = CFG_ATTR.match(text, position)
-            if opener is None:
-                position = token_at(text, position)[1]
-                continue
-        elif (opener := CFG_ATTR.search(text, position)) is None:
+    budget = WALK_BUDGET * len(text) + WALK_ALLOWANCE
+    for opener in CFG_ATTR.finditer(text):
+        walked = attribute_end(text, opener.end(), opener.end() + budget)
+        if walked is None:
+            yield opener.start(), None
             return
-        position, hit = attribute_end(text, opener.end())
+        end, hit = walked
+        budget -= end - opener.end()
         if hit is not None:
             yield opener.start(), hit
 
@@ -328,15 +298,21 @@ def faults(path: str) -> list[str]:
     # The line and column of each hit are counted on from the previous one,
     # so many hits in one file, or on one long line, do not reread the text.
     number, line_start, counted = 1, 0, 0
-    for start, end in switched_off(text, rust=path.endswith(".rs")):
+    for start, end in switched_off(text):
         number += text.count("\n", counted, start)
         line_start = text.rfind("\n", counted, start) + 1 or line_start
         counted = start
+        where = f"{path}:{number}:{start - line_start + 1}"
+        if end is None:
+            found.append(
+                f"{where}: cfg_attr attributes not read from here on: too many"
+                " of the file's cfg_attr attributes never close"
+            )
+            continue
         shown = " ".join(text[start:end].split())
-        found.append(
-            f"{path}:{number}:{start - line_start + 1}: "
-            f"a test switched off under a condition: {shown}"
-        )
+        if len(shown) > SHOWN_WIDTH:
+            shown = shown[: SHOWN_WIDTH - 3] + "..."
+        found.append(f"{where}: a test switched off under a condition: {shown}")
     return found
 
 
