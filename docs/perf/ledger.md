@@ -634,7 +634,7 @@ That is correct behaviour and needs no change, but it is the number to look at i
 slower than the link allows - not the server's window.
 
 **Keep-alive behaviour is NOT measured here.** Whether the load balancer counts an HTTP/2 PING as activity needs an
-authenticated idle test (plan section 8 step 13), which is out of scope for this task.
+authenticated idle test.
 
 ## S3 - request compression
 
