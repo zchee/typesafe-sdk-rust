@@ -1,5 +1,9 @@
 # Line coverage
 
+Measured at commit `2231589` with
+`cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85 --show-missing-lines`;
+every line number below is a line of that commit.
+
 The published crate `typesafe-sdk-rust` is held to 85% line coverage by CI's
 `coverage` job. This page records the measured total and every line the tests
 do not reach, with the reason it is not reached.
@@ -12,22 +16,21 @@ The CI form (`.github/workflows/ci.yaml`, job `coverage`):
 cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85
 ```
 
-The list below comes from the same run with `--show-missing-lines` added.
-Measured on macOS arm64 with rustc 1.98.1 and cargo-llvm-cov, at the commit
-that added this page.
+The list below comes from the same run with `--show-missing-lines` added,
+on macOS arm64 with rustc 1.98.1 and cargo-llvm-cov.
 
 ## Total
 
 | Lines | Missed | Line coverage | Regions | Missed | Functions | Missed |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4,023 | 162 | **95.97%** | 6,274 | 352 | 708 | 34 |
+| 4,047 | 162 | **96.00%** | 6,305 | 352 | 710 | 34 |
 
 A line counts as covered when any test executes it in any instantiation of the
 code it belongs to.
 
 ## Uncovered lines
 
-Line numbers are those of the commit that added this page. "Cheap to cover"
+Line numbers are those of commit `2231589`. "Cheap to cover"
 marks a line a short test would reach; those tests belong in sibling test files
 this page's author did not own, so they are listed here instead of written.
 
@@ -61,7 +64,7 @@ this page's author did not own, so they are listed here instead of written.
 
 | Lines | Why |
 | --- | --- |
-| 876, 889 | Level-keyed probabilities on a choice, or option-keyed ones on a score. Probabilities are read in the shape the answer's `type` already chose, or held raw until it is known, so the two mixed states cannot arise; the arms keep the `match` exhaustive. |
+| 914, 927 | Level-keyed probabilities on a choice, or option-keyed ones on a score. Probabilities are read in the shape the answer's `type` already chose, or held raw until it is known, so the two mixed states cannot arise; the arms keep the `match` exhaustive. |
 
 ### `src/models.rs`
 
@@ -79,17 +82,17 @@ this page's author did not own, so they are listed here instead of written.
 
 | Lines | Why |
 | --- | --- |
-| 311 | A response-validation error whose headers name a delay, retried because a caller's predicate asked for it. **Cheap to cover** with a predicate test (`src/retry_tests.rs`). |
-| 484 | `StatusSet::is_empty` on a set with a status in a later word. **Cheap to cover** (`src/retry_tests.rs`). |
-| 652-653 | The real-clock arm of the test-only `run` (`#[cfg(test)]`): the crate's unit tests always pass a fake clock, and the integration tests run the non-test `run`, which is covered. |
+| 321 | A response-validation error whose headers name a delay, retried because a caller's predicate asked for it. **Cheap to cover** with a predicate test (`src/retry_tests.rs`). |
+| 494 | `StatusSet::is_empty` on a set with a status in a later word. **Cheap to cover** (`src/retry_tests.rs`). |
+| 662-663 | The real-clock arm of the test-only `run` (`#[cfg(test)]`): the crate's unit tests always pass a fake clock, and the integration tests run the non-test `run`, which is covered. |
 
 ### `src/telemetry.rs`
 
 | Lines | Why |
 | --- | --- |
-| 232-235 | The labels a failed-call event gives an API, response-validation, invalid-request or configuration error. The event tests assert the transport failures only. **Cheap to cover** (`src/telemetry_tests.rs`). |
-| 261 | The elapsed time of an event with no start instant (`-`). Every event the tests record has one. |
-| 304 | A logged text holding bytes that are not UTF-8, written as U+FFFD. **Cheap to cover** (`src/telemetry_tests.rs`). |
+| 233-236 | The labels a failed-call event gives an API, response-validation, invalid-request or configuration error. The event tests assert the transport failures only. **Cheap to cover** (`src/telemetry_tests.rs`). |
+| 262 | The elapsed time of an event with no start instant (`-`). Every event the tests record has one. |
+| 324 | A logged text holding bytes that are not UTF-8, written as U+FFFD. **Cheap to cover** (`src/telemetry_tests.rs`). |
 
 ### `src/transport/hyper.rs`
 
