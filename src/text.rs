@@ -164,9 +164,6 @@ impl fmt::Write for Untrusted<'_> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         let mut written = 0usize;
         for character in text.chars() {
-            if self.into.full {
-                break;
-            }
             match self.into.character(character, &mut written, usize::MAX) {
                 Some(len) => written += len,
                 None => break,
