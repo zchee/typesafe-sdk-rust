@@ -345,24 +345,31 @@ pub(crate) async fn attempt<S>(
 where
     S: HttpService,
 {
-    let mut headers = exchange.base_headers.clone();
-    for (name, value) in exchange.call_headers {
-        headers.insert(name.clone(), value.clone());
-    }
-    if retry > 0 {
-        headers.insert(RETRY_COUNT_HEADER, HeaderValue::from(retry));
-    }
-
     let events = telemetry::Exchange::new(exchange.method, exchange.uri, retry);
-    telemetry::sending(events, &headers, body.as_ref());
-    let started = telemetry::clock();
+    // The header map and the request are built inside a block so that their
+    // storage ends before the await. An async function keeps every local of
+    // a scope that is still open when it suspends, even one whose value was
+    // moved out, so written at the top level the two would ride in the
+    // future beside the copy the transport call already holds: 352 bytes of
+    // every call's future, which tips it over the size at which tokio boxes a
+    // spawned future in a debug build (2,048 bytes).
+    let (started, exchanged) = {
+        let mut headers = exchange.base_headers.clone();
+        for (name, value) in exchange.call_headers {
+            headers.insert(name.clone(), value.clone());
+        }
+        if retry > 0 {
+            headers.insert(RETRY_COUNT_HEADER, HeaderValue::from(retry));
+        }
+        telemetry::sending(events, &headers, body.as_ref());
+        let started = telemetry::clock();
 
-    let mut request = Request::new(body.map_or_else(Body::empty, Body::from));
-    *request.method_mut() = exchange.method.clone();
-    *request.uri_mut() = exchange.uri.clone();
-    *request.headers_mut() = headers;
-
-    let exchanged = exchange_once(service, request, exchange.max_response_bytes);
+        let mut request = Request::new(body.map_or_else(Body::empty, Body::from));
+        *request.method_mut() = exchange.method.clone();
+        *request.uri_mut() = exchange.uri.clone();
+        *request.headers_mut() = headers;
+        (started, exchange_once(service, request, exchange.max_response_bytes))
+    };
     let outcome = match exchange.deadline {
         Some(deadline) => tokio::time::timeout(deadline, exchanged)
             .await
@@ -420,13 +427,17 @@ where
 {
     // A clone per call, as `tower` intends: readiness belongs to the handle
     // that is then called, and a shared one would let another task take the
-    // slot this one waited for.
-    let mut service = service.clone();
-    poll_fn(|cx| service.poll_ready(cx))
-        .await
-        .map_err(|error| Failure::Error(connection(error)))?;
-    let response =
-        service.call(request).await.map_err(|error| Failure::Error(connection(error)))?;
+    // slot this one waited for. The handle is dropped once the call has been
+    // made: the response future owns what it needs, and a handle kept to the
+    // end would be stored in this future through the whole body read.
+    let called = {
+        let mut service = service.clone();
+        poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .map_err(|error| Failure::Error(connection(error)))?;
+        service.call(request)
+    };
+    let response = called.await.map_err(|error| Failure::Error(connection(error)))?;
     let (parts, body) = response.into_parts();
 
     // A declared length over the limit is refused before a byte is read.
