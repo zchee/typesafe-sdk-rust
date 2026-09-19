@@ -67,7 +67,10 @@ use syn::{DeriveInput, parse_macro_input};
 ///
 /// The generated code reaches the SDK as `::typesafe_sdk`. Where it is known
 /// by another path, such as a re-export, the container attribute
-/// `#[question_set(crate = path::to::sdk)]` names that path.
+/// `#[question_set(crate = path::to::sdk)]` names that path. A dependency
+/// renamed in `Cargo.toml`, as `sdk = { package = "typesafe-sdk-rust", ... }`,
+/// is one such case: the generated code still names `::typesafe_sdk`, so the
+/// struct needs `#[question_set(crate = ::sdk)]`.
 ///
 /// # Limits
 ///
