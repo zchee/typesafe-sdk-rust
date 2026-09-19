@@ -137,7 +137,6 @@ internals = []
 bytes = { workspace = true }
 # The names a response owns (model, answer, choice pick and option names): a
 # name of up to 24 bytes is stored inline, so decoding one allocates nothing.
-# Only `src/name.rs` names the crate.
 compact_str = { workspace = true }
 # The random draw of the retry backoff's jitter.
 fastrand = { workspace = true }
