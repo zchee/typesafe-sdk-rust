@@ -441,7 +441,7 @@ fn a_zero_timeout_is_the_upstream_error_and_any_positive_one_is_kept() {
 /// No deadline is asked for by name, and then no timer is armed at all; it is
 /// never spelled as a very long deadline, which a clock can overflow.
 #[test]
-fn no_timeout_is_no_deadline_and_the_last_setting_wins() {
+fn a_deadline_or_no_deadline_is_kept_as_set() {
     let none = Config::resolve(
         Explicit { api_key: Some("test-key".into()), timeout: Some(None), ..Explicit::default() },
         no_env,
@@ -456,11 +456,6 @@ fn no_timeout_is_no_deadline_and_the_last_setting_wins() {
     };
     let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
     assert_eq!(config.timeout(), Some(Duration::from_secs(3)));
-
-    let explicit =
-        Explicit { api_key: Some("test-key".into()), timeout: Some(None), ..Explicit::default() };
-    let config = Config::resolve(explicit, no_env).unwrap_or_else(|error| panic!("{error:?}"));
-    assert_eq!(config.timeout(), None);
 }
 
 // -------------------------------------------------------- response limit
