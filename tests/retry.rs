@@ -28,6 +28,10 @@ use typesafe_sdk::{
     StatusSet,
 };
 
+#[cfg(feature = "tracing")]
+#[path = "support/recorder.rs"]
+mod recorder;
+
 /// `RESULT` of upstream `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
@@ -463,20 +467,10 @@ async fn concurrent_calls_on_several_threads_keep_their_own_policies() {
 /// and without anything the failed response carried.
 #[cfg(feature = "tracing")]
 mod logging {
-    use std::{
-        fmt::{self, Write as _},
-        sync::Mutex,
-    };
-
-    use tracing::{
-        Event, Level, Metadata, Subscriber,
-        field::{Field, Visit},
-        span,
-    };
+    use tracing::Level;
 
     use super::*;
-
-    include!("support/logging.rs");
+    use crate::recorder::{Recorder, assert_timed, install};
 
     #[tokio::test]
     async fn a_retry_is_announced_at_info_before_it_is_sent() {

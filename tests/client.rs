@@ -32,6 +32,9 @@ use typesafe_sdk::{
     PreparedQuestions, Questions, RawQuestion, RetryPolicy, Score,
 };
 
+#[cfg(feature = "tracing")]
+#[path = "support/recorder.rs"]
+mod recorder;
 #[path = "../src/test_rendering.rs"]
 mod test_rendering;
 
@@ -1303,17 +1306,10 @@ async fn dropping_a_call_in_flight_cancels_it() {
 /// at `TRACE` only (README deviation row "DEBUG logs full bodies").
 #[cfg(feature = "tracing")]
 mod logging {
-    use std::fmt::{self, Write as _};
-
-    use tracing::{
-        Event, Level, Metadata, Subscriber,
-        field::{Field, Visit},
-        span,
-    };
+    use tracing::Level;
 
     use super::*;
-
-    include!("support/logging.rs");
+    use crate::recorder::{Recorder, assert_timed, install};
 
     impl Recorder {
         fn text(&self) -> String {
