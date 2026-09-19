@@ -8,6 +8,9 @@ name = "typesafe-sdk-rust-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+# The root workspace's license, spelled out because this is a workspace of its
+# own: `cargo deny` refuses a crate without one, private or not.
+license = "Apache-2.0"
 
 [package.metadata]
 cargo-fuzz = true
