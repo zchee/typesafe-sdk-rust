@@ -169,9 +169,10 @@ fn the_future_of_every_call_is_send() {
 /// response future is the larger one), so what is guarded there is growth:
 /// the bounds are the sizes measured on macOS arm64 and Linux x86_64 -
 /// identical on both, in both profiles, 24 bytes less each without the
-/// default features - plus 32 bytes. Windows has not been measured, so it
-/// keeps the looser bounds the guard had before. Raising a bound is a
-/// decision to state, not a number to bump.
+/// default features - plus 32 bytes. Targets other than macOS and Linux
+/// (Windows among them) have not been measured, so they keep the looser
+/// bounds the guard had before. Raising a bound is a decision to state, not
+/// a number to bump.
 #[test]
 fn the_future_of_every_call_stays_small() {
     // Tokio 1.53.1 `runtime/mod.rs`: the debug build's `BOX_FUTURE_THRESHOLD`.

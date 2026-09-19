@@ -935,9 +935,10 @@ cargo bench --all-features --bench loopback                     # Linux, not pin
 ```
 
 Instruction counts are callgrind `Ir`, the instruction component of CodSpeed's simulation, taken without CodSpeed's
-runner (which is installed by its GitHub action and is not on the host), a token, an account or an upload. `cargo codspeed build` produces the
-instrumented binary; valgrind's callgrind runs it with instrumentation off, and each benchmark switches it on and off
-around its own measured call through `codspeed`'s client requests and dumps its counts under its own name:
+runner (which is installed by its GitHub action and is not on the host), a token, an account or an upload.
+`cargo codspeed build` produces the instrumented binary; valgrind's callgrind runs it with instrumentation off, and
+each benchmark switches it on and off around its own measured call through `codspeed`'s client requests and dumps its
+counts under its own name:
 
 ```sh
 cargo codspeed build -m simulation -p typesafe-sdk-rust --features internals --bench sdk
@@ -1198,9 +1199,12 @@ above in dev and release, the 20-question call is still 111 blocks / 8,299 B (a 
 shape, five equal runs, dev and release), and the call futures are unchanged. Instructions, five runs each on the
 Linux host (`acd4df3` -> `ae65058`): `typed` 22,982 -> 22,974, `call::sdk` 33,907-34,441 -> 33,645-34,256,
 `call::sdk_20` 193,356-194,152 -> 193,001-193,656, `answers[3]` 23,219-23,928 -> 23,306-23,630, `answers[20]`
-184,280-185,307 -> 183,771-184,993. Reserving at the first entry is free only in this form: a check inside the loop
-cost `typed` +40 and `sdk_20` +0.4%, and bounding the hint a second time inside the decoder stopped it being inlined
-into its hint-0 wrapper (`typed` +115).
+184,280-185,307 -> 183,771-184,993. Reserving at the first entry is free only in this form. Against `acd4df3`, five
+runs each: the clamp alone cost `typed` +154 (23,136); the clamp with an emptiness check inside the loop cost `typed`
++194 (23,176, so the check itself +40 over the clamp alone) and `sdk_20` +0.4% (min 193,356 -> 194,150); and the
+peeled loop with the hint bounded a second time inside the decoder cost `typed` +115 (23,097), because the decoder was
+no longer inlined into its hint-0 wrapper. The committed form: `typed` -8 (22,974). The raw table is p5-fix's
+`linux/ir-table.txt` (variants `a`, `ab`, `ac`, `ad` against `base`).
 
 **D5: observable changes of candidate 6, accepted.** `AnswerContext` (a public type): its `Debug` output gained the
 field (`AnswerContext { expected_answers: 0, levels: 0 }`), its alignment went from 8 to 4 on 64-bit targets (the
@@ -1211,8 +1215,8 @@ expansion and no `PartialEq` result of `PreparedQuestions` changed, and no size 
 **D6: the future-size guard holds the property (`b0cd3f6`).** Its bounds (2,816 / 2,560) could not see tokio's
 debug box threshold, which `06573d7` crossed unnoticed (2,064 bytes). Futures over a custom transport are now
 asserted <= 2,048 on every platform; futures over the default transport at the sizes measured on macOS arm64 and
-Linux x86_64 (2,344 / 2,328 / 2,328 / 2,032, identical on both, dev and release) plus 32 bytes. Windows keeps the old
-bounds: it has not been measured.
+Linux x86_64 (2,344 / 2,328 / 2,328 / 2,032, identical on both, dev and release) plus 32 bytes. Targets other than
+macOS and Linux (Windows among them) keep the old bounds: they have not been measured.
 
 **CI (`5a51d1f`):** the feature-powerset step runs clippy with warnings denied instead of `cargo hack check`, so a
 lint in any of the ten combinations between none and all fails CI. **D8 (`0749117`):** the unused `divan` entry is
@@ -1256,6 +1260,20 @@ multi-byte names of 15, 27 and 33 bytes, and names written with escapes. It chec
 back byte for byte, through the codec and through serde_json, and pins the `Debug` output. The same test, run at
 `521736d`, passes with the same expected strings.
 
+**Accepted: a blanket impl on public rustdoc pages.** `compact_str` has
+`impl<T: Display + ?Sized> ToCompactString for T`, so rustdoc lists it under "Blanket Implementations" on the 7 public
+types that implement `Display`: `ApiError`, `DecodeError`, `EncodeError`, `Error`, `RawJson`,
+`ResponseValidationError` and `ContentError`. It is the only difference between the rustdoc JSON of `521736d` and
+`ca5f02e` (the Phase 5 verifier's diff, 775 public items each). It cannot be avoided while depending on the crate,
+it is the same class as the `tracing` (`Instrument`, `WithSubscriber`) and `zerocopy` blanket impls already listed
+there, and it is no API the SDK commits to: no SDK item names the trait.
+
+**Accepted: names of 25 to 31 bytes keep a little more memory.** `compact_str`'s heap buffer holds at least 32 bytes
+where a `String` holds exactly its length, so a name just past the inline limit keeps a few more bytes. The Phase 5
+verifier's probe, 2,000 answers with three such names each: 628,248 B kept against 588,258 B at `521736d` (+6.8%),
+while the blocks fall from 10,003 to 8,002. At 40 and 100 bytes, and for names written with escapes, the tree keeps
+the same or less.
+
 **Blocks** (macOS, `alloc_*` tests, five runs each, identical in the dev and the release profile):
 
 | Section | `521736d` | `821d970` |
@@ -1279,7 +1297,8 @@ back byte for byte, through the codec and through serde_json, and pins the `Debu
 ```
 
 The budgets were tightened to the measurements; none was loosened, and `RUNS` / `AGREE` did not change. The tightened
-values are: `alloc_decode` `MAX_BLOCKS` 14 -> 7 (`MAX_BYTES` stays 700, with 122 bytes of headroom over 578),
+values are: `alloc_decode` `MAX_BLOCKS` 14 -> 7 and, after the verifier's review, `MAX_BYTES` 700 -> 650 (`03ee23f`:
+578 plus 12.5%, close to the 11.8% the first bound had over 626; 700 had left 21%),
 `alloc_derive` `ANSWERS_BUDGET` 14 -> 7 and `HAND_WRITTEN_BLOCKS` 10 -> 6, and `alloc_call` `MAX_BLOCKS` 19 -> 12 and
 `MAX_BLOCKS_WITHOUT_RETRY` 18 -> 11. AC-P3 is still "fewer blocks than AC-P2": 6 against 7. All of these are 64-bit
 numbers, as the budgets always were. On a 32-bit target the inline limit is 12 bytes: the fixture's names still fit,
