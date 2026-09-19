@@ -559,13 +559,21 @@ async fn the_expansion_works_wherever_it_lands() {
 
 // ------------------------------------------------------------- misuse
 
-/// trybuild's own `cargo` reads the target directory from the environment
-/// and from config files, never from the `--config` flags the outer `cargo`
-/// was given. Run as `cargo --config build.target-dir=...` alone, it would
-/// build into the workspace's `target/` instead. This asks the question
-/// trybuild will ask and fails, naming the fix, when the answer is not the
-/// directory this test binary was built in.
-fn assert_trybuild_builds_where_this_test_was_built() {
+/// Set in the environment of the re-run [`misuse_is_refused_at_compile_time`]
+/// starts, so that the re-run never starts another.
+const RERUN_MARKER: &str = "TYPESAFE_SDK_TRYBUILD_RERUN";
+
+/// The target directory this test binary was built in. Cargo gives every
+/// integration test `CARGO_TARGET_TMPDIR`, `<target>/tmp`, at compile time,
+/// wherever `--config`, the environment or a config file put `<target>`.
+fn target_dir_of_this_binary() -> PathBuf {
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    canonical(tmp.parent().expect("CARGO_TARGET_TMPDIR is <target>/tmp"))
+}
+
+/// The target directory trybuild will build in: it runs `cargo metadata` from
+/// the package root with this process's environment, and so does this.
+fn target_dir_of_trybuild() -> PathBuf {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let output = Command::new(cargo)
         .args(["metadata", "--no-deps", "--format-version=1"])
@@ -575,25 +583,55 @@ fn assert_trybuild_builds_where_this_test_was_built() {
     let metadata: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("cargo metadata prints JSON");
     let target = metadata["target_directory"].as_str().expect("metadata names the target dir");
-    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let target = canonical(Path::new(target));
-    let binary = canonical(&env::current_exe().expect("the test binary has a path"));
-    let built_in: PathBuf = binary.ancestors().skip(3).take(1).collect();
-    assert!(
-        binary.starts_with(&target),
-        "trybuild would build in {} but this test was built in {}: set CARGO_TARGET_DIR to the \
-         target directory given to cargo with --config",
-        target.display(),
-        built_in.display(),
-    );
+    canonical(Path::new(target))
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// AC-F7(c): each misuse is refused at compile time, at the tokens that cause
 /// it, with a message that says what to write. The `.stderr` files are the
 /// output of rustc 1.98.1, the toolchain `rust-toolchain.toml` pins and CI
 /// uses; another rustc may word or place its own messages differently.
+///
+/// trybuild runs a `cargo` of its own, which reads the target directory from
+/// the environment and from config files but never from the `--config` flags
+/// the outer `cargo` was given. Under `cargo --config build.target-dir=...`
+/// alone it would build in the workspace's `target/`, which a caller who
+/// redirects builds elsewhere does not want. The environment of this process
+/// cannot be changed (`std::env::set_var` is `unsafe` in edition 2024), so
+/// the test runs itself again as a child process whose `CARGO_TARGET_DIR` is
+/// the directory this binary was built in, and passes when the child does.
+/// `--exact <name>` selects this one test under libtest and nextest alike.
 #[test]
 fn misuse_is_refused_at_compile_time() {
-    assert_trybuild_builds_where_this_test_was_built();
+    let built_in = target_dir_of_this_binary();
+    let trybuild_in = target_dir_of_trybuild();
+    if trybuild_in != built_in {
+        assert!(
+            env::var_os(RERUN_MARKER).is_none(),
+            "trybuild would build in {}, not in {} where this test was built, although this is \
+             the re-run whose CARGO_TARGET_DIR names that directory",
+            trybuild_in.display(),
+            built_in.display(),
+        );
+        let output = Command::new(env::current_exe().expect("the test binary has a path"))
+            .args(["--exact", "misuse_is_refused_at_compile_time", "--nocapture"])
+            .env("CARGO_TARGET_DIR", &built_in)
+            .env(RERUN_MARKER, "1")
+            .output()
+            .expect("the test binary runs again");
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "the re-run with CARGO_TARGET_DIR={} failed ({}); its output is above",
+            built_in.display(),
+            output.status,
+        );
+        return;
+    }
     trybuild::TestCases::new().compile_fail("tests/ui/*.rs");
 }
