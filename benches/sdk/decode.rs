@@ -112,7 +112,7 @@ mod codec {
     use divan::{Bencher, black_box};
 
     use super::document;
-    use crate::naive::NaiveResponse;
+    use crate::naive_response::NaiveResponse;
 
     #[divan::bench(args = [3, 20])]
     fn sonic_rs(bencher: Bencher<'_, '_>, answers: usize) {

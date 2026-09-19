@@ -18,7 +18,7 @@
 //! retry, no telemetry. Where it could be slower without being wrong, it is
 //! not made slower.
 
-use std::{collections::HashMap, error::Error, future::poll_fn, time::Duration};
+use std::{error::Error, future::poll_fn, time::Duration};
 
 use bytes::Bytes;
 use http::{
@@ -26,14 +26,13 @@ use http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
 };
 use http_body_util::BodyExt as _;
-use serde::Deserialize;
 use tower_service::Service;
 use typesafe_sdk::Body;
 
+use crate::naive_response::NaiveResponse;
+
 /// What the naive client returns for anything that is not a decoded answer.
 pub(crate) type NaiveError = Box<dyn Error + Send + Sync>;
-
-include!("naive_response.rs");
 
 /// The client's configuration, as a naive client keeps it: strings, and the
 /// questions as a value tree built once from the caller's definitions.

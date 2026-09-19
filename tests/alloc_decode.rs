@@ -30,7 +30,7 @@
 
 mod support;
 
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
 use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
@@ -91,7 +91,10 @@ where
 
 // A comparator that is not a strawman: the same codec, answers internally
 // tagged by `type` in a `HashMap<String, _>`, maps for every container.
-include!("../benches/support/naive_response.rs");
+#[path = "../benches/support/naive_response.rs"]
+mod naive_response;
+
+use naive_response::NaiveResponse;
 
 // ------------------------------------------------- a struct answer set
 

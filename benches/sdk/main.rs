@@ -20,6 +20,8 @@ extern crate codspeed_divan_compat as divan;
 
 #[path = "../support/naive.rs"]
 mod naive;
+#[path = "../support/naive_response.rs"]
+mod naive_response;
 #[path = "../support/mod.rs"]
 mod support;
 

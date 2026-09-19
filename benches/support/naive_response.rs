@@ -1,7 +1,10 @@
-// The response types of the naive comparator: what the `sdk` bench decodes
-// and what the decode allocation budget's ratio to naive is measured
-// against. Each includes this file with `include!`, so it uses the names its
-// includer imports.
+//! The response types of the naive comparator: what the `sdk` bench decodes
+//! and what the decode allocation budget's ratio to naive is measured
+//! against.
+
+use std::collections::HashMap;
+
+use serde::Deserialize;
 
 /// A decoded response.
 #[expect(dead_code, reason = "decoded to be measured; at most the answer count is read")]
