@@ -1096,7 +1096,7 @@ in time. On encode sonic-rs is 1.7x (macOS) to 2.3x (Linux) faster and runs 4.3x
 
 | # | Candidate | Result | Numbers | Decision |
 | --- | --- | --- | --- | --- |
-| 1 | `compact_str` 0.10.0 for the model, answer names, choice pick and option names | measured in the working tree only | decode 14 -> **7** blocks, 626 -> 578 bytes; derived 10 -> 6; a call's own 19 -> **12**; instructions: `answers[3]` -2.1%, `answers[20]` -8.5%, `call::sdk` -2.9%, nothing up | **waiting for a ruling**: meets the keep rule by blocks, but it is a new crate (brief R5(a)); not committed |
+| 1 | `compact_str` 0.10.0 for the model, answer names, choice pick and option names | measured in the working tree only | decode 14 -> **7** blocks, 626 -> 578 bytes; derived 10 -> 6; a call's own 19 -> **12**; instructions: `answers[3]` -2.1%, `answers[20]` -8.5%, `call::sdk` -2.9%, nothing up | waited for a ruling (a new crate); **adopted** after the owner approved the dependency: `821d970`, see "`compact_str` for names" below |
 | 2 | `Bytes`-slice zero-copy names (a crate-private `Text`: a slice of the retained body, or owned when escaped; the body reaches the visitors through a thread-local) | reverted | decode 14 -> 7 blocks but 626 -> **658** bytes (`Text` is 32 bytes, `String` 24); instructions: `answers[3]` **+2.4%** (within its 3.1% spread), `typed` **+2.5%** (a benchmark that repeats exactly), `answers[20]` -4.5%, `call::sdk` -1.4% | **reverted**: an instruction regression elsewhere. It would also make a kept answer pin the whole response body (up to 16 MiB), a behaviour change |
 | 3 | dense instead of sparse score-level storage | not built: bounded by measurement | all of `insert_by_level` is 1.86% of `answers[3]` (3.94% of `answers[20]`) and vector growth 0.44% (1.20%), exclusive callgrind cost; a dense layout keeps one vector per list, so no block moves | **rejected**: even free storage could not reach 5% on B2, and dense storage cannot keep the documented "a level named twice keeps both entries" |
 | 4 | pre-baked `,"model":...,"questions":...}` suffix | measured as a bench variant | `prepared[1 KB]` 3,356-3,400 against 3,331-3,384 now; 64 KB and 1 MB within 0.1%; 0 blocks either way | **reverted**: no gain; the four `extend_from_slice` calls it replaces are too cheap to see |
@@ -1237,6 +1237,78 @@ The 1 KB, 64 KB and 1 MB rows moved by less than 1% on both machines. The unit t
 `a_scratch_past_the_ceiling_is_not_kept` (a 2 MiB state keeps 0 B after each of three calls) and
 `a_scratch_under_the_ceiling_is_kept` (a 1 MiB state keeps its scratch) pin the rule.
 
+### `compact_str` for names (`821d970`)
+
+Candidate 1, adopted after the owner approved the dependency (`compact_str` 0.10.0, `default-features = false`,
+`features = ["std"]`; its `serde` feature is not used). The model name, the answer names, a choice's pick and its
+option names are a crate-private `Name` (`src/name.rs`), which stores up to 24 bytes inline on a 64-bit target. The
+legend descriptions are `Content` and did not change. `src/name.rs` is the only file that names the crate: the unit
+test `only_this_module_names_the_small_string_crate` reads every `.rs` file under `src`, `tests`, `benches` and
+`crates` and fails on any other file that does. Swapping the crate out, or going back to `String`, is a change to that
+file alone. `Name` decodes through a visitor of its own (`visit_str`, `visit_string`), so the decode never builds a
+`String` first.
+
+Nothing public moved: accessors return `&str`, `ChoiceAnswer::new` and `Answers: FromIterator` take `Into<String>`,
+and `size_of` is 216 / 24 / 64 / 56 bytes for `SystemOneResponse<Answers>` / `Answers` / `Answer` / `ChoiceAnswer`
+before and after (pinned in `tests/static_assertions.rs` for 64-bit targets, `Option` of the last two included). The
+test `long_multi_byte_and_escaped_names_decode_serialize_and_print_as_text` decodes names of 24 and 25 bytes,
+multi-byte names of 15, 27 and 33 bytes, and names written with escapes. It checks that serializing writes the body
+back byte for byte, through the codec and through serde_json, and pins the `Debug` output. The same test, run at
+`521736d`, passes with the same expected strings.
+
+**Blocks** (macOS, `alloc_*` tests, five runs each, identical in the dev and the release profile):
+
+| Section | `521736d` | `821d970` |
+| --- | ---: | ---: |
+| AC-P2 decode, 3 answers (blocks / bytes) | 14 / 626 | **7 / 578** |
+| AC-P2 ratio to the naive comparator (26 / 2,672) | 0.54 | **0.27** |
+| AC-P3 derived set, hand-written and derived | 10 / 347 | **6 / 314** |
+| AC-P6 a call's own blocks (no retry) | 19 (18) | **12 (11)** |
+| whole call, pinned or unpinned (no retry) | 22 / 3,373 (21 / 3,349) | 15 / 3,325 (14 / 3,301) |
+| AC-P1 encode rows, `mixed` rows, transport, header map | unchanged | unchanged |
+
+```
+521736d  runs of decode                                 blocks/bytes: 14/626 14/626 14/626 14/626 14/626
+821d970  runs of decode                                 blocks/bytes: 7/578 7/578 7/578 7/578 7/578
+521736d  runs of SystemOneResponse<Review>, derived     blocks/bytes: 10/347 10/347 10/347 10/347 10/347
+821d970  runs of SystemOneResponse<Review>, derived     blocks/bytes: 6/314 6/314 6/314 6/314 6/314
+521736d  runs of whole call                             blocks/bytes: 22/3373 22/3373 22/3373 22/3373 22/3373
+821d970  runs of whole call                             blocks/bytes: 15/3325 15/3325 15/3325 15/3325 15/3325
+521736d  runs of whole call, no retry                   blocks/bytes: 21/3349 21/3349 21/3349 21/3349 21/3349
+821d970  runs of whole call, no retry                   blocks/bytes: 14/3301 14/3301 14/3301 14/3301 14/3301
+```
+
+The budgets were tightened to the measurements; none was loosened, and `RUNS` / `AGREE` did not change. The tightened
+values are: `alloc_decode` `MAX_BLOCKS` 14 -> 7 (`MAX_BYTES` stays 700, with 122 bytes of headroom over 578),
+`alloc_derive` `ANSWERS_BUDGET` 14 -> 7 and `HAND_WRITTEN_BLOCKS` 10 -> 6, and `alloc_call` `MAX_BLOCKS` 19 -> 12 and
+`MAX_BLOCKS_WITHOUT_RETRY` 18 -> 11. AC-P3 is still "fewer blocks than AC-P2": 6 against 7. All of these are 64-bit
+numbers, as the budgets always were. On a 32-bit target the inline limit is 12 bytes: the fixture's names still fit,
+but a longer name costs a block there that it does not cost here.
+
+**Instructions** (Linux host, callgrind `Ir` as under Method, five runs of the whole `sdk` target per tree, min-max
+with the spread as a share of the min):
+
+| Benchmark | `521736d` | `821d970` | Change of the min |
+| --- | ---: | ---: | ---: |
+| `decode::answers[3]` | 23,368-24,091 (3.1%) | 22,886-23,110 (1.0%) | **-2.1%**, ranges apart |
+| `decode::answers[20]` | 183,795-185,041 (0.7%) | 169,898-170,586 (0.4%) | **-7.6%**, ranges apart |
+| `decode::typed` | 22,957 (0.0%) | 22,883 (0.0%) | -0.3% |
+| `call::sdk` | 34,000-34,216 (0.6%) | 32,628-33,446 (2.5%) | **-4.0%**, ranges apart |
+| `call::sdk_20` | 193,459-194,334 (0.5%) | 178,336-179,081 (0.4%) | **-7.8%**, ranges apart |
+| `call::naive` / `call::floor` | 64,663-66,198 / 2,526 | 64,629-66,595 / 2,526 | overlap / 0 |
+
+No other benchmark's range lies above its old range, apart from two that do not reach a name.
+`retry::retry_after[seconds]` goes from 897 to 898 and `retry_after[date]` from 1,773 to 1,774 (+1 instruction,
++0.1%, in all five runs). Their per-function counts show where: `http`'s `HdrName::from_bytes` (102 + 75 -> 101 + 76)
+and one more instruction elsewhere in the `http` header lookup. That is the code-layout effect of a rebuild described
+under Method, not code this change runs. The encode, assembly and retry benchmarks overlap their old ranges.
+
+Commands: the alloc tests as under "Final AC-P1 / AC-P2 / AC-P3 / AC-P6 check", at `521736d` and at `821d970`, dev
+and release. On the Linux host there were two scratch clones, one at `521736d` and one with `821d970`'s diff applied.
+Each was built with `cargo codspeed build -m simulation -p typesafe-sdk-rust --features internals --bench sdk`, and
+the callgrind command under Method was run on each tree five times, pinned to one core, one run at a time. Both
+clones were removed afterwards.
+
 ### Unmeasured
 
 - Instruction counts on arm64 (callgrind is not available for macOS arm64), and CodSpeed's own runner: AC-P7 is proved
@@ -1246,4 +1318,5 @@ The 1 KB, 64 KB and 1 MB rows moved by less than 1% on both machines. The unit t
   other sessions.
 - Instruction counts of `loopback` (kept out of the instrumented run on purpose).
 - The R17 ceiling at any value other than 1 MiB and 8 MiB, and under a musl or jemalloc allocator.
+- The name budgets on a 32-bit target (inline limit 12 bytes), and `compact_str`'s instruction counts on arm64.
 - Future sizes on Windows (the size guard keeps loose bounds there), and CodSpeed's cycle estimate itself.
