@@ -87,7 +87,6 @@ tracing = "0.1.44"
 
 codspeed-divan-compat = "5.0.2"
 dhat = "0.3.3"
-divan = "0.1.21"
 proptest = "1.11.0"
 # `aws_lc_rs` reuses the crypto backend rustls already links, so the test
 # certificate generator does not drag a second implementation into the graph.
