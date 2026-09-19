@@ -124,12 +124,181 @@ fn a_score_built_by_hand_is_sorted_by_level() {
     assert_eq!(answer.probability(5), None);
 }
 
-#[test]
-fn insertion_by_level_is_stable_for_a_repeated_level() {
+/// The sorted insertion the level lists were built with before they were
+/// sorted once at the end: the reference the new order is held to.
+fn inserted_by_level<T>(levels: impl IntoIterator<Item = (u32, T)>) -> Vec<(u32, T)> {
     let mut entries = Vec::new();
-    for (level, tag) in [(3, 'a'), (1, 'b'), (3, 'c'), (0, 'd'), (1, 'e')] {
-        insert_by_level(&mut entries, level, tag);
+    for (level, value) in levels {
+        let at = entries.partition_point(|(key, _): &(u32, T)| *key <= level);
+        entries.insert(at, (level, value));
     }
+    entries
+}
+
+/// Level sequences in every order a sender can choose, each level tagged with
+/// its position on the wire so that the order of equal levels is visible.
+fn level_orders() -> Vec<(&'static str, Vec<(u32, usize)>)> {
+    let tagged =
+        |levels: Vec<u32>| levels.into_iter().enumerate().map(|(at, level)| (level, at)).collect();
+    // A fixed linear congruential sequence: a shuffle that is the same on
+    // every run, so a failure reproduces.
+    let mut state = 0x2545_f491_u32;
+    let shuffled: Vec<u32> = (0..257)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 16) % 64
+        })
+        .collect();
+    vec![
+        ("empty", Vec::new()),
+        ("one", tagged(vec![7])),
+        ("ascending", tagged((0..300).collect())),
+        ("descending", tagged((0..300).rev().collect())),
+        ("shuffled with repeats", tagged(shuffled)),
+        ("all equal", tagged(vec![4; 40])),
+        ("repeats out of order", tagged(vec![3, 1, 3, 0, 1, 3, 0])),
+        ("ascending then one early", tagged((1..50).chain([0]).collect())),
+        ("the extremes", tagged(vec![u32::MAX, 0, u32::MAX, 0])),
+    ]
+}
+
+/// A wire position as a probability, so that it survives the trip.
+fn tag(at: usize) -> f64 {
+    f64::from(u32::try_from(at).expect("a test list is short"))
+}
+
+/// What the decoders do with a level list: append, then sort once if a
+/// level arrived out of order.
+fn pushed_by_level<T>(levels: impl IntoIterator<Item = (u32, T)>) -> Vec<(u32, T)> {
+    let mut entries = Vec::new();
+    let mut in_order = true;
+    for (level, value) in levels {
+        push_by_level(&mut entries, &mut in_order, level, value);
+    }
+    assert_eq!(
+        in_order,
+        entries.is_sorted_by_key(|(level, _)| *level),
+        "in_order says whether the appended list is already sorted"
+    );
+    if !in_order {
+        sort_by_level(&mut entries);
+    }
+    entries
+}
+
+#[test]
+fn a_level_list_sorted_once_equals_the_list_built_by_sorted_insertion() {
+    for (order, levels) in level_orders() {
+        let expected = inserted_by_level(levels.iter().copied());
+
+        assert_eq!(pushed_by_level(levels.iter().copied()), expected, "levels {order}: {levels:?}");
+
+        let answer = ScoreAnswer::new(
+            0.0,
+            0.0,
+            levels.iter().map(|&(level, at)| (level, Content::text(at.to_string()))),
+            levels.iter().map(|&(level, at)| (level, tag(at))),
+        );
+        let legend: Vec<(u32, usize)> = answer
+            .legend()
+            .map(|(level, description)| {
+                let tag = description.as_text().expect("a text description");
+                (level, tag.parse().expect("the tag is a number"))
+            })
+            .collect();
+        assert_eq!(legend, expected, "ScoreAnswer::new legend, levels {order}");
+        let tagged: Vec<(u32, f64)> =
+            expected.iter().map(|&(level, at)| (level, tag(at))).collect();
+        assert_eq!(
+            answer.probabilities().collect::<Vec<_>>(),
+            tagged,
+            "ScoreAnswer::new probabilities, levels {order}"
+        );
+    }
+}
+
+/// A response with one score whose legend and probabilities list `levels`
+/// in the order given, each value naming its wire position.
+fn score_body(levels: &[(u32, usize)]) -> String {
+    let legend: Vec<String> =
+        levels.iter().map(|(level, at)| format!(r#""{level}":"{at}""#)).collect();
+    let probabilities: Vec<String> =
+        levels.iter().map(|(level, at)| format!(r#""{level}":{at}"#)).collect();
+    format!(
+        r#"{{"model":"m","usage":{{}},"answers":{{"s":{{"type":"score","score":1,"confidence":1,"legend":{{{}}},"probabilities":{{{}}}}}}}}}"#,
+        legend.join(","),
+        probabilities.join(",")
+    )
+}
+
+#[test]
+fn a_decoded_level_list_equals_the_list_built_by_sorted_insertion() {
+    for (order, levels) in level_orders() {
+        let expected = inserted_by_level(levels.iter().copied());
+        let body = score_body(&levels);
+
+        let response = decode(body.as_bytes());
+
+        let score = response.answers().score("s").expect("s is a score answer");
+        let legend: Vec<(u32, usize)> = score
+            .legend()
+            .map(|(level, description)| {
+                let tag = description.as_text().expect("a text description");
+                (level, tag.parse().expect("the tag is a number"))
+            })
+            .collect();
+        assert_eq!(legend, expected, "decoded legend, levels {order}");
+        let tagged: Vec<(u32, f64)> =
+            expected.iter().map(|&(level, at)| (level, tag(at))).collect();
+        assert_eq!(
+            score.probabilities().collect::<Vec<_>>(),
+            tagged,
+            "decoded probabilities, levels {order}"
+        );
+    }
+}
+
+/// Levels in descending order, the order that made each insert move the
+/// whole list.
+const DESCENDING_LEVELS: u32 = 200_000;
+
+/// The time [`DESCENDING_LEVELS`] may take to decode in an unoptimized
+/// build: about 12 times what appending and sorting once takes on a laptop,
+/// so a runner slowed by other jobs or by coverage instrumentation stays
+/// under it, and about a fifth of what moving the tail on every insert takes,
+/// which grows with the square of the count.
+const DESCENDING_LEVELS_BOUND: std::time::Duration = std::time::Duration::from_secs(3);
+
+#[test]
+fn levels_in_descending_order_decode_in_n_log_n_time() {
+    let levels: Vec<(u32, usize)> = (0..DESCENDING_LEVELS).rev().map(|level| (level, 0)).collect();
+    let body = score_body(&levels);
+
+    let started = std::time::Instant::now();
+    let response = decode(body.as_bytes());
+    let elapsed = started.elapsed();
+
+    println!(
+        "{DESCENDING_LEVELS} descending levels in a legend and in the probabilities \
+         ({} bytes) decoded in {elapsed:?}",
+        body.len()
+    );
+    let score = response.answers().score("s").expect("s is a score answer");
+    assert_eq!(score.legend().len(), levels.len());
+    assert!(
+        score.probabilities().map(|(level, _)| level).eq(0..DESCENDING_LEVELS),
+        "the probabilities are sorted by level"
+    );
+    assert!(
+        elapsed < DESCENDING_LEVELS_BOUND,
+        "{DESCENDING_LEVELS} descending levels took {elapsed:?}, over the bound of \
+         {DESCENDING_LEVELS_BOUND:?}: the level lists cost more than a sort"
+    );
+}
+
+#[test]
+fn a_repeated_level_keeps_its_entries_in_arrival_order() {
+    let entries = pushed_by_level([(3, 'a'), (1, 'b'), (3, 'c'), (0, 'd'), (1, 'e')]);
 
     assert_eq!(entries, [(0, 'd'), (1, 'b'), (1, 'e'), (3, 'a'), (3, 'c')]);
 }

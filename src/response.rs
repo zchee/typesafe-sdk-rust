@@ -545,19 +545,15 @@ impl ScoreAnswer {
         L: IntoIterator<Item = (u32, Content<'static>)>,
         P: IntoIterator<Item = (u32, f64)>,
     {
-        let mut sorted_legend = Vec::new();
-        for (level, description) in legend {
-            insert_by_level(&mut sorted_legend, level, description);
-        }
-        let mut sorted_probabilities = Vec::new();
-        for (level, probability) in probabilities {
-            insert_by_level(&mut sorted_probabilities, level, probability);
-        }
+        let mut sorted_legend: Vec<_> = legend.into_iter().collect();
+        sort_by_level(&mut sorted_legend);
+        let mut sorted_probabilities: Vec<_> = probabilities.into_iter().collect();
+        sort_by_level(&mut sorted_probabilities);
         Self::from_sorted(score, confidence, sorted_legend, sorted_probabilities)
     }
 
     /// Assembles a decoded answer from maps the decoder built with
-    /// [`insert_by_level`].
+    /// [`push_by_level`] and [`sort_by_level`].
     pub(crate) fn from_sorted(
         score: f64,
         confidence: f64,
@@ -650,16 +646,29 @@ where
     }
 }
 
-/// Inserts `value` at the place its level sorts to, after any entry of the
-/// same level, so a level named twice keeps both entries in the order they
-/// arrived.
+/// Appends `value` and clears `in_order` when its level sorts before the
+/// level of the entry ahead of it; a list whose `in_order` was cleared is
+/// passed to [`sort_by_level`] once it is complete.
 ///
-/// A score has a handful of levels, so moving the tail on insert costs less
-/// than sorting afterwards, and it never allocates beyond the vector's own
-/// growth.
-pub(crate) fn insert_by_level<T>(entries: &mut Vec<(u32, T)>, level: u32, value: T) {
-    let at = entries.partition_point(|(key, _)| *key <= level);
-    entries.insert(at, (level, value));
+/// The number of levels and their order are chosen by whoever wrote the
+/// response, so the list is not kept sorted while it is built: moving the
+/// tail on every insert costs O(n^2) for levels that arrive in descending
+/// order, where one sort at the end costs O(n log n). Levels that arrive in
+/// order, as the API writes them, cost one comparison each and no sort.
+pub(crate) fn push_by_level<T>(
+    entries: &mut Vec<(u32, T)>,
+    in_order: &mut bool,
+    level: u32,
+    value: T,
+) {
+    *in_order &= entries.last().is_none_or(|(last, _)| *last <= level);
+    entries.push((level, value));
+}
+
+/// Sorts `entries` by level. The sort is stable, so a level named twice keeps
+/// both entries in the order they arrived.
+pub(crate) fn sort_by_level<T>(entries: &mut [(u32, T)]) {
+    entries.sort_by_key(|(level, _)| *level);
 }
 
 #[cfg(test)]

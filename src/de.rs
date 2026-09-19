@@ -37,7 +37,7 @@ use crate::{
     name::Name,
     response::{
         Answer, Answers, ChoiceAnswer, NoulAnswer, ResponseMeta, ScoreAnswer, SystemOneResponse,
-        Usage, insert_by_level,
+        Usage, push_by_level, sort_by_level,
     },
 };
 
@@ -109,10 +109,10 @@ const MAX_LEVEL_HINT: usize = 8;
 /// The answer types deserialize from any serde format, so that a caller can
 /// store answers and read them back; a self-describing binary format such as
 /// MessagePack or CBOR reports a map's declared length as its hint, and that
-/// length is whatever the input says. Trusted as it is, 61 bytes asked for a
-/// 128 GiB allocation and a declared 2^59 entries panicked with a capacity
-/// overflow. A choice has a handful of options, and a longer list grows as it
-/// would without a hint, as serde's own collections do past their cap.
+/// length is chosen by the input. Trusting it would let a few bytes request
+/// an arbitrary allocation or overflow `Vec`'s capacity. A choice has a
+/// handful of options, and a longer list grows as it would without a hint,
+/// as serde's own collections do past their cap.
 const MAX_OPTION_HINT: usize = 8;
 
 /// `count` as a `u32`, or `u32::MAX` when it does not fit.
@@ -1151,14 +1151,19 @@ impl<'de> Visitor<'de> for LevelsSeed {
             return Ok(Vec::new());
         };
         let mut entries = Vec::with_capacity(self.capacity);
+        let mut in_order = true;
         loop {
             let probability = map.next_value()?;
-            insert_by_level(&mut entries, level, probability);
+            push_by_level(&mut entries, &mut in_order, level, probability);
             match map.next_key_seed(LevelSeed)? {
                 Some(next) => level = next,
-                None => return Ok(entries),
+                None => break,
             }
         }
+        if !in_order {
+            sort_by_level(&mut entries);
+        }
+        Ok(entries)
     }
 }
 
@@ -1194,16 +1199,21 @@ impl<'de> Visitor<'de> for LegendSeed {
             return Ok(Vec::new());
         };
         let mut entries = Vec::with_capacity(self.capacity);
+        let mut in_order = true;
         loop {
             // The description borrows the body while it is read and is copied
             // once, here, because a response outlives nothing it could borrow.
             let description: Content<'de> = map.next_value()?;
-            insert_by_level(&mut entries, level, description.into_owned());
+            push_by_level(&mut entries, &mut in_order, level, description.into_owned());
             match map.next_key_seed(LevelSeed)? {
                 Some(next) => level = next,
-                None => return Ok(entries),
+                None => break,
             }
         }
+        if !in_order {
+            sort_by_level(&mut entries);
+        }
+        Ok(entries)
     }
 }
 
