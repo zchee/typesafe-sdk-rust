@@ -900,3 +900,248 @@ polluted run, never two, and it always carried the same +4 blocks / +900 bytes, 
 the process's one foreign charge has more windows to land in. The minimum filtered every one of them. One
 platform difference, not a pollution: the naive comparator's bytes are 2,704 on Linux x86_64 against 2,672 on the
 M3, the same 26 blocks.
+
+---
+
+## Phase 5 - performance
+
+Everything below was measured at the commit its table names; the final tables are at `fd22977`. Nothing was run
+while another benchmark or a build of this checkout ran.
+
+### Environment
+
+| Item | macOS | Linux |
+| --- | --- | --- |
+| CPU | Apple M3 Max, arm64, 16 cores | Intel Xeon Platinum 8481C, x86_64, 44 vCPUs (AVX2, AVX-512F) |
+| OS | macOS 27.2, Darwin 27.2.0 | Debian 13.7, kernel 6.12.105+deb13-cloud-amd64, glibc 2.41 |
+| Toolchain | rustc 1.98.1 (`rust-toolchain.toml`) | rustc 1.98.1 (`rust-toolchain.toml`) |
+| Bench crates | `codspeed-divan-compat` 5.0.2 (its walltime layer is a divan 0.1 fork) | the same |
+| Instruction counts | - | valgrind 3.24.0 (callgrind), cargo-codspeed 5.0.1 |
+| Load while measuring | **not idle**: other sessions' test binaries held about 3 of 16 cores; load average 8-15 | idle apart from these runs (load average under 2) |
+
+`RUSTFLAGS` was cleared on every run and no `target-cpu` was set, so sonic-rs ran its default SIMD level (SSE2
+baseline on x86_64, NEON on arm64): the numbers are those of a consumer's default build. The macOS wall-clock numbers
+carry the load above and are report-only; the Linux instruction counts are the reference.
+
+### Method
+
+Wall clock (divan, 100 samples, median shown; `loopback` 50 samples), `bench` profile without the dev config:
+
+```sh
+env -u RUSTFLAGS cargo bench --all-features --bench sdk         # macOS
+env -u RUSTFLAGS cargo bench --all-features --bench loopback
+taskset -c 2 cargo bench --all-features --bench sdk             # Linux, pinned to one core
+cargo bench --all-features --bench loopback                     # Linux, not pinned: it needs both runtimes' threads
+```
+
+Instruction counts, the way CodSpeed's simulation mode takes them, without CodSpeed's runner (which is installed by
+its GitHub action and is not on the host), a token, an account or an upload. `cargo codspeed build` produces the
+instrumented binary; valgrind's callgrind runs it with instrumentation off, and each benchmark switches it on and off
+around its own measured call through `codspeed`'s client requests and dumps its counts under its own name:
+
+```sh
+cargo codspeed build -m simulation -p typesafe-sdk-rust --features internals --bench sdk
+CODSPEED_ENV=local CODSPEED_CARGO_WORKSPACE_ROOT=$PWD taskset -c 2 \
+  valgrind --tool=callgrind --instr-atstart=no --compress-strings=no \
+  --callgrind-out-file=out.%p target/codspeed/analysis/typesafe-sdk-rust/sdk
+callgrind_annotate out.<pid>.<n>          # PROGRAM TOTALS, one dump per benchmark
+```
+
+callgrind writes `summary: 0` into these dumps (the header is computed before instrumentation is toggled);
+`callgrind_annotate` recomputes the total from the cost lines. Every configuration was run three to five times.
+**Run-to-run spread**, five runs at `0303980`: 0.0% for every decode, encode and `Retry-After` benchmark except
+`encode::prepared[1024]` (3.1%) and `encode::unprepared[1024]` (2.5%); 2.2% for `call::sdk`, 2.6% for `call::naive`,
+4.6% for `assembly::request`. The spread comes from malloc's state, which depends on the order the benchmarks ran in.
+A rebuild alone also moves some counts by up to about 1% without any change to their code (code layout): the
+serde_json decode moved +0.5% between `0303980` and `fd22977`, and nothing in its path changed.
+
+**What the benches measure and how they can mislead** is written at the top of each bench module
+(`benches/sdk/*.rs`, `benches/loopback.rs`). In short: B1 to B5 time steady state (warm scratch, warm header map);
+B3 rebuilds crate-private steps from the same parts and checks its body byte for byte against one a real call sent;
+B5's transport answers at once, so it contains no network at all; B6 is loopback, an upper bound on one connection's
+throughput and never a prediction for a network.
+
+### B1 - encode (`fd22977`)
+
+| Bench | macOS median | Linux median | Linux instructions (min-max of 3) |
+| --- | ---: | ---: | ---: |
+| `prepared[1 KB]` | 333.2 ns | 437.1 ns | 3,317-3,342 |
+| `prepared[64 KB]` | 20.70 µs | 25.31 µs | 227,996-228,094 |
+| `prepared[1 MB]` | 321.9 µs | 437.4 µs | 2,663,300-2,663,496 |
+| `unprepared[1 KB]` | 603.9 ns | 824.6 ns | 7,140-7,540 |
+| `unprepared[64 KB]` | 21.24 µs | 25.69 µs | 231,826-232,202 |
+| `unprepared[1 MB]` | 322.4 µs | 436.6 µs | 2,667,191-2,667,462 |
+| `object_1mb` | 321.6 µs | 427.4 µs | 2,664,122-2,664,139 |
+| `mixed_sizes` (1 MB then 16 x 1 KB, fresh scratch) | 338.4 µs | 724.7 µs | 2,721,562-2,722,805 |
+
+Preparing the three questions on every call instead of once costs 3,800 to 4,200 instructions at every size, which is
+the whole difference between `unprepared` and `prepared`: 270 ns (macOS) and 390 ns (Linux) at 1 KB, and lost in the
+spread at 64 KB and 1 MB.
+
+### B2 - decode (`fd22977`)
+
+| Bench | macOS median | Linux median | Linux instructions |
+| --- | ---: | ---: | ---: |
+| `answers[3]` (`SystemOneResponse<Answers>`) | 1.541 µs | 2.304 µs | 23,323-24,271 |
+| `answers[20]` | 11.29 µs | 17.65 µs | 184,731-185,630 |
+| `typed` (`#[derive(QuestionSet)]` struct) | 1.260 µs | 2.331 µs | 22,982 |
+
+### B3 - request assembly (`fd22977`)
+
+| Bench | macOS median | Linux median | Linux instructions |
+| --- | ---: | ---: | ---: |
+| `request` (encode 1 KB + retained body + header map + request) | 419.0 ns | 607.9 ns | 5,136-6,343 |
+| `header_map_clone` (6 headers) | 44.97 ns | 119.9 ns | 674 |
+
+### B4 - `Retry-After` and backoff (`fd22977`)
+
+| Bench | macOS median | Linux median | Linux instructions |
+| --- | ---: | ---: | ---: |
+| `retry_after[ms]` | 39.44 ns | 99.91 ns | 789-793 |
+| `retry_after[seconds]` | 45.95 ns | 90.11 ns | 897 |
+| `retry_after[date]` (includes `SystemTime::now()`) | 81.75 ns | 169.4 ns | 1,773 |
+| `backoff[1]` | 112.3 ns | 247.9 ns | 2,672 |
+| `backoff[6]` (capped) | 117.5 ns | 261.9 ns | 2,852 |
+| `backoff[1000]` | 117.5 ns | 260.8 ns | 2,852 |
+
+The backoff delay costs more than parsing a header because `round_to_millis` rounds exactly as Python's
+`round(x, 3)` does, by formatting to three decimals and parsing back (no allocation). It runs once per retry, beside a
+sleep of at least hundreds of milliseconds, and it is the frozen arithmetic of `retry.rs`: recorded, not changed.
+
+### B5 - a whole call, its floor and the naive comparator (`fd22977`)
+
+| Bench | macOS median | Linux median | Linux instructions |
+| --- | ---: | ---: | ---: |
+| `floor` (transport called directly, pre-built request) | 198.9 ns | 390.1 ns | 2,526 |
+| `sdk` (3 questions, 1 KB state) | **2.395 µs** | **4.088 µs** | **33,964-34,174** |
+| `naive` (comparator A, same transport) | 5.041 µs | 8.032 µs | 64,601-65,057 |
+| `sdk_20` (20 questions, six 5-level scores) | 11.12 µs | 19.34 µs | 193,825-194,086 |
+| `naive_20` | 25.49 µs | 45.85 µs | 422,759-426,347 |
+
+The SDK's call costs 0.52x the naive client's instructions (0.46x with 20 questions): AC-P7's condition ("the
+instruction count of the SDK full-call benchmark is lower than the naive comparator's") holds on this host. AC-P7
+itself is proved only by a pull-request run of `bench.yaml` on CodSpeed's runner, which is the owner's to set up.
+
+Comparator (B), the published `typesafe-rs` 0.1.0, was **not** measured: it is a new crate, which this phase does not
+add. Measuring it would take adding it as a dev-dependency (a license and advisory check through `cargo deny`), and
+it can only be compared if its client accepts a base URL, so that it can be pointed at the loopback TestServer rather
+than at the live API.
+
+### B6 - loopback HTTP/2 over TLS (`fd22977`, wall clock only)
+
+| Bench | macOS median | Linux median |
+| --- | ---: | ---: |
+| `sequential` (one call at a time, warm connection) | 57.88 µs | 89.60 µs |
+| `concurrent_64` (64 calls spawned at once, until the last answers) | 1.539 ms | 1.621 ms |
+
+64 concurrent calls take about 27x (macOS) and 18x (Linux) the time of one: they share one connection and one
+server, and the loopback round trip is the floor of both.
+
+### sonic-rs and serde_json, no flags (`fd22977`)
+
+The SDK's own decoder cannot be pointed at serde_json (`codec.rs` is the only module naming a codec), so both parsers
+decode the naive comparator's serde types from the same bytes, and both encode the same state string into a retained
+buffer.
+
+| Bench | macOS sonic-rs | macOS serde_json | Linux sonic-rs | Linux serde_json | Linux instr. sonic-rs | Linux instr. serde_json |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| decode, 3 answers | 1.208 µs | 1.405 µs | 2.124 µs | 2.252 µs | 21,448 | 27,110-27,115 |
+| decode, 20 answers | 9.832 µs | 11.04 µs | 20.98 µs | 21.91 µs | 198,859-199,476 | 221,402-221,535 |
+| encode, 1 KB | 296.6 ns | 510.1 ns | 373.1 ns | 805.2 ns | 2,589-2,657 | 11,161 |
+| encode, 64 KB | 18.91 µs | 32.29 µs | 23.35 µs | 53.71 µs | 158,969 | 709,291 |
+| encode, 1 MB | 305.1 µs | 518.9 µs | 376.3 µs | 844.9 µs | 2,542,539 | 11,347,676 |
+
+**sonic-rs does not lose on the small-response decode (R3, decision D2):** 21% fewer instructions on the 3-answer
+document, and faster on both machines. In wall-clock time on Linux x86_64 without `target-cpu` the gap is small and
+was a tie in one run (2.187 µs against 2.193 µs at `0303980`), so the advantage there is in instructions rather than
+in time. On encode sonic-rs is 1.7x (macOS) to 2.3x (Linux) faster and runs 4.3x to 4.5x fewer instructions.
+
+### Candidates (Linux instructions against the run-to-run spread above; blocks from the dhat tests on macOS)
+
+| # | Candidate | Result | Numbers | Decision |
+| --- | --- | --- | --- | --- |
+| 1 | `compact_str` 0.10.0 for the model, answer names, choice pick and option names | measured in the working tree only | decode 14 -> **7** blocks, 626 -> 578 bytes; derived 10 -> 6; a call's own 19 -> **12**; instructions: `answers[3]` -2.1%, `answers[20]` -8.5%, `call::sdk` -2.9%, nothing up | **waiting for a ruling**: meets the keep rule by blocks, but it is a new crate (brief R5(a)); not committed |
+| 2 | `Bytes`-slice zero-copy names (a crate-private `Text`: a slice of the retained body, or owned when escaped; the body reaches the visitors through a thread-local) | reverted | decode 14 -> 7 blocks but 626 -> **658** bytes (`Text` is 32 bytes, `String` 24); instructions: `answers[3]` **+2.4%**, `typed` **+2.5%** (both deterministic benches), `answers[20]` -4.5%, `call::sdk` -1.4% | **reverted**: an instruction regression elsewhere. It would also make a kept answer pin the whole response body (up to 16 MiB), a behaviour change |
+| 3 | dense instead of sparse score-level storage | not built: bounded by measurement | all of `insert_by_level` is 1.86% of `answers[3]` (3.94% of `answers[20]`) and vector growth 0.44% (1.20%), exclusive callgrind cost; a dense layout keeps one vector per list, so no block moves | **rejected**: even free storage could not reach 5% on B2, and dense storage cannot keep the documented "a level named twice keeps both entries" |
+| 4 | pre-baked `,"model":...,"questions":...}` suffix | measured as a bench variant | `prepared[1 KB]` 3,356-3,400 against 3,331-3,384 now; 64 KB and 1 MB within 0.1%; 0 blocks either way | **reverted**: no gain; the four `extend_from_slice` calls it replaces are too cheap to see |
+| 5 | call-future sizes against tokio's debug box threshold (v3.5 (1)) | **kept**, `7493955` + `fd22977` | every call's future -352 bytes: System One over a custom transport 2,392 -> **2,040** (under 2,048), models 2,080 -> 1,728; over hyper 2,760 -> 2,344 (still over) and 2,448 -> 2,032; an unpinned debug call 20 -> **19** blocks of its own; instructions unchanged within the spread | kept: -1 block in a debug build; release was never boxed (16,384) |
+| 6 | score level lists sized from the questions asked (v3.5 (2): 5 to 8 levels cost a block) | **kept**, `06573d7` + `fd22977` | whole call, measured by a throwaway dhat test over a transport that allocates nothing: 20 questions with six 5-level scores 117 -> **111** blocks, 9,439 -> 8,095 bytes; 3 questions 19 -> 19 blocks, 2,728 -> 2,696 bytes (`alloc_call`'s whole call: 22 / 3,405 -> 22 / 3,373). `call::sdk_20` -1.3% instructions (ranges do not overlap) | kept. `06573d7` alone grew the future to 2,064 bytes and brought the debug box back; `fd22977` holds the context in two `u32`s and restores 2,040 |
+| 7 | a hard ceiling on the retained scratch (R17), 1 MiB, in `codec.rs` | measured in the working tree only | AC-P1 at 1 MB: 1 -> **3** blocks, 1,092,608 -> **7,384,117** bytes per call (**fails AC-P1**); 1 KB and 64 KB unchanged. Time: `prepared[1 MB]` 433.0 -> 434.3 µs on Linux, 321.7 -> 326.4 µs on macOS; `mixed_sizes` 646 -> 444 µs (Linux); instructions within 1% | **proposal for the lead and the user** (R5(b), (d)): it caps the memory a thread keeps after a large body at 1 MiB instead of about 6x the body, costs no measurable time on either allocator, and turns AC-P1's 1 MB row from 1 block / 1.00x into 3 blocks / 6.8x |
+
+Commands: candidates 1, 2, 5, 6 and 7 were applied as a patch to the Linux scratch checkout, built with
+`cargo codspeed build` and counted with the callgrind command above, three runs each; their blocks come from
+`cargo test --all-features --test alloc_decode --test alloc_call --test alloc_derive --test alloc_encode -- --nocapture`
+on macOS, and candidate 6's 20-question call from a throwaway dhat test of the same shape (not committed). Candidate 3's
+bound is `callgrind_annotate` on the `decode::answers` dumps of the baseline.
+
+### Final AC-P1 / AC-P2 / AC-P3 / AC-P6 check (`fd22977`, macOS, budgets as frozen)
+
+```sh
+env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml test --all-features \
+  --test alloc_encode --test alloc_decode --test alloc_derive --test alloc_call -- --nocapture
+env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml test --release --all-features \
+  --test alloc_encode --test alloc_decode --test alloc_derive --test alloc_call -- --nocapture
+```
+
+All four tests pass in both profiles, and every one of the 36 measured sections printed the **same five runs in the
+dev and the release profile**:
+
+```
+  runs of whole call                             blocks/bytes: 22/3373 22/3373 22/3373 22/3373 22/3373
+  runs of whole call, no deadline                blocks/bytes: 22/3373 22/3373 22/3373 22/3373 22/3373
+  runs of whole call, no retry                   blocks/bytes: 21/3349 21/3349 21/3349 21/3349 21/3349
+  runs of whole call, unpinned                   blocks/bytes: 22/3373 22/3373 22/3373 22/3373 22/3373
+  runs of whole call, unpinned, no retry         blocks/bytes: 21/3349 21/3349 21/3349 21/3349 21/3349
+  runs of transport called directly              blocks/bytes: 3/677 3/677 3/677 3/677 3/677
+  runs of encode                                 blocks/bytes: 1/1072 1/1072 1/1072 1/1072 1/1072
+  runs of header map clone                       blocks/bytes: 2/656 2/656 2/656 2/656 2/656
+  runs of decode                                 blocks/bytes: 14/626 14/626 14/626 14/626 14/626
+  runs of SystemOneResponse<Answers>             blocks/bytes: 14/626 14/626 14/626 14/626 14/626
+  runs of naive: #[serde(tag)] answers in a HashMap blocks/bytes: 26/2672 26/2672 26/2672 26/2672 26/2672
+  runs of SystemOneResponse<Ticket>, field dispatch blocks/bytes: 10/347 10/347 10/347 10/347 10/347
+  runs of prepared() x 1000 with names() walked  blocks/bytes: 0/0 0/0 0/0 0/0 0/0
+  runs of SystemOneResponse<Answers>             blocks/bytes: 14/626 14/626 14/626 14/626 14/626
+  runs of SystemOneResponse<Review>, derived     blocks/bytes: 10/347 10/347 10/347 10/347 10/347
+  runs of Questions::prepare(), runtime example set blocks/bytes: 3/1524 3/1524 3/1524 3/1524 3/1524
+  runs of 1 KB string                            blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of 64 KB string                           blocks/bytes: 1/68608 1/68608 1/68608 1/68608 1/68608
+  runs of 1 MB string                            blocks/bytes: 1/1092608 1/1092608 1/1092608 1/1092608 1/1092608
+  runs of 1 MB object                            blocks/bytes: 1/1092696 1/1092696 1/1092696 1/1092696 1/1092696
+  runs of mixed: 1 KB #1                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #2                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #3                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #4                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #5                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #6                         blocks/bytes: 2/743219 2/743219 2/743219 2/743219 2/743219
+  runs of mixed: 1 KB #7                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #8                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #9                         blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #10                        blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #11                        blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #12                        blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #13                        blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #14                        blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #15                        blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+  runs of mixed: 1 KB #16                        blocks/bytes: 1/1408 1/1408 1/1408 1/1408 1/1408
+```
+
+| Criterion | Budget | Measured | Verdict |
+| --- | --- | --- | --- |
+| AC-P1 encode, 1 KB / 64 KB / 1 MB string, 1 MB object | 1 block, bytes <= 1.05x body + 4 KiB | 1 block each, exactly the body length (1,408 / 68,608 / 1,092,608 / 1,092,696) | holds |
+| AC-P1 retained scratch | <= 8x the decayed hint | 4.39x / 5.73x / 5.76x / 5.76x | holds |
+| AC-P2 decode, 3 answers | <= 14 blocks, <= 700 bytes, <= 0.7x naive | 14 blocks, 626 bytes, 0.54x | holds, zero block headroom as before |
+| AC-P3 derived | fewer than AC-P2 | 10 blocks / 347 bytes | holds |
+| AC-P6 a call's own blocks | 19 (18 without retry) | 19 (18); 3,373 bytes where Phase 4 had 3,405 | holds |
+
+The unpinned whole call now costs the same as the pinned one in the dev profile too (22 blocks), because the System
+One future over this transport is 2,040 bytes, under tokio's debug box size; before `7493955` it cost 23.
+
+### Unmeasured
+
+- Instruction counts on arm64 (callgrind is not available for macOS arm64), and CodSpeed's own runner: AC-P7 is proved
+  only by a pull-request run of `bench.yaml`, which needs the CodSpeed GitHub app on the repository (the owner's step).
+- Comparator (B), `typesafe-rs` 0.1.0 (a new crate).
+- Wall-clock numbers on an idle macOS machine: every macOS table here was taken under a load average of 8 to 15 from
+  other sessions.
+- Instruction counts of `loopback` (kept out of the instrumented run on purpose).
+- The R17 ceiling at any value other than 1 MiB, and under a musl or jemalloc allocator.
