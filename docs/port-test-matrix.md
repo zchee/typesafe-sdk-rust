@@ -142,7 +142,7 @@ Each of their functions is listed, with the file's reason, in the last section,
 | --- | ---: | --- |
 | `test_malformed_response_raises_validation_error` | 16 | `src/de_tests.rs::a_malformed_response_fails_where_the_python_sdk_says_it_does` |
 | `test_nested_missing_field_path` | 3 | `src/models_tests.rs::a_missing_member_of_a_later_card_is_named_with_its_index` |
-| `test_response_carries_request_id` | 2 | `src/response_tests.rs::the_meta_keeps_the_http_response_and_prints_none_of_its_contents` |
+| `test_response_carries_request_id` | 2 | `tests/client.rs::round_trip_sends_the_body_and_decodes_every_answer_kind`, `src/response_tests.rs::the_meta_keeps_the_http_response_and_prints_none_of_its_contents` |
 | `test_response_carries_raw_http_response` | 2 | `tests/client.rs::round_trip_sends_the_body_and_decodes_every_answer_kind` |
 | `test_response_serialization_excludes_http_metadata` | 4 | `src/response_tests.rs::serializing_a_response_writes_the_payload_and_not_the_http_metadata`, `src/models_tests.rs::serializing_a_models_response_writes_the_payload_and_not_the_http_metadata` |
 | `test_copied_response_preserves_metadata` | 1 | Deviation: "Responses and errors are picklable and copyable" |

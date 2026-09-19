@@ -277,7 +277,8 @@ fn assert_unavailable(error: &Error, endpoint: &str) {
     assert_eq!(api.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(api.message(), "down");
     assert_eq!(api.body(), br#"{"message": "down"}"#);
-    assert_eq!(error.to_string(), format!("{endpoint}: 503 down"));
+    assert_eq!(api.request_id(), Some("req-error"));
+    assert_eq!(error.to_string(), format!("{endpoint}: 503 down (request_id=req-error)"));
 }
 
 /// A derived set is retried like any other call: `ask::<T>().retry(..)`
@@ -294,6 +295,9 @@ async fn an_asked_request_is_retried_by_the_policy_that_applies_to_it() {
             let mut response =
                 json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"message": "down"}"#);
             response.headers_mut().insert("retry-after-ms", HeaderValue::from_static("0"));
+            response
+                .headers_mut()
+                .insert("x-typesafe-request-id", HeaderValue::from_static("req-error"));
             response
         } else {
             json_response(StatusCode::OK, RESULT)

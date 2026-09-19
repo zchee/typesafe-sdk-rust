@@ -120,6 +120,8 @@ fn api_error(error: &Error) -> &ApiError {
 
 /// Upstream `test_round_trip[dataclass|raw|mixed]`: the body, the endpoint,
 /// the content type, and every answer of the fixture - over each protocol.
+/// Also upstream `test_response_carries_request_id`: the response's
+/// `x-typesafe-request-id` is the call's request id.
 #[tokio::test]
 async fn round_trip_sends_the_body_and_decodes_every_answer_kind() {
     let raw = Questions::new()
@@ -160,7 +162,15 @@ async fn round_trip_sends_the_body_and_decodes_every_answer_kind() {
 
     for protocol in PROTOCOLS {
         for (form, questions) in &forms {
-            let server = answering(protocol, RESULT).await;
+            let server = TestServer::start(protocol, |_| async {
+                let mut response = json_response(StatusCode::OK, RESULT);
+                response
+                    .headers_mut()
+                    .insert("x-typesafe-request-id", "req-42".parse().expect("valid"));
+                response
+            })
+            .await
+            .expect("the test server starts");
             let result = client_for(&server, protocol)
                 .system_one(&state, questions)
                 .send()
@@ -196,6 +206,7 @@ async fn round_trip_sends_the_body_and_decodes_every_answer_kind() {
             assert_eq!(legend, [(0, Some("bad")), (1, Some("ok")), (2, Some("great"))]);
             assert_eq!(quality.probabilities().collect::<Vec<_>>(), [(0, 0.1), (1, 0.1), (2, 0.8)]);
             assert_eq!(result.meta().status(), StatusCode::OK);
+            assert_eq!(result.meta().request_id(), Some("req-42"), "{protocol:?} {form}");
             assert_eq!(&result.meta().raw_body()[..], RESULT);
         }
     }
