@@ -94,6 +94,18 @@ TOKEN = re.compile(
 #: What opens or closes a block comment; Rust nests them.
 BLOCK_COMMENT = re.compile(r"/\*|\*/")
 
+#: A run of the characters rustc reads as whitespace. It is not ``\s``, which
+#: leaves out two of them and takes in others, such as a no-break space.
+RUST_SPACE = re.compile(
+    r"[\t\n\v\f\r \x85"
+    + "".join(chr(code) for code in (0x200E, 0x200F, 0x2028, 0x2029))
+    + "]++"
+)
+
+#: The start of a doc comment, outer or inner: ``///`` but not ``////``,
+#: ``/**`` but neither ``/***`` nor ``/**/``, and ``//!`` and ``/*!``.
+DOC_COMMENT = re.compile(r"//(?:/(?!/)|!)|/\*(?:\*(?![*/])|!)")
+
 
 def block_comment_end(text: str, start: int) -> int:
     """Where a block comment ends, counting the comments nested in it.
@@ -144,6 +156,42 @@ def token_at(text: str, start: int) -> tuple[re.Match[str], int]:
     return token, token.end()
 
 
+def source_start(text: str) -> int:
+    """Where rustc starts reading the tokens of a Rust source file.
+
+    rustc drops a byte-order mark at the start of the file, and then a first
+    line that starts with ``#!``, unless the next thing after the ``#!``,
+    past whitespace and comments that are not doc comments (on any number of
+    lines), is a ``[``: that is an inner attribute, read as tokens. Anything
+    else, the end of the file and a doc comment included, makes the line a
+    shebang for the shell, and a quote or a ``/*`` in it opens nothing.
+
+    Args:
+        text: The whole file.
+
+    Returns:
+        The position after a byte-order mark, and after it the end of a
+        shebang line, or 0 when the file starts with neither.
+    """
+    start = 1 if text.startswith(chr(0xFEFF)) else 0
+    if not text.startswith("#!", start):
+        return start
+    position = start + 2
+    while position < len(text):
+        if (space := RUST_SPACE.match(text, position)) is not None:
+            position = space.end()
+        elif text.startswith(("//", "/*"), position) and not DOC_COMMENT.match(
+            text, position
+        ):
+            position = token_at(text, position)[1]
+        else:
+            break
+    if text.startswith("[", position):
+        return start
+    line_end = text.find("\n", start)
+    return len(text) if line_end < 0 else line_end
+
+
 def attribute_end(text: str, start: int) -> tuple[int, int | None]:
     """Walk an attribute's arguments once, up to the parenthesis closing them.
 
@@ -188,7 +236,8 @@ def switched_off(text: str, rust: bool) -> Iterator[tuple[int, int]]:
     ``r#ignore`` included) outside every literal and comment.
 
     Where an opener may start depends on the file. In Rust source the whole
-    file is walked once from its start, one ``TOKEN`` at a time, and an
+    file is walked once, one ``TOKEN`` at a time, from where rustc starts
+    reading it (``source_start``: past a byte-order mark and a shebang), and an
     attribute is tried only where a token starts, so an opener quoted in a
     string, a char literal or a comment (a doc comment included) is not an
     attribute, and it cannot throw the walk out of step with the file's
@@ -207,7 +256,9 @@ def switched_off(text: str, rust: bool) -> Iterator[tuple[int, int]]:
     after a ``#`` it reads only whitespace runs, one ``!``, one ``[`` and one
     ``cfg_attr``, never another ``#``, so no character is read by two tries
     from a ``#``, and what a failed try read the file's walk then reads once
-    more as its next tokens.
+    more as its next tokens. Finding where Rust source starts reads a first
+    line that starts with ``#!``, and the whitespace and comments after it,
+    once before the walk does.
 
     Args:
         text: The whole file.
@@ -216,7 +267,7 @@ def switched_off(text: str, rust: bool) -> Iterator[tuple[int, int]]:
     Yields:
         The start of each such attribute and the end of its ``ignore``.
     """
-    position = 0
+    position = source_start(text) if rust else 0
     while position < len(text):
         if rust:
             opener = CFG_ATTR.match(text, position)
