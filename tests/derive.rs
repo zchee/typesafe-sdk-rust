@@ -229,7 +229,6 @@ async fn ask_sends_the_compiled_questions_and_decodes_into_the_struct() {
     assert_eq!(typed.meta().raw_body().as_ref(), RESULT);
 }
 
-/// The future of an asked request is `Send`, so it can be spawned.
 /// The `X-TypeSafe-Retry-Count` values of each request.
 fn retry_counts(requests: &[RecordedRequest]) -> Vec<Vec<&str>> {
     requests.iter().map(|request| request.header_values("x-typesafe-retry-count")).collect()
