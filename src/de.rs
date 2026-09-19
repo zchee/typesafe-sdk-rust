@@ -45,9 +45,6 @@ use crate::{
 
 /// What the decoder knows about the answers before it reads the first one.
 ///
-/// It is a struct rather than a bare count so that the decoder can pass more
-/// along later without changing the signature of [`AnswerSet`].
-///
 /// Everything in it is a hint for sizing storage. An implementation may use it
 /// or ignore it - a struct with one field per question has nothing to size -
 /// and it never changes what is decoded or whether decoding succeeds.
