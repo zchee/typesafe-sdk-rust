@@ -275,7 +275,8 @@ where
         // allocates the reference count they are shared through, so a call
         // that cannot retry hands its one attempt the body itself.
         let retain = policy.can_retry();
-        let asked = self.questions.len();
+        let asked =
+            de::AnswerContext::new(self.questions.len()).with_levels(self.questions.max_levels());
         retry::run(policy, &Method::POST, uri, move |retry| {
             let body = if retain { body.clone() } else { std::mem::take(&mut body) };
             async move {
@@ -283,7 +284,7 @@ where
                     transport::attempt(&shared.service, exchange, retry, Some(body)).await?;
                 // Decoding is part of the attempt, so a retry predicate sees a
                 // response that did not decode, as the Python SDK's does.
-                de::decode_system_one(body, status, headers, asked, Some((&Method::POST, uri)))
+                de::decode_system_one_with(body, status, headers, asked, Some((&Method::POST, uri)))
             }
         })
         .await

@@ -53,12 +53,22 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct AnswerContext {
     expected_answers: usize,
+    /// The most levels any score question of the request has, or 0 when
+    /// unknown: the capacity a score's level lists start at, since the codec
+    /// gives no size hint for an object.
+    levels: usize,
 }
 
 impl AnswerContext {
     /// A context for a request that asked `expected_answers` questions.
     pub(crate) fn new(expected_answers: usize) -> Self {
-        Self { expected_answers }
+        Self { expected_answers, levels: 0 }
+    }
+
+    /// The same, for a request whose largest score question has `levels`
+    /// levels.
+    pub(crate) fn with_levels(self, levels: usize) -> Self {
+        Self { levels, ..self }
     }
 
     /// How many questions the request asked, and so how many answers a
@@ -277,7 +287,10 @@ impl AnswerSet for Answers {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(AnswersVisitor { capacity: context.expected_answers() })
+        deserializer.deserialize_map(AnswersVisitor {
+            capacity: context.expected_answers(),
+            levels: context.levels,
+        })
     }
 }
 
@@ -295,6 +308,7 @@ impl<'de> Deserialize<'de> for Answers {
 /// Reads the answers object into [`Answers`], in wire order.
 struct AnswersVisitor {
     capacity: usize,
+    levels: usize,
 }
 
 impl<'de> Visitor<'de> for AnswersVisitor {
@@ -312,7 +326,11 @@ impl<'de> Visitor<'de> for AnswersVisitor {
         while let Some(name) = map.next_key_seed(TextSeed)? {
             // The name is copied only once the answer is known to be kept, so
             // an answer that is skipped costs no allocation for its name.
-            let seed = AnswerSeed::<Option<Answer>> { name: &name, target: PhantomData };
+            let seed = AnswerSeed::<Option<Answer>> {
+                name: &name,
+                levels: self.levels,
+                target: PhantomData,
+            };
             if let Some(answer) = map.next_value_seed(seed)? {
                 answers.push(name.into_owned(), answer);
             }
@@ -444,7 +462,11 @@ impl<'de> Deserialize<'de> for NoulAnswer {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(AnswerSeed::<Self> { name: "", target: PhantomData })
+        deserializer.deserialize_any(AnswerSeed::<Self> {
+            name: "",
+            levels: 0,
+            target: PhantomData,
+        })
     }
 }
 
@@ -454,7 +476,11 @@ impl<'de> Deserialize<'de> for ChoiceAnswer {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(AnswerSeed::<Self> { name: "", target: PhantomData })
+        deserializer.deserialize_any(AnswerSeed::<Self> {
+            name: "",
+            levels: 0,
+            target: PhantomData,
+        })
     }
 }
 
@@ -464,7 +490,11 @@ impl<'de> Deserialize<'de> for ScoreAnswer {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(AnswerSeed::<Self> { name: "", target: PhantomData })
+        deserializer.deserialize_any(AnswerSeed::<Self> {
+            name: "",
+            levels: 0,
+            target: PhantomData,
+        })
     }
 }
 
@@ -477,7 +507,11 @@ impl<'de> Deserialize<'de> for Answer {
         D: Deserializer<'de>,
     {
         deserializer
-            .deserialize_any(AnswerSeed::<Option<Answer>> { name: "", target: PhantomData })?
+            .deserialize_any(AnswerSeed::<Option<Answer>> {
+                name: "",
+                levels: 0,
+                target: PhantomData,
+            })?
             .ok_or_else(|| de::Error::custom("an answer of a type this version does not model"))
     }
 }
@@ -489,6 +523,8 @@ impl<'de> Deserialize<'de> for Answer {
 struct AnswerSeed<'n, T> {
     /// The question name, for the warning an unknown type raises.
     name: &'n str,
+    /// See [`AnswerContext`]'s field of the same name.
+    levels: usize,
     target: PhantomData<T>,
 }
 
@@ -525,7 +561,7 @@ where
         M: MapAccess<'de>,
     {
         let mut seen: Option<Seen<'de>> = None;
-        let mut members = Members::default();
+        let mut members = Members { levels: self.levels, ..Members::default() };
 
         while let Some(index) = map.next_key_seed(Member::NAMES)? {
             let member = match index {
@@ -723,6 +759,9 @@ struct Members<'de> {
     score: Slot<'de, f64>,
     legend: Slot<'de, Vec<(u32, Content<'static>)>>,
     probabilities: Probabilities<'de>,
+    /// The capacity a score's first level list starts at when the codec
+    /// gives no hint.
+    levels: usize,
 }
 
 /// One data member: absent, read, or held as raw text until the answer's type
@@ -762,14 +801,14 @@ impl<'de> Members<'de> {
             Member::Legend => {
                 let capacity = match &self.probabilities {
                     Probabilities::Levels(levels) => levels.len(),
-                    _ => map.size_hint().unwrap_or(0),
+                    _ => map.size_hint().unwrap_or(self.levels),
                 };
                 self.legend = Slot::Read(map.next_value_seed(LegendSeed { capacity })?);
             }
             Member::Probabilities if kind == Kind::Score => {
                 let capacity = match &self.legend {
                     Slot::Read(legend) => legend.len(),
-                    _ => map.size_hint().unwrap_or(0),
+                    _ => map.size_hint().unwrap_or(self.levels),
                 };
                 self.probabilities =
                     Probabilities::Levels(map.next_value_seed(LevelsSeed { capacity })?);
@@ -1319,7 +1358,23 @@ pub(crate) fn decode_system_one<A>(
 where
     A: AnswerSet,
 {
-    let context = AnswerContext::new(questions.min(body.len() / MIN_KEPT_ANSWER_BYTES));
+    decode_system_one_with(body, status, headers, AnswerContext::new(questions), endpoint)
+}
+
+/// [`decode_system_one`] with everything the request knows about its
+/// answers.
+pub(crate) fn decode_system_one_with<A>(
+    body: Bytes,
+    status: StatusCode,
+    headers: HeaderMap,
+    asked: AnswerContext,
+    endpoint: Option<(&Method, &Uri)>,
+) -> Result<SystemOneResponse<A>, Error>
+where
+    A: AnswerSet,
+{
+    let expected = asked.expected_answers().min(body.len() / MIN_KEPT_ANSWER_BYTES);
+    let context = AnswerContext::new(expected).with_levels(asked.levels);
     let meta = ResponseMeta::new(status, headers, body);
     let decoded =
         codec::decode_seed(meta.raw_body(), EnvelopeSeed::<A> { context, answers: PhantomData });

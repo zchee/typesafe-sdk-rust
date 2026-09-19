@@ -1216,11 +1216,16 @@ fn a_score_level_given_as_a_number_is_read_as_one() {
 fn the_expectations_name_what_was_wanted() {
     let rows: [(&Render, &str); 10] = [
         (
-            &|f| Visitor::expecting(&AnswersVisitor { capacity: 0 }, f),
+            &|f| Visitor::expecting(&AnswersVisitor { capacity: 0, levels: 0 }, f),
             "an object of question name to answer",
         ),
         (
-            &|f| Visitor::expecting(&AnswerSeed::<NoulAnswer> { name: "", target: PhantomData }, f),
+            &|f| {
+                Visitor::expecting(
+                    &AnswerSeed::<NoulAnswer> { name: "", levels: 0, target: PhantomData },
+                    f,
+                )
+            },
             "an answer object",
         ),
         (&|f| Visitor::expecting(&KeyIn(&[]), f), "an object key"),

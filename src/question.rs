@@ -411,10 +411,20 @@ impl<'a> Questions<'a> {
             buf.extend_from_slice(name.as_bytes());
         }
 
+        let max_levels = self
+            .entries
+            .iter()
+            .map(|(_, question)| match question {
+                Question::Score(score) => score.levels.len(),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0);
         Ok(PreparedQuestions {
             buf: Bytes::from(buf.into_boxed_slice()),
             json_len,
             name_ends: NameEnds::Shared(name_ends),
+            max_levels,
         })
     }
 }
@@ -423,7 +433,7 @@ impl<'a> Questions<'a> {
 ///
 /// Cloning it copies a reference count, not the bytes, and it can be shared
 /// between threads and reused by any number of calls.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct PreparedQuestions {
     /// The JSON object sent as `questions`, then every name, unescaped, back
     /// to back.
@@ -433,7 +443,23 @@ pub struct PreparedQuestions {
     /// Where each name ends in `buf`; each name starts where the one before
     /// it ends.
     name_ends: NameEnds,
+    /// The most levels any score question has, or 0 when not known (a set
+    /// compiled into the program, or scores given as raw questions only). A
+    /// sizing hint for decoding the answers, never sent.
+    max_levels: usize,
 }
+
+/// Two sets are equal when their bytes are, however each was made; the
+/// sizing hint is not part of the set.
+impl PartialEq for PreparedQuestions {
+    fn eq(&self, other: &Self) -> bool {
+        self.buf == other.buf
+            && self.json_len == other.json_len
+            && self.name_ends == other.name_ends
+    }
+}
+
+impl Eq for PreparedQuestions {}
 
 /// The name ends of a prepared set: allocated once by [`Questions::prepare`],
 /// or compiled into the program for a [`QuestionSet`].
@@ -504,6 +530,7 @@ impl PreparedQuestions {
             buf: Bytes::from_static(buf.as_bytes()),
             json_len,
             name_ends: NameEnds::Static(name_ends),
+            max_levels: 0,
         }
     }
 
@@ -527,6 +554,12 @@ impl PreparedQuestions {
             std::str::from_utf8(&self.buf[start..ends[index]])
                 .expect("invariant: the names were copied from `str`s")
         })
+    }
+
+    /// The most levels any score question of the set has, or 0 when not
+    /// known.
+    pub(crate) fn max_levels(&self) -> usize {
+        self.max_levels
     }
 
     /// The JSON object that goes after `"questions":` in a request body.
