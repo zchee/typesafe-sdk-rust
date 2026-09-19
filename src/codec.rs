@@ -358,6 +358,33 @@ pub(crate) fn check_depth(json: &[u8]) -> Result<(), DecodeError> {
     Ok(())
 }
 
+/// Checks that `bytes` are UTF-8, and hands them back as text.
+///
+/// Every decode starts here, before the depth pre-scan and before any byte
+/// reaches the codec, because the codec cannot be trusted with anything
+/// else: when it reads a string it takes the bytes as text without checking
+/// them (a `debug_assert!` in its debug builds, nothing in its release
+/// builds), and it reports a byte that is not UTF-8 only once the whole
+/// document has been read - after a string holding one has already been
+/// handed on as text. The codec is then given the checked text, which it does
+/// not check a second time.
+///
+/// # Errors
+///
+/// Returns a [`DecodeErrorKind::Syntax`] error at the first byte that is not
+/// part of a UTF-8 character: JSON text is UTF-8 (RFC 8259, section 8.1), so a
+/// document holding such a byte is not JSON. The position counts bytes, as the
+/// codec's own positions do.
+fn as_text(bytes: &[u8]) -> Result<&str, DecodeError> {
+    std::str::from_utf8(bytes).map_err(|failure| {
+        let before = &bytes[..failure.valid_up_to()];
+        let line = 1 + before.iter().filter(|&&byte| byte == b'\n').count();
+        let line_start = before.iter().rposition(|&byte| byte == b'\n').map_or(0, |at| at + 1);
+        let column = 1 + before.len() - line_start;
+        DecodeError { detail: Detail::Syntax { line, column } }
+    })
+}
+
 /// Decodes `bytes` into `T`.
 ///
 /// The successful path is a single pass and pays nothing for error reporting.
@@ -366,57 +393,61 @@ pub(crate) fn check_depth(json: &[u8]) -> Result<(), DecodeError> {
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] when the input is nested too deeply, is not valid
-/// JSON, or does not have the shape `T` expects.
+/// Returns [`DecodeError`] when the input is not UTF-8, is nested too deeply,
+/// is not valid JSON, or does not have the shape `T` expects.
 pub(crate) fn decode<'de, T>(bytes: &'de [u8]) -> Result<T, DecodeError>
 where
     T: Deserialize<'de>,
 {
+    let text = as_text(bytes)?;
     check_depth(bytes)?;
     // `PhantomData<T>` is serde's own seed for "decode a `T`", which is what
     // lets the failure pass below serve this function and `decode_seed` alike.
-    sonic_rs::from_slice::<T>(bytes).map_err(|_| describe_failure(bytes, PhantomData::<T>))
+    sonic_rs::from_str::<T>(text).map_err(|_| describe_failure(text, PhantomData::<T>))
 }
 
 /// Decodes `bytes` through `seed`, a decoder that carries state of its own -
 /// how many answers to make room for, for instance - which a type's
 /// `Deserialize` cannot receive.
 ///
-/// Everything else is [`decode`]: the same depth pre-scan, one pass on
-/// success that accepts exactly what `decode` accepts, and on failure the same
-/// second, path-tracking pass. That second pass needs the seed again, which is
-/// why it is `Clone`: a seed is consumed by the pass it drives.
+/// Everything else is [`decode`]: the same UTF-8 check and depth pre-scan,
+/// one pass on success that accepts exactly what `decode` accepts, and on
+/// failure the same second, path-tracking pass. That second pass needs the
+/// seed again, which is why it is `Clone`: a seed is consumed by the pass it
+/// drives.
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] when the input is nested too deeply, is not valid
-/// JSON, or does not have the shape the seed expects.
+/// Returns [`DecodeError`] when the input is not UTF-8, is nested too deeply,
+/// is not valid JSON, or does not have the shape the seed expects.
 pub(crate) fn decode_seed<'de, S>(bytes: &'de [u8], seed: S) -> Result<S::Value, DecodeError>
 where
     S: DeserializeSeed<'de> + Clone,
 {
+    let text = as_text(bytes)?;
     check_depth(bytes)?;
-    // The codec's entry point for a type runs three checks its deserializer
-    // does not run on its own: the value is followed by nothing but
-    // whitespace, which `end` checks, and the whole input is UTF-8 - also the
-    // bytes of a string a skipped value held, which no string read ever
-    // looks at. That last check is not reachable from outside the codec, so
-    // it is made here, before the parse.
-    let decoded = std::str::from_utf8(bytes).ok().and_then(|_| {
-        let mut deserializer = sonic_rs::Deserializer::from_slice(bytes);
-        let value = seed.clone().deserialize(&mut deserializer).ok()?;
-        deserializer.end().ok().map(|()| value)
-    });
-    decoded.ok_or_else(|| describe_failure(bytes, seed))
+    // The codec's entry point for a type checks that the value is followed by
+    // nothing but whitespace; its deserializer does that only when asked, with
+    // `end`.
+    let decoded = {
+        let mut deserializer = sonic_rs::Deserializer::from_str(text);
+        seed.clone()
+            .deserialize(&mut deserializer)
+            .ok()
+            .and_then(|value| deserializer.end().ok().map(|()| value))
+    };
+    decoded.ok_or_else(|| describe_failure(text, seed))
 }
 
 /// Re-runs a failed decode with path tracking and turns the result into a
 /// [`DecodeError`] that carries no part of the input.
-fn describe_failure<'de, S>(bytes: &'de [u8], seed: S) -> DecodeError
+///
+/// `text` is what [`as_text`] returned, so it is read without a second check.
+fn describe_failure<'de, S>(text: &'de str, seed: S) -> DecodeError
 where
     S: DeserializeSeed<'de>,
 {
-    let mut deserializer = sonic_rs::Deserializer::from_slice(bytes);
+    let mut deserializer = sonic_rs::Deserializer::from_str(text);
     let mut track = serde_path_to_error::Track::new();
     let failure = seed
         .deserialize(serde_path_to_error::Deserializer::new(&mut deserializer, &mut track))
@@ -629,7 +660,7 @@ where
     // above does not read the text at all and so needs no cap.
     check_depth(text.as_bytes()).map_err(ser::Error::custom)?;
 
-    let mut source = sonic_rs::Deserializer::from_slice(text.as_bytes());
+    let mut source = sonic_rs::Deserializer::from_str(text);
     Transcoder::new(&mut source).serialize(serializer)
 }
 

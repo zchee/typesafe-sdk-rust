@@ -1211,3 +1211,163 @@ fn a_data_error_without_a_path_says_so_rather_than_printing_an_empty_one() {
     assert_eq!(opaque.to_string(), "the JSON document does not have the expected shape");
     assert!(!opaque.to_string().contains("``"), "an empty path must not be printed");
 }
+
+// ------------------------------------------------- bytes that are not UTF-8
+//
+// The codec takes a string's bytes as text without checking them, and reports
+// a byte that is not UTF-8 only after the whole document has been read. Before
+// the check in `as_text`, a response holding one inside a string that is kept
+// as raw text - a member of an error body, an object in a score legend -
+// panicked inside the codec in a debug build and handed on an invalid `&str`
+// in a release build. Each case below is refused before the codec sees it.
+
+/// Documents holding a byte sequence that is not UTF-8, with the one-based
+/// line and byte column of its first byte.
+const NOT_UTF8: &[(&str, &[u8], usize, usize)] = &[
+    ("in a string value", b"{\"a\":\"\xC9\"}", 1, 7),
+    ("in an object key", b"{\"\xC9\":1}", 1, 3),
+    ("right after a backslash", b"{\"a\":\"\\\xC9\"}", 1, 8),
+    ("a sequence cut short at the very end", b"{\"a\":\"\xC3", 1, 7),
+    ("an overlong encoding of '/'", b"[\"\xC0\xAF\"]", 1, 3),
+    ("a surrogate half written as raw bytes", b"[\"\xED\xA0\x80\"]", 1, 3),
+    ("after a valid two-byte character", b"[\"\xC3\xA9\xC9\"]", 1, 5),
+    ("on the third line", b"{\n  \"a\": \"ok\",\n  \"b\": \"\xFF\"\n}", 3, 9),
+];
+
+/// Fails unless `result` is the syntax error at `line` and `column` that a
+/// byte which is not UTF-8 gives.
+fn assert_not_utf8<T: fmt::Debug>(
+    case: &str,
+    entry: &str,
+    result: Result<T, DecodeError>,
+    line: usize,
+    column: usize,
+) {
+    let error = match result {
+        Ok(value) => panic!("{case}, {entry}: decoded to {value:?} instead of failing"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), DecodeErrorKind::Syntax, "{case}, {entry}: {error:?}");
+    assert_eq!((error.line(), error.column()), (line, column), "{case}, {entry}: {error:?}");
+    assert_eq!(error.path(), "", "{case}, {entry}");
+    assert_eq!(
+        error.to_string(),
+        format!("invalid JSON syntax at line {line} column {column}"),
+        "{case}, {entry}"
+    );
+}
+
+#[test]
+fn bytes_that_are_not_utf8_are_a_syntax_error_at_the_first_of_them() {
+    for &(case, bytes, line, column) in NOT_UTF8 {
+        assert_not_utf8(case, "RawJson", decode::<RawJson>(bytes), line, column);
+        assert_not_utf8(case, "a skipped value", decode::<IgnoredAny>(bytes), line, column);
+        assert_not_utf8(
+            case,
+            "a string map",
+            decode::<BTreeMap<String, RawJson>>(bytes),
+            line,
+            column,
+        );
+        assert_not_utf8(
+            case,
+            "a seeded RawJson",
+            decode_seed(bytes, PhantomData::<RawJson>),
+            line,
+            column,
+        );
+    }
+}
+
+#[test]
+fn the_utf8_check_comes_before_the_depth_check() {
+    let mut deep = nested_array(MAX_JSON_DEPTH + 1).into_bytes();
+    deep.insert(1, 0xC9);
+    let error = decode::<IgnoredAny>(&deep).expect_err("neither UTF-8 nor shallow");
+    assert_eq!(error.kind(), DecodeErrorKind::Syntax, "{error:?}");
+    assert_eq!((error.line(), error.column()), (1, 2));
+}
+
+#[test]
+fn a_document_that_is_utf8_decodes_as_before() {
+    let raw =
+        decode::<RawJson>("{\"caf\u{e9}\":\"\u{1F600}\"}".as_bytes()).expect("valid UTF-8 JSON");
+    assert_eq!(raw.as_str(), "{\"caf\u{e9}\":\"\u{1F600}\"}");
+}
+
+/// The input the fuzzer found: a validation error list whose `msg` holds 87
+/// bytes of 0xC9, each the start of a two-byte character that never comes.
+fn fuzzer_find() -> Vec<u8> {
+    let mut body =
+        b"{\"detail\":[{\"loc\":[\"body\",\"questions\",\"spam\",0],\"msg\":\"fi".to_vec();
+    body.extend(std::iter::repeat_n(0xC9, 87));
+    body.extend_from_slice(b"eld required\",\"type\":\"missing\"},{\"loc\":\"x\",\"msg\":7},3]}");
+    body
+}
+
+#[test]
+fn an_error_body_that_is_not_utf8_becomes_its_own_lossy_message() {
+    use crate::error::{ApiError, ApiErrorKind};
+
+    let found = fuzzer_find();
+    assert_eq!(found.len(), 199, "the fuzzer's input is 199 bytes");
+    let bodies: [(&str, &[u8]); 3] = [
+        ("a string member", b"{\"error\":\"\xC9\"}"),
+        ("a message inside a detail list", &found),
+        ("a key", b"{\"\xC9\":\"x\"}"),
+    ];
+    for (case, body) in bodies {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::RETRY_AFTER, http::HeaderValue::from_static("3"));
+        let error = ApiError::new(
+            http::StatusCode::UNPROCESSABLE_ENTITY,
+            Bytes::copy_from_slice(body),
+            headers,
+            None,
+        );
+        assert_eq!(error.kind(), ApiErrorKind::UnprocessableEntity, "{case}");
+        assert_eq!(error.body(), body, "{case}: the body is kept byte for byte");
+        assert_eq!(error.error_type(), None, "{case}");
+        // Not JSON, so the body is the message as text, with each byte that
+        // is not UTF-8 replaced by U+FFFD; every such body here is under the
+        // 200-character cut.
+        assert_eq!(error.message(), String::from_utf8_lossy(body), "{case}");
+        assert_eq!(
+            error.retry_after_at(std::time::SystemTime::UNIX_EPOCH),
+            Some(std::time::Duration::from_secs(3)),
+            "{case}: the headers are still read"
+        );
+    }
+    let small = ApiError::new(
+        http::StatusCode::UNPROCESSABLE_ENTITY,
+        Bytes::from_static(b"{\"error\":\"\xC9\"}"),
+        http::HeaderMap::new(),
+        None,
+    );
+    assert_eq!(small.message(), "{\"error\":\"\u{FFFD}\"}");
+    assert_eq!(small.to_string(), "422 {\"error\":\"\u{FFFD}\"}");
+}
+
+#[test]
+fn a_success_body_with_a_legend_object_that_is_not_utf8_is_a_validation_error() {
+    let body: &[u8] =
+        b"{\"model\":\"m\",\"usage\":{},\"answers\":{\"s\":{\"type\":\"score\",\"score\":0,\
+        \"confidence\":0,\"legend\":{\"0\":{\"a\":\"\xC9\"}},\"probabilities\":{\"0\":1}}}}";
+    let column = 1 + body.iter().position(|&byte| byte == 0xC9).expect("the bad byte is there");
+    let failure = crate::de::decode_system_one::<crate::response::Answers>(
+        Bytes::copy_from_slice(body),
+        http::StatusCode::OK,
+        http::HeaderMap::new(),
+        1,
+        None,
+    )
+    .expect_err("a body that is not UTF-8 does not decode");
+    let crate::ErrorKind::ResponseValidation(error) = failure.kind() else {
+        panic!("expected a response-validation error, got {failure:?}");
+    };
+    assert_eq!(error.field_path(), "");
+    assert_eq!(error.decode_error().kind(), DecodeErrorKind::Syntax);
+    assert_eq!((error.decode_error().line(), error.decode_error().column()), (1, column));
+    assert_eq!(error.body(), body, "the body is kept byte for byte");
+    assert_eq!(error.message(), "Invalid response data at ''.");
+}
