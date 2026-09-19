@@ -20,9 +20,15 @@
 //! of a repeated identical call is the same every time by design, so the
 //! minimum is that cost. The minimum alone would also hide an allocation the
 //! SDK makes in some calls and not in others, so it has to be the value of
-//! at least [`AGREE`] of the runs: the foreign bookkeeping happens once, and
-//! its two allocations can pollute at most two runs even if they fall on
-//! either side of a run boundary. Every run is printed, so a polluted one is
+//! at least [`AGREE`] of the runs. The foreign bookkeeping happens once per
+//! process, but it is several allocations spread over three calls
+//! (`insert`, `push_back` and `recv_timeout`'s own), so nothing in libtest
+//! stops it from straddling a run boundary. That it lands in ONE run is an
+//! observation, not a guarantee: in 46 polluted windows measured on Linux
+//! x86_64 it was always one run of five. If it ever splits across enough runs
+//! to leave fewer than [`AGREE`] at the minimum, the test fails the stability
+//! rule - a flake - and never passes falsely, because the minimum cannot fall
+//! below the SDK's own cost. Every run is printed, so a polluted one is
 //! visible in the output.
 
 use std::fmt::Write as _;

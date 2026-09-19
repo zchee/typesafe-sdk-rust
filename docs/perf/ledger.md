@@ -876,7 +876,12 @@ Why this cannot hide a regression:
   is the same every time by design, so the minimum is that cost.
 - An allocation the SDK makes on every call raises all five runs, and so the minimum.
 - One it makes on only some calls leaves fewer than three runs at the minimum and fails the stability rule.
-- The foreign bookkeeping happens once per process, and its two allocations can reach at most two runs.
+- The foreign bookkeeping happens once per process, but it is several allocations over three calls
+  (`running_tests.insert` +1, `timeout_queue.push_back` +1, and `rx.recv_timeout`'s own), +4 blocks / +900 bytes in
+  all on Linux x86_64. Nothing in libtest keeps them inside one run: that they land in ONE run of five is an
+  **empirical** bound (46 of 46 polluted windows below), not a guarantee. If they ever split across runs so that fewer
+  than three equal the minimum, the worst case is a failed stability rule - a flake - and never a false pass, because
+  a foreign allocation can only raise a run, never lower the minimum below the SDK's own cost.
 
 What is not repeated, and why:
 - `prepared()`'s first call is measured once, because only the first call is a first call.
