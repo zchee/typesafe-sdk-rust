@@ -606,9 +606,12 @@ where
     /// and sent the same way.
     ///
     /// The state's type is not a type parameter of this method, so that
-    /// `ask::<Ticket>(&state)` names only the question set. It stays a type of
-    /// its own, unnamed, in the builder's type; a function that takes the
-    /// builder takes it as a generic.
+    /// `ask::<Ticket>(&state)` names only the question set. The price is that
+    /// the state's type is opaque in the returned builder's type: a function
+    /// that takes the builder takes it as a generic. Where the type must be
+    /// named,
+    /// `client.system_one(&state, Ticket::prepared()).typed::<Ticket>()` is
+    /// the same request with the state's own type.
     ///
     /// ```
     /// # #[cfg(feature = "macros")]

@@ -1,0 +1,23 @@
+error[E0277]: `String` cannot be decoded as the answers of a response
+  --> tests/ui/not_an_answer_set.rs:11:66
+   |
+11 |     let _request = client.system_one("state", &prepared).typed::<String>();
+   |                                                          -----   ^^^^^^ not a set of answers
+   |                                                          |
+   |                                                          required by a bound introduced by this call
+   |
+   = help: the trait `AnswerSet` is not implemented for `String`
+   = note: use `Answers` to look answers up by question name, or declare a struct with one field per question and `#[derive(QuestionSet)]` it (the `macros` feature, on by default), which implements `AnswerSet`
+help: the trait `AnswerSet` is implemented for `Answers`
+  --> src/de.rs
+   |
+   | impl AnswerSet for Answers {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `SystemOne::<'a, S, T, A>::typed`
+  --> src/request.rs
+   |
+   |     pub fn typed<B>(self) -> SystemOne<'a, S, T, B>
+   |            ----- required by a bound in this associated function
+   |     where
+   |         B: AnswerSet,
+   |            ^^^^^^^^^ required by this bound in `SystemOne::<'a, S, T, A>::typed`
