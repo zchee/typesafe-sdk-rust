@@ -252,10 +252,11 @@ fn a_long_body_used_as_its_own_message_is_cut_and_marked() {
     let cut_plain = message_of(&plain);
     assert_eq!(cut_plain, format!("{}\u{2026}", "x".repeat(200)));
 
-    // A message the server put in a member it named is not cut: that is the
-    // sentence it chose to send, not a body falling back on itself.
+    // DIVERGENCE from the Python SDK, deliberate: there a message the server
+    // put in a member it named is never cut. Here it is cut like the body,
+    // since a member of 16 MiB floods a log line exactly as a body does.
     let named = format!(r#"{{"message":"{}"}}"#, "y".repeat(500));
-    assert_eq!(message_of(&named), "y".repeat(500));
+    assert_eq!(message_of(&named), format!("{}\u{2026}", "y".repeat(200)));
 }
 
 #[test]
@@ -514,6 +515,205 @@ fn nothing_that_could_be_a_secret_reaches_a_debug_rendering() {
             "headers: <2 redacted>, body: <39 bytes> }"
         )
     );
+}
+
+// ------------------------------------------------- server text in a message
+
+/// No byte a terminal or a log reader would act on, and none of the
+/// characters that hide or reorder text.
+fn assert_printable(shown: &str) {
+    assert!(
+        !shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
+        "a control byte reached the rendering: {shown:?}"
+    );
+    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{85}'] {
+        assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
+    }
+}
+
+/// Asserts that neither rendering of `error`, nor of the [`Error`] wrapping
+/// it, holds a character a log reader would act on, and returns its
+/// `Display`.
+fn assert_rendered_safely(error: &ApiError) -> String {
+    let wrapped = Error::from(error.clone());
+    for shown in
+        [error.to_string(), format!("{error:?}"), wrapped.to_string(), format!("{wrapped:?}")]
+    {
+        assert_printable(&shown);
+    }
+    assert_eq!(wrapped.to_string(), error.to_string(), "wrapping does not change the sentence");
+    error.to_string()
+}
+
+/// `text` as a JSON string, escapes and all, so that a body can carry any
+/// character without the test source spelling a JSON escape.
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).expect("a string always serializes")
+}
+
+/// Text with a line break, a colour, a right-to-left override and a NUL, and
+/// the message it must become: each written as a Rust escape.
+const HOSTILE: &str = "a\nb\u{1b}[31mRED\u{202e}X\u{0}";
+const HOSTILE_SHOWN: &str = r"a\nb\u{1b}[31mRED\u{202e}X\u{0}";
+
+#[test]
+fn every_message_read_from_a_body_is_escaped_wherever_it_came_from() {
+    let hostile = json_string(HOSTILE);
+    let rows: [(String, &str); 10] = [
+        (format!(r#"{{"error":{hostile}}}"#), HOSTILE_SHOWN),
+        (format!(r#"{{"error":{{"message":{hostile}}}}}"#), HOSTILE_SHOWN),
+        (format!(r#"{{"message":{hostile}}}"#), HOSTILE_SHOWN),
+        (format!(r#"{{"detail":{hostile}}}"#), HOSTILE_SHOWN),
+        (format!(r#"{{"detail":{{"message":{hostile}}}}}"#), HOSTILE_SHOWN),
+        // A detail list: the location and the message are both the server's.
+        (
+            format!(
+                r#"{{"detail":[{{"loc":["body",{}],"msg":{}}}]}}"#,
+                json_string("a\nb"),
+                json_string("m\u{1b}n")
+            ),
+            r"a\nb: m\u{1b}n",
+        ),
+        // A JSON string body is its own message.
+        (hostile.clone(), HOSTILE_SHOWN),
+        // Text that is not JSON keeps its whitespace, escaped.
+        ("oops\u{1b}[2J\nline2".to_owned(), r"oops\u{1b}[2J\nline2"),
+        // A JSON body standing for itself already spells its escapes with a
+        // backslash, and the backslash is kept rather than doubled.
+        (r#"{"unknown":"a\nb"}"#.to_owned(), r#"{"unknown":"a\nb"}"#),
+        // A raw tab inside a JSON string is not JSON; it is text, escaped.
+        ("{\"unknown\":\"a\tb\"}".to_owned(), r#"{"unknown":"a\tb"}"#),
+    ];
+    for (body, shown) in rows {
+        let error = api(500, &body);
+        assert_eq!(error.message(), shown, "body {body:?}");
+        assert_eq!(assert_rendered_safely(&error), format!("500 {shown}"), "body {body:?}");
+        assert_eq!(error.body(), body.as_bytes(), "the body itself is kept whole");
+        assert_eq!(error.body_text(), body);
+    }
+}
+
+#[test]
+fn every_message_read_from_a_body_is_cut_after_escaping_and_the_body_is_kept() {
+    // 5,000 characters in a member: 200 of them and the mark.
+    let error = api(500, &format!(r#"{{"error":"{}"}}"#, "x".repeat(5000)));
+    assert_eq!(error.message(), format!("{}\u{2026}", "x".repeat(200)));
+    assert_eq!(assert_rendered_safely(&error).chars().count(), "500 ".len() + 200 + 1);
+
+    // A member of 1 MiB: the same 201 characters, and every byte of the body
+    // still there for a caller who wants it.
+    let huge = "y".repeat(1 << 20);
+    let body = format!(r#"{{"message":"{huge}"}}"#);
+    let error = api(500, &body);
+    assert_eq!(error.message(), format!("{}\u{2026}", "y".repeat(200)));
+    assert_eq!(assert_rendered_safely(&error).chars().count(), "500 ".len() + 200 + 1);
+    assert_eq!(error.body().len(), body.len());
+    assert_eq!(error.body_text(), body);
+
+    // A detail list of any length joins to one sentence, cut the same way.
+    let entry = r#"{"loc":["body","state"],"msg":"too long"}"#;
+    let list = format!(r#"{{"detail":[{}]}}"#, vec![entry; 1000].join(","));
+    let joined = "state: too long; ".repeat(12);
+    assert_eq!(api(422, &list).message(), format!("{}\u{2026}", &joined[..200]));
+
+    // The cut counts the escape, not the character, and never splits one:
+    // 194 characters and a six-character `\u{1b}` fill the 200 exactly...
+    let exact =
+        api(500, &format!(r#"{{"error":{}}}"#, json_string(&format!("{}\u{1b}", "x".repeat(194)))));
+    assert_eq!(exact.message(), format!(r"{}\u{{1b}}", "x".repeat(194)));
+    // ...and at 199 the escape does not fit, so it is dropped whole.
+    let over =
+        api(500, &format!(r#"{{"error":{}}}"#, json_string(&format!("{}\u{1b}", "x".repeat(199)))));
+    assert_eq!(over.message(), format!("{}\u{2026}", "x".repeat(199)));
+}
+
+#[test]
+fn the_request_id_is_escaped_and_cut_where_it_is_shown_and_raw_where_it_is_read() {
+    let endpoint = || Some(Box::<str>::from("GET https://example.test/v1/models"));
+    let with_id = |id: HeaderValue| {
+        let mut map = HeaderMap::new();
+        map.insert(REQUEST_ID_HEADER, id);
+        ApiError::new(status(503), Bytes::from_static(br#"{"message":"m"}"#), map, endpoint())
+    };
+
+    // A tab is the one control character `http` lets through as text.
+    let tab = with_id(HeaderValue::from_str("req\tlog").expect("a tab is a valid header value"));
+    assert_eq!(tab.request_id(), Some("req\tlog"), "the accessor returns the header as it came");
+    assert_eq!(
+        assert_rendered_safely(&tab),
+        r"GET https://example.test/v1/models: 503 m (request_id=req\tlog)"
+    );
+    assert_eq!(
+        format!("{tab:?}"),
+        concat!(
+            r#"ApiError { status: 503, kind: InternalServer, "#,
+            r#"endpoint: Some("GET https://example.test/v1/models"), request_id: Some("req\\tlog"), "#,
+            r#"message: "m", error_type: None, headers: <1 redacted>, body: <15 bytes> }"#
+        )
+    );
+
+    // 6,000 characters: 128 of them and the mark, in both renderings.
+    let long = "r".repeat(6000);
+    let error = with_id(HeaderValue::from_str(&long).expect("a valid header value"));
+    assert_eq!(error.request_id(), Some(long.as_str()));
+    let rendered = assert_rendered_safely(&error);
+    let shown_id = format!("{}\u{2026}", "r".repeat(128));
+    assert_eq!(
+        rendered,
+        format!("GET https://example.test/v1/models: 503 m (request_id={shown_id})")
+    );
+    assert!(format!("{error:?}").contains(&format!("request_id: Some({shown_id:?})")));
+    // The whole line is bounded whatever the server sends: the endpoint is
+    // the SDK's, and the message and the id are cut.
+    assert!(
+        rendered.chars().count()
+            <= "GET https://example.test/v1/models: 503 ".len()
+                + 201
+                + " (request_id=)".len()
+                + 129
+    );
+
+    // No header value can hold an ESC or any other control character but a
+    // tab, so none can reach the rendering through the request id.
+    assert!(HeaderValue::from_bytes(b"req\x1b[31m").is_err());
+    // A value that is not text is no request id at all.
+    let opaque = with_id(HeaderValue::from_bytes(b"req-\xff").expect("obs-text is a valid value"));
+    assert_eq!(opaque.request_id(), None);
+    assert_eq!(assert_rendered_safely(&opaque), "GET https://example.test/v1/models: 503 m");
+
+    // The validation error shows the same header the same way.
+    let body = Bytes::from_static(br#"{"model":"jev-1","answers":{"spam":{}}}"#);
+    let decode_error = codec::decode::<Fixture>(&body).expect_err("the fixture is missing a field");
+    let mut map = HeaderMap::new();
+    map.insert(REQUEST_ID_HEADER, HeaderValue::from_str("req\tv").expect("valid"));
+    let invalid = ResponseValidationError::new(status(200), body, map, None, decode_error);
+    assert_eq!(invalid.request_id(), Some("req\tv"));
+    assert_eq!(
+        invalid.to_string(),
+        r"200 Invalid response data at 'answers.spam.noul'. (request_id=req\tv)"
+    );
+    assert!(format!("{invalid:?}").contains(r#"request_id: Some("req\\tv")"#), "{invalid:?}");
+    assert_printable(&format!("{invalid:?}"));
+}
+
+#[test]
+fn the_error_type_is_read_raw_and_shown_escaped_and_cut() {
+    let name = "auth\u{1b}[2J\u{202e}";
+    let error =
+        api(403, &format!(r#"{{"message":"m","detail":{{"error_type":{}}}}}"#, json_string(name)));
+    assert_eq!(error.error_type(), Some(name), "the accessor returns the server's text");
+    assert_rendered_safely(&error);
+    assert!(
+        format!("{error:?}").contains(r#"error_type: Some("auth\\u{1b}[2J\\u{202e}")"#),
+        "{error:?}"
+    );
+    assert!(!error.to_string().contains("auth"), "the error type is never part of Display");
+
+    let long = "t".repeat(300);
+    let error = api(403, &format!(r#"{{"detail":{{"error_type":"{long}"}}}}"#));
+    assert_eq!(error.error_type(), Some(long.as_str()));
+    let shown = format!("{}\u{2026}", "t".repeat(128));
+    assert!(format!("{error:?}").contains(&format!("error_type: Some({shown:?})")), "{error:?}");
 }
 
 // ------------------------------------------------------- the wrapping error

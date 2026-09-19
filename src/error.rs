@@ -16,6 +16,11 @@
 //! * **Nothing here prints a header value or a codec error's input.** An
 //!   `Authorization` header and a decode error's excerpt of the body are both
 //!   in reach of these types, and neither appears in `Debug` or `Display`.
+//! * **Text the server chose is escaped and cut before it is printed.** An
+//!   API failure's message and the request id are the server's text, and
+//!   either would otherwise put a line break, a terminal colour or 16 MiB into
+//!   every log line that prints the error. The accessors for the body and the
+//!   headers still return them as they arrived.
 //! * **`Retry-After` is parsed against a caller-supplied `now`.** Reading the
 //!   clock inside the parser would make the HTTP-date case untestable without
 //!   mocking time, so the parser takes the instant to measure against and
@@ -35,13 +40,15 @@ use serde::{Deserialize, de::IgnoredAny};
 use crate::{
     codec::{self, DecodeError, DecodeErrorKind, RawJson},
     constants::{REQUEST_ID_HEADER, RETRY_AFTER_MS_HEADER},
+    text,
 };
 
-/// How much of an error body is rendered into a message before it is cut.
+/// How much of the server's text an API failure's message holds before it is
+/// cut, whichever part of the body the text came from.
 ///
-/// Counted in characters, not bytes, so a multi-byte body is cut at the same
-/// place a reader would see it cut.
-const MAX_ERROR_BODY_LENGTH: usize = 200;
+/// Counted in characters after escaping, not in bytes, so a multi-byte body is
+/// cut at the same place a reader would see it cut.
+const MAX_ERROR_BODY_LENGTH: usize = text::MAX_MESSAGE_CHARS;
 
 /// What a failure this crate could not attribute to itself was caused by.
 type Cause = Box<dyn StdError + Send + Sync>;
@@ -324,7 +331,9 @@ impl ApiError {
 
     /// The server's identifier for this request, from `x-typesafe-request-id`.
     ///
-    /// `None` when the header is absent or is not text.
+    /// `None` when the header is absent or is not text. This is the header's
+    /// text exactly as it arrived; `Display` and `Debug` show it escaped and
+    /// cut at 128 characters instead.
     pub fn request_id(&self) -> Option<&str> {
         self.headers.get(REQUEST_ID_HEADER).and_then(|value| value.to_str().ok())
     }
@@ -342,9 +351,19 @@ impl ApiError {
     /// It is read from the body at the first of these that holds a string:
     /// `error`, `error.message`, `message`, `detail`, `detail.message`, or a
     /// list under `detail` whose entries are joined with `; ` as
-    /// `<loc>: <msg>`. Failing all of those, it is the body itself, cut to 200
-    /// characters and marked with an ellipsis; an empty body, or a body that
-    /// is the JSON `null`, gives `status code (no body)`.
+    /// `<loc>: <msg>`. Failing all of those, it is the body itself, compacted
+    /// when it is JSON; an empty body, or a body that is the JSON `null`,
+    /// gives `status code (no body)`.
+    ///
+    /// Whichever part of the body it came from, the text is the server's, so
+    /// it is made safe to print: a control character, or a format character
+    /// that reorders or hides the text around it, is written as a Rust escape
+    /// (`\n`, `\u{1b}`), and the text is cut at 200 characters, counted after
+    /// escaping, and marked with U+2026. The Python SDK keeps a member's text
+    /// as the server sent it and cuts only a body standing in for a message;
+    /// here every path is cut, so a server cannot break, recolour or flood
+    /// the log line of a caller that prints the error.
+    /// [`body_text`](Self::body_text) still returns every byte.
     ///
     /// It can be empty, which is how a caller-supplied empty message survives
     /// to `Display`, where the status then stands alone.
@@ -358,6 +377,10 @@ impl ApiError {
     /// The live API answers a request with no key with 403 and
     /// `authentication_error` here, which is the only way to tell that case
     /// apart from a key that exists and lacks a permission.
+    ///
+    /// This is the server's text as it arrived, for a caller to compare. It is
+    /// never part of `Display`; `Debug` shows it escaped and cut at 128
+    /// characters, as it does the request id.
     pub fn error_type(&self) -> Option<&str> {
         self.error_type.as_deref()
     }
@@ -420,9 +443,9 @@ impl fmt::Debug for ApiError {
             .field("status", &self.status.as_u16())
             .field("kind", &self.kind())
             .field("endpoint", &self.endpoint())
-            .field("request_id", &self.request_id())
+            .field("request_id", &self.request_id().map(shown_name))
             .field("message", &self.message)
-            .field("error_type", &self.error_type())
+            .field("error_type", &self.error_type().map(shown_name))
             .field("headers", &HeaderCount(self.headers.len()))
             .field("body", &ByteCount(self.body.len()))
             .finish()
@@ -480,6 +503,9 @@ impl ResponseValidationError {
     }
 
     /// The server's identifier for this request, from `x-typesafe-request-id`.
+    ///
+    /// The header's text exactly as it arrived; `Display` and `Debug` show it
+    /// escaped and cut at 128 characters instead.
     pub fn request_id(&self) -> Option<&str> {
         self.headers.get(REQUEST_ID_HEADER).and_then(|value| value.to_str().ok())
     }
@@ -543,7 +569,7 @@ impl fmt::Debug for ResponseValidationError {
             .debug_struct("ResponseValidationError")
             .field("status", &self.status.as_u16())
             .field("endpoint", &self.endpoint())
-            .field("request_id", &self.request_id())
+            .field("request_id", &self.request_id().map(shown_name))
             .field("field_path", &self.field_path())
             .field("source", &self.source)
             .field("headers", &HeaderCount(self.headers.len()))
@@ -565,7 +591,9 @@ impl StdError for ResponseValidationError {
 /// `<endpoint>: <status> <message> (request_id=<id>)`, with each optional part
 /// left out when it is absent. The status is the bare number, not the number
 /// and its reason phrase, so the line reads the same whether or not the status
-/// is one the `http` crate has a name for.
+/// is one the `http` crate has a name for. The message arrives already made
+/// safe to print; the request id is the header's raw text and is made safe
+/// here.
 fn render(
     formatter: &mut fmt::Formatter<'_>,
     endpoint: Option<&str>,
@@ -581,9 +609,20 @@ fn render(
         write!(formatter, " {message}")?;
     }
     if let Some(request_id) = request_id {
-        write!(formatter, " (request_id={request_id})")?;
+        write!(formatter, " (request_id={})", shown_name(request_id))?;
     }
     Ok(())
+}
+
+/// A name the server chose - the request id, the error type - as a message
+/// or a `Debug` shows it: escaped, and cut at 128 characters, as the SDK's log
+/// lines show the request id.
+///
+/// `http` hands a header value over as text only when it is visible ASCII and
+/// tabs, so for the request id this escapes the tabs and bounds the length; a
+/// body member can hold anything.
+fn shown_name(name: &str) -> String {
+    text::bounded(&name, text::MAX_NAME_CHARS)
 }
 
 /// Stands in for the headers in a `Debug`, so their values never reach it.
@@ -756,7 +795,7 @@ impl BodyReading {
             // status to stand alone, which is what a caller-supplied empty
             // message does too.
             Some(b'"') => match codec::decode::<String>(body) {
-                Ok(text) => Self::said(text),
+                Ok(text) => Self::said(bounded(&text)),
                 Err(_) => Self::said(text_message(body)),
             },
             // Everything else is a number, a boolean, a list or `null` - or it
@@ -807,7 +846,10 @@ impl BodyReading {
             .or_else(|| joined_detail_list(&envelope.detail))
             .filter(|message| !message.is_empty());
 
-        Self { message: message.map_or_else(|| json_message(body), Into::into), error_type }
+        Self {
+            message: message.map_or_else(|| json_message(body), |message| bounded(&message)),
+            error_type,
+        }
     }
 }
 
@@ -879,19 +921,19 @@ fn location_path(raw: &RawJson) -> String {
 /// crate recognizes.
 ///
 /// The text is compacted, so a pretty-printed body does not put newlines into
-/// a one-line message, and cut so that a body of any size cannot become an
-/// error message of that size.
+/// a one-line message, and bounded like every message read from a body.
 fn json_message(body: &[u8]) -> Box<str> {
     let text = String::from_utf8_lossy(body);
-    cut(&compact(&text))
+    bounded(&compact(&text))
 }
 
 /// A body that is not JSON at all, used as its own message.
 ///
 /// Nothing is compacted here: the bytes are not JSON, so whitespace between
 /// them is not punctuation and dropping it would change what the server said.
+/// A line break or any other control character among them is escaped instead.
 fn text_message(body: &[u8]) -> Box<str> {
-    cut(&String::from_utf8_lossy(body))
+    bounded(&String::from_utf8_lossy(body))
 }
 
 /// A body no member could be read out of because it did not parse.
@@ -904,18 +946,18 @@ fn unparsed_message(body: &[u8], failure: &DecodeError) -> Box<str> {
     if failure.kind() == DecodeErrorKind::TooDeep { json_message(body) } else { text_message(body) }
 }
 
-/// The first [`MAX_ERROR_BODY_LENGTH`] characters of `text`, marked with an
-/// ellipsis when anything was left off.
-fn cut(text: &str) -> Box<str> {
-    match text.char_indices().nth(MAX_ERROR_BODY_LENGTH) {
-        Some((at, _)) => {
-            let mut short = String::with_capacity(at + '\u{2026}'.len_utf8());
-            short.push_str(&text[..at]);
-            short.push('\u{2026}');
-            short.into()
-        }
-        None => text.into(),
-    }
+/// The server's `text` as a message holds it: escaped through the one helper
+/// for text this SDK did not write, with a backslash kept as it is, and cut at
+/// [`MAX_ERROR_BODY_LENGTH`] characters, counted after escaping and marked with
+/// U+2026 when anything was left off. A cut never splits an escape, and the
+/// text past it is not copied into the message.
+///
+/// The backslash is kept because a JSON body standing in for a message already
+/// spells its escapes with one (`"a\nb"`), and a second pass would turn every
+/// one of them into `\\n`; what the message loses in exactness `body_text`
+/// keeps.
+fn bounded(text: &str) -> Box<str> {
+    text::bounded(&text, MAX_ERROR_BODY_LENGTH).into_boxed_str()
 }
 
 /// The first byte of `body` that is not JSON whitespace.

@@ -468,6 +468,98 @@ async fn error_messages() {
     }
 }
 
+/// No byte a terminal or a log reader would act on, and none of the
+/// characters that hide or reorder text.
+fn assert_printable(shown: &str) {
+    assert!(
+        !shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
+        "a control byte reached the rendering: {shown:?}"
+    );
+    for hidden in ['\u{202e}', '\u{2066}'] {
+        assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
+    }
+}
+
+/// Section 6, "cut to 200 characters + U+2026 on every path": what a server
+/// puts in an error body or its request id reaches `Display` and `Debug`
+/// escaped and cut, over each protocol; the body and the header stay whole
+/// behind their accessors.
+#[tokio::test]
+async fn server_text_in_an_api_error_is_escaped_and_cut() {
+    let hostile = serde_json::to_string("a\nb\u{1b}[31mRED\u{202e}X\u{0}").expect("serializes");
+    let long_id = "r".repeat(6000);
+    let huge = "y".repeat(1 << 20);
+    let rows: [(String, &str, String); 4] = [
+        (
+            format!(r#"{{"error":{hostile}}}"#),
+            "req\tlog",
+            r"a\nb\u{1b}[31mRED\u{202e}X\u{0} (request_id=req\tlog)".to_owned(),
+        ),
+        (
+            format!(r#"{{"message":"{huge}"}}"#),
+            &long_id,
+            format!("{}\u{2026} (request_id={}\u{2026})", "y".repeat(200), "r".repeat(128)),
+        ),
+        (
+            "oops\u{1b}[2J\nline2".to_owned(),
+            "req-text",
+            r"oops\u{1b}[2J\nline2 (request_id=req-text)".to_owned(),
+        ),
+        (
+            format!(
+                r#"{{"detail":[{{"loc":["body",{}],"msg":{}}}]}}"#,
+                serde_json::to_string("a\nb").expect("serializes"),
+                serde_json::to_string("m\u{1b}n").expect("serializes")
+            ),
+            "req-list",
+            r"a\nb: m\u{1b}n (request_id=req-list)".to_owned(),
+        ),
+    ];
+    for protocol in PROTOCOLS {
+        for (body, id, shown) in &rows {
+            let (answer, header) = (Bytes::from(body.clone()), id.to_string());
+            let server = TestServer::start(protocol, move |_| {
+                let (answer, header) = (answer.clone(), header.clone());
+                async move {
+                    let mut response = json_response(StatusCode::INTERNAL_SERVER_ERROR, answer);
+                    response
+                        .headers_mut()
+                        .insert("x-typesafe-request-id", header.parse().expect("a valid value"));
+                    response
+                }
+            })
+            .await
+            .expect("the test server starts");
+
+            let error =
+                client_for(&server, protocol).models().list().send().await.expect_err("refused");
+            let rendered = error.to_string();
+            assert_eq!(
+                rendered,
+                format!("GET {}/v1/models: 500 {shown}", server.base_url()),
+                "{protocol:?}"
+            );
+            let api = api_error(&error);
+            for text in
+                [rendered.clone(), format!("{error:?}"), api.to_string(), format!("{api:?}")]
+            {
+                assert_printable(&text);
+            }
+            // The endpoint is the SDK's; after it, 4 characters of status,
+            // at most 201 of message and 14 + 129 of request id.
+            let endpoint = format!("GET {}/v1/models: ", server.base_url());
+            assert!(
+                rendered.chars().count() <= endpoint.len() + 4 + 201 + 14 + 129,
+                "{protocol:?}: {} characters",
+                rendered.chars().count()
+            );
+            assert_eq!(api.body(), body.as_bytes(), "{protocol:?}: the body is kept whole");
+            assert_eq!(api.body_text(), body.as_str());
+            assert_eq!(api.request_id(), Some(*id), "{protocol:?}: the id is kept whole");
+        }
+    }
+}
+
 // ------------------------------------------------------ transport errors
 
 /// A base URL with nothing listening at it.
