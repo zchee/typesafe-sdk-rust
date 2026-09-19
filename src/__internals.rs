@@ -79,8 +79,8 @@ pub fn reset_scratch() {
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] when the input is nested too deeply, is not valid
-/// JSON, or does not have the shape `T` expects.
+/// Returns [`DecodeError`] when the input is not UTF-8, is nested too deeply,
+/// is not valid JSON, or does not have the shape `T` expects.
 pub fn decode<'de, T>(bytes: &'de [u8]) -> Result<T, DecodeError>
 where
     T: serde::Deserialize<'de>,
@@ -111,6 +111,42 @@ where
     A: crate::de::AnswerSet,
 {
     crate::de::decode_system_one(body, status, headers, questions, None)
+}
+
+/// See `models::decode_list_models`: the decoder a models response goes
+/// through.
+///
+/// # Errors
+///
+/// Returns a response-validation [`Error`](crate::Error) when the body does
+/// not decode.
+pub fn decode_list_models(
+    body: Bytes,
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+) -> Result<crate::models::ListModelsResponse, crate::Error> {
+    crate::models::decode_list_models(body, status, headers, None)
+}
+
+/// See `ApiError::new`: the error a non-success response becomes, with its
+/// message read out of `body`.
+#[must_use]
+pub fn api_error(
+    status: http::StatusCode,
+    body: Bytes,
+    headers: http::HeaderMap,
+) -> crate::ApiError {
+    crate::error::ApiError::new(status, body, headers, None)
+}
+
+/// See `error::parse_retry_after`: the wait the response headers ask for,
+/// with an HTTP date measured against `now`.
+#[must_use]
+pub fn parse_retry_after(
+    headers: &http::HeaderMap,
+    now: std::time::SystemTime,
+) -> Option<std::time::Duration> {
+    crate::error::parse_retry_after(headers, now)
 }
 
 /// Forwards to `retry::backoff_seconds`, unchanged: the delay in seconds

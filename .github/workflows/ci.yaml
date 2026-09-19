@@ -122,6 +122,16 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # The fuzz targets are a workspace of their own, excluded from the one
+      # every step above builds, and running them needs nightly. Checking
+      # them needs neither: stable compiles them, together with libFuzzer's
+      # C++ runtime, so a change to the hidden seam they call through breaks
+      # here instead of on the next fuzzing run. One platform is enough for a
+      # compile check; `--locked` holds it to the committed lock file.
+      - name: Fuzz targets compile
+        if: matrix.os == 'ubuntu-26.04'
+        run: cargo check --locked --manifest-path fuzz/Cargo.toml
+
   coverage:
     name: coverage
     runs-on: ubuntu-26.04
