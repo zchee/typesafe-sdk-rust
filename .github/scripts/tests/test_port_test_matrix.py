@@ -530,6 +530,53 @@ def test_upstream_file_missing_from_the_pin_fails(
     )
 
 
+def test_upstream_file_without_test_functions_fails(
+    run: Run, port_test_matrix: ModuleType, tmp_path: Path
+) -> None:
+    """A new upstream test file that defines no test function at all fails."""
+    upstream = fake_upstream(port_test_matrix, tmp_path)
+    (upstream / "tests/test_helpers.py").write_text(
+        "def helper():\n    pass\n", encoding="utf-8"
+    )
+
+    status, out = run(argv=("--upstream", str(upstream)))
+
+    assert status == 1
+    assert out == failed(
+        [
+            (
+                f"{upstream}: tests/test_helpers.py defines no top-level test_* "
+                "function; the pin cannot cover it"
+            ),
+        ],
+        summary(),
+    )
+
+
+def test_upstream_file_of_test_methods_fails(
+    run: Run, port_test_matrix: ModuleType, tmp_path: Path
+) -> None:
+    """A new upstream test file whose tests are methods of a class fails."""
+    upstream = fake_upstream(port_test_matrix, tmp_path)
+    (upstream / "tests/test_class.py").write_text(
+        "class TestThing:\n    def test_method(self):\n        pass\n",
+        encoding="utf-8",
+    )
+
+    status, out = run(argv=("--upstream", str(upstream)))
+
+    assert status == 1
+    assert out == failed(
+        [
+            (
+                f"{upstream}: tests/test_class.py defines no top-level test_* "
+                "function; the pin cannot cover it"
+            ),
+        ],
+        summary(),
+    )
+
+
 def test_upstream_without_tests_fails(run: Run, tmp_path: Path) -> None:
     """A directory holding no upstream test file fails."""
     status, out = run(argv=("--upstream", str(tmp_path)))

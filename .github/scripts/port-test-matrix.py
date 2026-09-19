@@ -28,7 +28,11 @@ the Python repository's own tooling).
 
 With ``--upstream <checkout>`` it also checks ``UPSTREAM_TESTS`` itself: every
 ``test_*`` function the checkout defines is pinned, and every pinned one is
-defined.
+defined. It also fails on:
+
+* an upstream ``tests/test_*.py`` the pin does not name that defines no
+  module-level ``test_*`` function (none at all, or only methods of a class),
+  which the pin cannot cover.
 
 Run it from the repository root.
 """
@@ -466,10 +470,19 @@ def check_upstream(upstream: Path) -> list[str]:
         for file in files
         for name in UPSTREAM_TEST.findall((upstream / file).read_text(encoding="utf-8"))
     }
+    # A pinned file that lost its functions is reported once per pinned test
+    # below; only an unpinned one would otherwise pass without a word.
     faults = [
+        f"{upstream}: {file} defines no top-level test_* function; "
+        "the pin cannot cover it"
+        for file in sorted(
+            set(files) - {file for file, _ in defined} - UPSTREAM_FUNCTIONS.keys()
+        )
+    ]
+    faults.extend(
         f"{upstream}: {file}::{name} is defined upstream but not in UPSTREAM_TESTS"
         for file, name in defined - UPSTREAM_TESTS
-    ]
+    )
     faults.extend(
         f"{upstream}: {file}::{name} is in UPSTREAM_TESTS but not defined upstream"
         for file, name in UPSTREAM_TESTS - defined
