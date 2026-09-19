@@ -1985,6 +1985,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "typesafe-sdk-rust-live-tests"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "tokio",
+ "typesafe-sdk-rust",
+]
+
+[[package]]
 name = "typesafe-sdk-rust-macros"
 version = "0.1.0"
 dependencies = [

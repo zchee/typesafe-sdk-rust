@@ -65,6 +65,13 @@ jobs:
       - name: Lints without default features
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
+      # The live tests compile here and run nowhere in CI: with a key they
+      # make billed calls, without one they fail on purpose. The two steps
+      # above already lint them through `--workspace`; naming the package
+      # keeps them linted if either step ever drops `--workspace`.
+      - name: Lints of the live tests
+        run: cargo clippy -p typesafe-sdk-rust-live-tests --all-targets -- -D warnings
+
       # No `--workspace`: this one runs code. A crate whose tests need a live
       # API key is a workspace member and not a default member, so the default
       # selection is the one that can never reach it.
