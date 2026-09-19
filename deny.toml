@@ -1,10 +1,7 @@
-# cargo-deny policy for the workspace, the fuzz targets under fuzz/ and the
-# spike crates under spikes/.
+# cargo-deny policy for the workspace and for the fuzz targets under fuzz/.
 #
-# Run at the workspace root for the SDK graph, with
-# `--manifest-path fuzz/Cargo.toml` for the fuzz targets' graph, and with
-# `--manifest-path spikes/deps-probe/Cargo.toml` for the full runtime graph
-# before the SDK's own dependency list catches up with it.
+# CI runs it at the workspace root for the SDK graph and with
+# `--manifest-path fuzz/Cargo.toml` for the fuzz targets' graph.
 
 [graph]
 # Restricting the graph to the supported triples keeps platform-only crates
