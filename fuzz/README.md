@@ -14,9 +14,9 @@ A panic, an abort (a stack overflow included), an input that runs past
 ## Running
 
 This directory is a cargo workspace of its own and is excluded from the
-repository's, so nothing in the repository's gates builds it. Running a
-target needs the nightly toolchain (for the sanitizer flags cargo-fuzz passes)
-and `cargo install cargo-fuzz --locked`:
+repository's. CI only compiles it (`cargo check`, the "Fuzz targets compile"
+step); running a target needs the nightly toolchain (for the sanitizer flags
+cargo-fuzz passes) and `cargo install cargo-fuzz --locked`:
 
 ```sh
 cd fuzz

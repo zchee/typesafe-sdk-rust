@@ -520,6 +520,14 @@ impl Serialize for ChoiceAnswer {
 /// descriptions it was rated against and how likely each level was.
 ///
 /// See the [score primitive](https://docs.typesafe.ai/primitives/score).
+///
+/// # Storing a score
+///
+/// A score serializes with any serde format, but reading one back is
+/// supported through a JSON codec (sonic-rs, `serde_json`) only. Through a
+/// non-JSON serde format a score whose legend holds text fails to read back:
+/// each description is a [`Content`], which is read as JSON text in every
+/// format, and a plain description such as `low` is not JSON text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoreAnswer {
     score: f64,

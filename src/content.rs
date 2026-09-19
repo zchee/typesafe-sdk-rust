@@ -44,6 +44,12 @@ pub enum ContentError {
 /// array is spliced in byte for byte by the SDK and written out as data by
 /// every other serializer, which is described on [`RawJson`].
 ///
+/// Reading a `Content` back always takes the value as JSON text. A JSON codec
+/// (sonic-rs, `serde_json`) hands over that text, so any `Content` round-trips
+/// through one; a non-JSON serde format hands over a text value as a bare
+/// string, which is then parsed as JSON, so plain text such as `low` fails to
+/// read back there.
+///
 /// ```
 /// use typesafe_sdk::Content;
 ///

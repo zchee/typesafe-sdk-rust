@@ -108,6 +108,11 @@ by kind (`nouls()`, `choices()`, `scores()`, which copy nothing). An answer of a
 version does not know is skipped with a `WARN` event; the received bytes stay available through
 `response.meta().raw_body()`, together with the status and the headers.
 
+Responses and answers implement `Serialize`, and the answer types implement `Deserialize`, so
+they can be stored and read back. They serialize with any serde format, but reading them back is
+supported through JSON codecs (sonic-rs, `serde_json`): through a non-JSON serde format, a
+score whose legend holds text fails, because a level's description is read back as JSON text.
+
 ## Typed answers
 
 With the `macros` feature, a struct with one field per question is both the question set and
