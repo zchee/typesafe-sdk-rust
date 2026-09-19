@@ -33,7 +33,11 @@ const MODELS_BODY: &[u8] = b"{\"models\":[{\"name\":\"jev-\xC9\",\"description\"
 
 /// A server answering every request with `status`, `body` and a
 /// `Retry-After` of three seconds.
-async fn answering(protocol: Protocol, status: StatusCode, body: &'static [u8]) -> TestServer {
+async fn answering_with_retry_after(
+    protocol: Protocol,
+    status: StatusCode,
+    body: &'static [u8],
+) -> TestServer {
     TestServer::start(protocol, move |_| async move {
         let mut response = json_response(status, body);
         response.headers_mut().insert(RETRY_AFTER, "3".parse().expect("valid"));
@@ -66,7 +70,9 @@ fn questions() -> typesafe_sdk::PreparedQuestions {
 #[tokio::test]
 async fn a_failure_status_with_a_body_that_is_not_utf8_is_an_api_error() {
     for protocol in Protocol::ALL {
-        let server = answering(protocol, StatusCode::UNPROCESSABLE_ENTITY, ERROR_BODY).await;
+        let server =
+            answering_with_retry_after(protocol, StatusCode::UNPROCESSABLE_ENTITY, ERROR_BODY)
+                .await;
         let client = client_for(&server, protocol);
         let questions = questions();
 
@@ -94,7 +100,7 @@ async fn a_failure_status_with_a_body_that_is_not_utf8_is_an_api_error() {
 #[tokio::test]
 async fn a_success_status_with_a_body_that_is_not_utf8_is_a_validation_error() {
     for protocol in Protocol::ALL {
-        let server = answering(protocol, StatusCode::OK, SUCCESS_BODY).await;
+        let server = answering_with_retry_after(protocol, StatusCode::OK, SUCCESS_BODY).await;
         let client = client_for(&server, protocol);
         let questions = questions();
 
@@ -127,7 +133,7 @@ async fn a_success_status_with_a_body_that_is_not_utf8_is_a_validation_error() {
 #[tokio::test]
 async fn a_models_list_that_is_not_utf8_is_a_validation_error() {
     for protocol in Protocol::ALL {
-        let server = answering(protocol, StatusCode::OK, MODELS_BODY).await;
+        let server = answering_with_retry_after(protocol, StatusCode::OK, MODELS_BODY).await;
         let client = client_for(&server, protocol);
 
         let failure = client.models().list().send().await.expect_err("the body does not decode");
