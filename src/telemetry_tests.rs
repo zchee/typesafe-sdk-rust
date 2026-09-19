@@ -74,14 +74,14 @@ fn the_substring_rule_is_token_and_secret_only() {
     let secret = ["token", "x-tokens", "tokenized", "secret", "x-secrets-hash", "client-secret-id"];
     for name in secret {
         let map = headers(&[(name, "value")]);
-        assert_eq!(display(&map), format!("{{{name}: ***}}"), "{name} must be redacted");
+        assert_eq!(debug(&map), format!(r#"{{"{name}": "***"}}"#), "{name} must be redacted");
     }
 
     let visible =
         ["x-toke", "x-secre", "x-authorization", "authorization-hint", "cookies", "x-cookie"];
     for name in visible {
         let map = headers(&[(name, "value")]);
-        assert_eq!(display(&map), format!("{{{name}: value}}"), "{name} must be printed");
+        assert_eq!(debug(&map), format!(r#"{{"{name}": "value"}}"#), "{name} must be printed");
     }
 }
 
