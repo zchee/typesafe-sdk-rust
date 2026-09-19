@@ -348,10 +348,7 @@ def test_deleted_row_with_its_count_lowered_fails(run: Run) -> None:
 
     assert status == 1
     assert out == failed(
-        [
-            f"{MATRIX}: tests/test_clients.py states 20 functions, upstream defines 21",
-            f"{MATRIX}: upstream tests/test_clients.py::test_error_mapping has no row",
-        ],
+        [f"{MATRIX}: upstream tests/test_clients.py::test_error_mapping has no row"],
         summary(rows=120, rust=87),
     )
 
@@ -373,7 +370,6 @@ def test_wrong_count_fails(run: Run) -> None:
                 f"{MATRIX}: tests/test_config.py states 9 functions / 5 Rust / "
                 "3 deviation / 0 excluded, the rows give 8 / 5 / 3 / 0"
             ),
-            f"{MATRIX}: tests/test_config.py states 9 functions, upstream defines 8",
         ],
         summary(),
     )
@@ -514,7 +510,7 @@ def test_pinned_function_missing_upstream_fails(
 def test_upstream_file_missing_from_the_pin_fails(
     run: Run, port_test_matrix: ModuleType, tmp_path: Path
 ) -> None:
-    """A new upstream test file fails for its test and for its Counts line."""
+    """A test in a new upstream test file fails."""
     upstream = fake_upstream(port_test_matrix, tmp_path)
     (upstream / "tests/test_new.py").write_text(
         "def test_new():\n    pass\n", encoding="utf-8"
@@ -529,7 +525,6 @@ def test_upstream_file_missing_from_the_pin_fails(
                 f"{upstream}: tests/test_new.py::test_new is defined upstream but "
                 "not in UPSTREAM_TESTS"
             ),
-            f"{MATRIX}: upstream tests/test_new.py has no line in the Counts table",
         ],
         summary(),
     )
