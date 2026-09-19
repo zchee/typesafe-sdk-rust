@@ -275,6 +275,144 @@ fn a_question_set_cannot_be_generic() {
     }
 }
 
+/// A struct named like an item the expansion declares next to the struct's
+/// own name is refused at its name, with the whole reserved set; the list is
+/// the expansion's, so a helper renamed there is renamed here.
+#[test]
+fn a_struct_cannot_be_named_like_a_helper_of_the_expansion() {
+    let reserved = "`__QuestionSetField`, `__QuestionSetFieldVisitor`, `__QuestionSetVisitor`, \
+                    `__D`, `__M` and `__private`";
+    let message = |name: &str| {
+        format!(
+            "`{name}` is a name the derive's generated code gives to an item of its own, so a \
+             question set cannot be called that: the reserved names are {reserved}; rename the \
+             struct"
+        )
+    };
+    let cases: [DeriveInput; 7] = [
+        parse_quote!(
+            struct __QuestionSetField {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __QuestionSetFieldVisitor {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __QuestionSetVisitor {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __D {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __M {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __private {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct r#__D {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+    ];
+    let names = [
+        "__QuestionSetField",
+        "__QuestionSetFieldVisitor",
+        "__QuestionSetVisitor",
+        "__D",
+        "__M",
+        "__private",
+        "r#__D",
+    ];
+    for (input, name) in cases.iter().zip(names) {
+        assert_eq!(refused(input), [message(name)], "input `{name}`");
+    }
+    assert_eq!(reserved_names(), reserved);
+
+    // Helpers that never share a scope with the struct's name, and names
+    // that only resemble the reserved ones, are free.
+    let free: [DeriveInput; 5] = [
+        parse_quote!(
+            struct __D2 {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __E {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct PREPARED {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __QuestionSet {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+        parse_quote!(
+            struct __Private {
+                #[noul]
+                a: NoulAnswer,
+            }
+        ),
+    ];
+    for input in &free {
+        assert_eq!(parsed(input).ident, input.ident);
+    }
+
+    // The problems of the rest of the input are still reported with it.
+    assert_eq!(
+        refused(&parse_quote!(
+            struct __M<T> {
+                t: T,
+            }
+        )),
+        [
+            message("__M"),
+            "`__M` cannot be generic: a question set's questions are serialized once, when the \
+             program is compiled, so they cannot depend on a type parameter; remove the generics"
+                .to_owned(),
+            "field `t` is not a question: every field of a question set asks one; add \
+             `#[noul(...)]`, `#[choice(...)]` or `#[score(...)]`"
+                .to_owned(),
+        ]
+    );
+}
+
+/// The derive's documentation lists the reserved names the check uses.
+#[test]
+fn the_reserved_names_are_documented() {
+    let documentation = include_str!("lib.rs");
+    for name in crate::expand::RESERVED {
+        assert!(documentation.contains(&format!("`{name}`")), "`{name}` is not in the rustdoc");
+    }
+}
+
 #[test]
 fn the_container_attribute_takes_only_one_crate_path() {
     assert_eq!(

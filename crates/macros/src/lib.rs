@@ -58,7 +58,10 @@ use syn::{DeriveInput, parse_macro_input};
 /// an `Option`: the API answers every question it is asked, and a response
 /// without one of the answers is refused as malformed.
 ///
-/// The struct itself has named fields, at least one, and no generics.
+/// The struct itself has named fields, at least one, and no generics. Its
+/// name is not one of those the generated code gives to its own items:
+/// `__QuestionSetField`, `__QuestionSetFieldVisitor`, `__QuestionSetVisitor`,
+/// `__D`, `__M` and `__private` are refused.
 ///
 /// # Crate path
 ///

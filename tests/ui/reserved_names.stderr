@@ -1,0 +1,11 @@
+error: `__QuestionSetField` is a name the derive's generated code gives to an item of its own, so a question set cannot be called that: the reserved names are `__QuestionSetField`, `__QuestionSetFieldVisitor`, `__QuestionSetVisitor`, `__D`, `__M` and `__private`; rename the struct
+ --> tests/ui/reserved_names.rs:8:8
+  |
+8 | struct __QuestionSetField {
+  |        ^^^^^^^^^^^^^^^^^^
+
+error: `__D` is a name the derive's generated code gives to an item of its own, so a question set cannot be called that: the reserved names are `__QuestionSetField`, `__QuestionSetFieldVisitor`, `__QuestionSetVisitor`, `__D`, `__M` and `__private`; rename the struct
+  --> tests/ui/reserved_names.rs:14:8
+   |
+14 | struct __D {
+   |        ^^^

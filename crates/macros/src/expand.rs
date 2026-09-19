@@ -16,7 +16,8 @@
 //! of the block from the crate root (`::typesafe_sdk`, or what
 //! `#[question_set(crate = ...)]` names); the import shadows anything of that
 //! name around the block. The helper items carry names no caller is expected
-//! to use. So the expansion means the same wherever it lands, a
+//! to use, and a struct named like one of them is refused (see [`RESERVED`]).
+//! So the expansion means the same wherever it lands, a
 //! `#![no_implicit_prelude]` module or one with its own `Result` included.
 
 use proc_macro2::{Literal, TokenStream};
@@ -24,6 +25,25 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::DeriveInput;
 
 use crate::{json, parse};
+
+/// The module every generated path starts at, imported once per expansion.
+pub(crate) const PRIVATE: &str = "__private";
+/// The enum the generated code matches an answer's key into.
+pub(crate) const FIELD: &str = "__QuestionSetField";
+/// The visitor that reads a key into a [`FIELD`].
+pub(crate) const FIELD_VISITOR: &str = "__QuestionSetFieldVisitor";
+/// The visitor that reads the answers into the derived struct.
+pub(crate) const VISITOR: &str = "__QuestionSetVisitor";
+/// The deserializer's type parameter of `deserialize_answers`.
+pub(crate) const DESERIALIZER: &str = "__D";
+/// The map's type parameter of the visitor's `visit_map`.
+pub(crate) const MAP: &str = "__M";
+
+/// The names a derived struct cannot have: each is declared by the expansion
+/// in a scope that also names the struct, where it would stand for the helper
+/// instead. The expansion's other helpers (`__D2`, `__E`, `PREPARED`) never
+/// share a scope with the struct's name, so any struct may be called that.
+pub(crate) const RESERVED: [&str; 6] = [FIELD, FIELD_VISITOR, VISITOR, DESERIALIZER, MAP, PRIVATE];
 
 /// The expansion of the derive for `input`.
 pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -33,7 +53,12 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
     // The one path that names the crate. Everything else goes through this
     // import, so a root that does not resolve is one error where the root is
     // written, not one per generated path.
-    let private = quote!(__private);
+    let private = format_ident!("{PRIVATE}");
+    let field = format_ident!("{FIELD}");
+    let field_visitor = format_ident!("{FIELD_VISITOR}");
+    let visitor = format_ident!("{VISITOR}");
+    let deserializer = format_ident!("{DESERIALIZER}");
+    let map = format_ident!("{MAP}");
     let ident = &set.ident;
 
     let buf = Literal::string(&prepared.buf);
@@ -70,7 +95,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
     Ok(quote! {
         const _: () = {
-            use #root::__private;
+            use #root::#private;
 
             #[automatically_derived]
             impl #private::QuestionSet for #ident {
@@ -83,22 +108,22 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
 
             #[automatically_derived]
             impl #private::AnswerSet for #ident {
-                fn deserialize_answers<'de, __D>(
-                    __deserializer: __D,
+                fn deserialize_answers<'de, #deserializer>(
+                    __deserializer: #deserializer,
                     _: #private::AnswerContext,
-                ) -> #private::Result<Self, <__D as #private::Deserializer<'de>>::Error>
+                ) -> #private::Result<Self, <#deserializer as #private::Deserializer<'de>>::Error>
                 where
-                    __D: #private::Deserializer<'de>,
+                    #deserializer: #private::Deserializer<'de>,
                 {
-                    enum __QuestionSetField {
+                    enum #field {
                         #(#variants,)*
                         Other,
                     }
 
-                    struct __QuestionSetFieldVisitor;
+                    struct #field_visitor;
 
-                    impl #private::Visitor<'_> for __QuestionSetFieldVisitor {
-                        type Value = __QuestionSetField;
+                    impl #private::Visitor<'_> for #field_visitor {
+                        type Value = #field;
 
                         fn expecting(
                             &self,
@@ -110,31 +135,31 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                         fn visit_str<__E>(
                             self,
                             __value: &#private::str,
-                        ) -> #private::Result<__QuestionSetField, __E>
+                        ) -> #private::Result<#field, __E>
                         where
                             __E: #private::Error,
                         {
                             #private::Ok(match __value {
-                                #(#names => __QuestionSetField::#variants,)*
-                                _ => __QuestionSetField::Other,
+                                #(#names => #field::#variants,)*
+                                _ => #field::Other,
                             })
                         }
 
                         fn visit_bytes<__E>(
                             self,
                             __value: &[#private::u8],
-                        ) -> #private::Result<__QuestionSetField, __E>
+                        ) -> #private::Result<#field, __E>
                         where
                             __E: #private::Error,
                         {
                             #private::Ok(match __value {
-                                #(#byte_names => __QuestionSetField::#variants,)*
-                                _ => __QuestionSetField::Other,
+                                #(#byte_names => #field::#variants,)*
+                                _ => #field::Other,
                             })
                         }
                     }
 
-                    impl<'de> #private::Deserialize<'de> for __QuestionSetField {
+                    impl<'de> #private::Deserialize<'de> for #field {
                         fn deserialize<__D2>(
                             __deserializer: __D2,
                         ) -> #private::Result<Self, <__D2 as #private::Deserializer<'de>>::Error>
@@ -143,14 +168,14 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                         {
                             #private::Deserializer::deserialize_str(
                                 __deserializer,
-                                __QuestionSetFieldVisitor,
+                                #field_visitor,
                             )
                         }
                     }
 
-                    struct __QuestionSetVisitor;
+                    struct #visitor;
 
-                    impl<'de> #private::Visitor<'de> for __QuestionSetVisitor {
+                    impl<'de> #private::Visitor<'de> for #visitor {
                         type Value = #ident;
 
                         fn expecting(
@@ -160,22 +185,22 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                             #private::Formatter::write_str(__formatter, #expecting)
                         }
 
-                        fn visit_map<__M>(
+                        fn visit_map<#map>(
                             self,
-                            mut __map: __M,
-                        ) -> #private::Result<#ident, <__M as #private::MapAccess<'de>>::Error>
+                            mut __map: #map,
+                        ) -> #private::Result<#ident, <#map as #private::MapAccess<'de>>::Error>
                         where
-                            __M: #private::MapAccess<'de>,
+                            #map: #private::MapAccess<'de>,
                         {
                             #(
                                 let mut #slots: #private::Option<#answer_types> = #private::None;
                             )*
                             while let #private::Some(__key) =
-                                #private::MapAccess::next_key::<__QuestionSetField>(&mut __map)?
+                                #private::MapAccess::next_key::<#field>(&mut __map)?
                             {
                                 match __key {
                                     #(
-                                        __QuestionSetField::#variants
+                                        #field::#variants
                                             if #private::Option::is_none(&#slots) =>
                                         {
                                             #slots = #private::Some(
@@ -199,7 +224,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<TokenStream> {
                         }
                     }
 
-                    #private::Deserializer::deserialize_map(__deserializer, __QuestionSetVisitor)
+                    #private::Deserializer::deserialize_map(__deserializer, #visitor)
                 }
             }
         };

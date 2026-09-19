@@ -5,9 +5,10 @@
 //! levels. So is everything that cannot become a struct whose fields hold the
 //! answers: a field without a question, a field with two, a field whose type
 //! is not the answer type of its question, two fields answering to one name,
-//! an option listed twice, and any input that is not a plain struct with named
-//! fields. Nothing else is limited: the API documents its option and level
-//! counts as subject to change, so no count is checked.
+//! an option listed twice, any input that is not a plain struct with named
+//! fields, and a struct named like one of the expansion's own items. Nothing
+//! else is limited: the API documents its option and level counts as subject
+//! to change, so no count is checked.
 
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens, quote};
@@ -16,6 +17,8 @@ use syn::{
     PathArguments, Token, Type, ext::IdentExt, meta::ParseNestedMeta, parenthesized,
     parse::ParseStream, spanned::Spanned,
 };
+
+use crate::expand;
 
 /// A derive input, read.
 #[derive(Debug)]
@@ -117,6 +120,21 @@ pub(crate) fn parse(input: &DeriveInput) -> syn::Result<QuestionSetInput> {
     let mut errors = Errors::default();
     let root = errors.keep(container_root(&input.attrs)).flatten();
     let ident = &input.ident;
+
+    // A struct that shares a helper's name would be shadowed by that helper
+    // inside the expansion, and rustc would report the clash in terms of code
+    // the caller never wrote.
+    if expand::RESERVED.iter().any(|reserved| ident.unraw() == reserved) {
+        errors.push(syn::Error::new_spanned(
+            ident,
+            format!(
+                "`{ident}` is a name the derive's generated code gives to an item of its own, so \
+                 a question set cannot be called that: the reserved names are {}; rename the \
+                 struct",
+                reserved_names()
+            ),
+        ));
+    }
 
     let generics: Option<&dyn ToTokens> = if !input.generics.params.is_empty() {
         Some(&input.generics)
@@ -603,6 +621,16 @@ fn string(input: ParseStream<'_>, what: &str) -> syn::Result<LitStr> {
         ));
     }
     Ok(literal)
+}
+
+/// [`expand::RESERVED`] as a message lists it: `a`, `b` and `c`.
+fn reserved_names() -> String {
+    let quoted: Vec<String> = expand::RESERVED.iter().map(|name| format!("`{name}`")).collect();
+    match quoted.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
 }
 
 fn path_text(path: &Path) -> String {
