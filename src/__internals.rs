@@ -91,6 +91,12 @@ where
 /// See `de::decode_system_one`: the response decoder whose allocation
 /// behaviour the decode budget is stated on.
 ///
+/// It passes no level hint. A call passes the largest score its questions
+/// ask, which sizes a score's first level list from the start; without it
+/// the list starts at 4, so each score of 5 to 8 levels costs one block more
+/// here than in a call, and the three-level fixture the budget is stated on
+/// costs the same blocks either way.
+///
 /// # Errors
 ///
 /// Returns a response-validation [`Error`](crate::Error) when the body does
@@ -111,8 +117,8 @@ where
 /// before the attempt after attempt number `attempt` failed, with `draw`
 /// standing in for the random number in `[0, 1)`.
 ///
-/// Inlined so that a benchmark measures the function as the retry loop runs
-/// it, not a call across the crate boundary.
+/// Inlined, so the wrapper adds no call of its own: a benchmark measures
+/// `retry::backoff_seconds` as the retry loop calls it.
 #[inline]
 #[must_use]
 pub fn backoff_seconds(attempt: u32, initial: f64, max: f64, jitter: f64, draw: f64) -> f64 {

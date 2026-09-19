@@ -2,9 +2,13 @@
 //!
 //! `answers` decodes into `SystemOneResponse<Answers>`, the lookup by name;
 //! `typed` decodes the same bytes into a `#[derive(QuestionSet)]` struct.
-//! Both go through the same entry point every response does, depth pre-scan
-//! included. The 20-answer document cycles through a noul, a choice of four
-//! options and a score of five levels.
+//! Both go through the response decoder every call uses, depth pre-scan
+//! included, but without a level hint: a call passes the largest score its
+//! questions ask (at most 8), which starts a score's first level list at
+//! that capacity, while this entry point passes none, so a list starts at 4
+//! and a five-level score grows once more than it would in a call. The
+//! 20-answer document cycles through a noul, a choice of four options and a
+//! score of five levels.
 //!
 //! How this can mislead: the body is handed in as a `Bytes` that is already
 //! whole, so reading it off a connection is not part of the number; B5 and

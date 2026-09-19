@@ -934,8 +934,8 @@ taskset -c 2 cargo bench --all-features --bench sdk             # Linux, pinned 
 cargo bench --all-features --bench loopback                     # Linux, not pinned: it needs both runtimes' threads
 ```
 
-Instruction counts, the way CodSpeed's simulation mode takes them, without CodSpeed's runner (which is installed by
-its GitHub action and is not on the host), a token, an account or an upload. `cargo codspeed build` produces the
+Instruction counts are callgrind `Ir`, the instruction component of CodSpeed's simulation, taken without CodSpeed's
+runner (which is installed by its GitHub action and is not on the host), a token, an account or an upload. `cargo codspeed build` produces the
 instrumented binary; valgrind's callgrind runs it with instrumentation off, and each benchmark switches it on and off
 around its own measured call through `codspeed`'s client requests and dumps its counts under its own name:
 
@@ -949,11 +949,47 @@ callgrind_annotate out.<pid>.<n>          # PROGRAM TOTALS, one dump per benchma
 
 callgrind writes `summary: 0` into these dumps (the header is computed before instrumentation is toggled);
 `callgrind_annotate` recomputes the total from the cost lines. Every configuration was run three to five times.
-**Run-to-run spread**, five runs at `0303980`: 0.0% for every decode, encode and `Retry-After` benchmark except
-`encode::prepared[1024]` (3.1%) and `encode::unprepared[1024]` (2.5%); 2.2% for `call::sdk`, 2.6% for `call::naive`,
-4.6% for `assembly::request`. The spread comes from malloc's state, which depends on the order the benchmarks ran in.
-A rebuild alone also moves some counts by up to about 1% without any change to their code (code layout): the
-serde_json decode moved +0.5% between `0303980` and `fd22977`, and nothing in its path changed.
+
+`Ir` is not what CodSpeed reports. Its runner (`CodSpeedHQ/codspeed`, `src/executor/valgrind/measure.rs`) runs its
+own valgrind with cache simulation (`--cache-sim=yes --I1=32768,8,64 --D1=32768,8,64 --LL=8388608,16,64`) and, since
+the action's `cycle-estimation` defaults to on, `--cycle-estimation=yes`, and reports an estimated time in which cache
+misses weigh heavily: each benchmark runs once, on cold caches. The verifier (`p5-verify`, report of the Phase 5 exit
+gate) re-ran the whole-call pair with the same cache flags on stock valgrind (which has no cycle estimation), three
+runs at `acd4df3`:
+
+| Event | `call::sdk` | `call::naive` |
+| --- | ---: | ---: |
+| Ir | 33,908 | 65,347 |
+| I1mr | 1,073 | 1,320 |
+| D1mr | 203 | 308 |
+| D1mw | 263 | 241 |
+| ILmr | 1,030 | 1,229 |
+| DLmr | 199 | 289 |
+| DLmw | 261 | 238 |
+
+The SDK is lower in every class except write misses, higher there by 22 to 23 events, against 31,000 fewer
+instructions and 200 fewer instruction misses in the last-level cache: the comparison holds under any plausible
+weighting of the events.
+
+**Run-to-run spread**, five runs at `acd4df3` on the Linux host (min-max, as a share of the min). It comes from
+malloc's state, which depends on the order the benchmarks ran in, so a benchmark that allocates in its measured call
+is not exactly repeatable; only those at 0.0% are:
+
+| Benchmark | Spread | Benchmark | Spread |
+| --- | ---: | --- | ---: |
+| `assembly::request` | **20.4%** | `decode::typed` | 0.0% (22,982 each run) |
+| `assembly::header_map_clone` | 0.0% | `decode::codec::sonic_rs[3]` / `[20]` | 0.0% / 1.1% |
+| `call::floor` | 0.0% | `decode::codec::serde_json[3]` / `[20]` | 0.0% / 0.1% |
+| `call::sdk` / `sdk_20` | 1.6% / 0.4% | `encode::prepared[1024]` / `[65536]` / `[1048576]` | 1.9% / 0.0% / 0.0% |
+| `call::naive` / `naive_20` | 2.4% / 0.5% | `encode::unprepared[1024]` / `[65536]` / `[1048576]` | 1.6% / 0.1% / 0.0% |
+| `decode::answers[3]` | 3.1% | `encode::object_1mb`, `mixed_sizes`, `encode::codec::*` | 0.0% |
+| `decode::answers[20]` | 0.6% | `retry::*` | 0.0% |
+
+The verifier's own five runs at the same commit agree in kind: `answers[3]` 23,219-23,611 (1.7%), `call::sdk`
+33,890-34,891 (2.95%), `assembly::request` 5,258-6,365 (21%). The five runs at `0303980` this section first
+reported (0.0% for every decode) were narrower than both: `answers[*]` is not deterministic, `typed` is. A rebuild
+alone also moves some counts by up to about 1% without any change to their code (code layout): the serde_json decode
+moved +0.5% between `0303980` and `fd22977`, and nothing in its path changed.
 
 **What the benches measure and how they can mislead** is written at the top of each bench module
 (`benches/sdk/*.rs`, `benches/loopback.rs`). In short: B1 to B5 time steady state (warm scratch, warm header map);
@@ -1061,10 +1097,10 @@ in time. On encode sonic-rs is 1.7x (macOS) to 2.3x (Linux) faster and runs 4.3x
 | # | Candidate | Result | Numbers | Decision |
 | --- | --- | --- | --- | --- |
 | 1 | `compact_str` 0.10.0 for the model, answer names, choice pick and option names | measured in the working tree only | decode 14 -> **7** blocks, 626 -> 578 bytes; derived 10 -> 6; a call's own 19 -> **12**; instructions: `answers[3]` -2.1%, `answers[20]` -8.5%, `call::sdk` -2.9%, nothing up | **waiting for a ruling**: meets the keep rule by blocks, but it is a new crate (brief R5(a)); not committed |
-| 2 | `Bytes`-slice zero-copy names (a crate-private `Text`: a slice of the retained body, or owned when escaped; the body reaches the visitors through a thread-local) | reverted | decode 14 -> 7 blocks but 626 -> **658** bytes (`Text` is 32 bytes, `String` 24); instructions: `answers[3]` **+2.4%**, `typed` **+2.5%** (both deterministic benches), `answers[20]` -4.5%, `call::sdk` -1.4% | **reverted**: an instruction regression elsewhere. It would also make a kept answer pin the whole response body (up to 16 MiB), a behaviour change |
+| 2 | `Bytes`-slice zero-copy names (a crate-private `Text`: a slice of the retained body, or owned when escaped; the body reaches the visitors through a thread-local) | reverted | decode 14 -> 7 blocks but 626 -> **658** bytes (`Text` is 32 bytes, `String` 24); instructions: `answers[3]` **+2.4%** (within its 3.1% spread), `typed` **+2.5%** (a benchmark that repeats exactly), `answers[20]` -4.5%, `call::sdk` -1.4% | **reverted**: an instruction regression elsewhere. It would also make a kept answer pin the whole response body (up to 16 MiB), a behaviour change |
 | 3 | dense instead of sparse score-level storage | not built: bounded by measurement | all of `insert_by_level` is 1.86% of `answers[3]` (3.94% of `answers[20]`) and vector growth 0.44% (1.20%), exclusive callgrind cost; a dense layout keeps one vector per list, so no block moves | **rejected**: even free storage could not reach 5% on B2, and dense storage cannot keep the documented "a level named twice keeps both entries" |
 | 4 | pre-baked `,"model":...,"questions":...}` suffix | measured as a bench variant | `prepared[1 KB]` 3,356-3,400 against 3,331-3,384 now; 64 KB and 1 MB within 0.1%; 0 blocks either way | **reverted**: no gain; the four `extend_from_slice` calls it replaces are too cheap to see |
-| 5 | call-future sizes against tokio's debug box threshold (v3.5 (1)) | **kept**, `7493955` + `fd22977` | every call's future -352 bytes: System One over a custom transport 2,392 -> **2,040** (under 2,048), models 2,080 -> 1,728; over hyper 2,760 -> 2,344 (still over) and 2,448 -> 2,032; an unpinned debug call 20 -> **19** blocks of its own; instructions unchanged within the spread | kept: -1 block in a debug build; release was never boxed (16,384) |
+| 5 | call-future sizes against tokio's debug box threshold (v3.5 (1)) | **kept**, `7493955` + `fd22977` | every call's future -352 bytes: System One over a custom transport 2,392 -> **2,040** (under 2,048), models 2,080 -> 1,728; over hyper 2,760 -> 2,344 (still over) and 2,448 -> 2,032; an unpinned debug call 20 -> **19** blocks of its own; instructions unchanged within the spread | kept under v3.5 (1), which named exactly this block as the target ("shrink the futures if it is cheap"), not under the generic keep rule: it moved no instruction count and no pinned or release block, only the unpinned debug call's box (release was never boxed, 16,384) |
 | 6 | score level lists sized from the questions asked (v3.5 (2): 5 to 8 levels cost a block) | **kept**, `06573d7` + `fd22977` | whole call, measured by a throwaway dhat test over a transport that allocates nothing: 20 questions with six 5-level scores 117 -> **111** blocks, 9,439 -> 8,095 bytes; 3 questions 19 -> 19 blocks, 2,728 -> 2,696 bytes (`alloc_call`'s whole call: 22 / 3,405 -> 22 / 3,373). `call::sdk_20` -1.3% instructions (ranges do not overlap) | kept. `06573d7` alone grew the future to 2,064 bytes and brought the debug box back; `fd22977` holds the context in two `u32`s and restores 2,040 |
 | 7 | a hard ceiling on the retained scratch (R17), 1 MiB, in `codec.rs` | measured in the working tree only | AC-P1 at 1 MB: 1 -> **3** blocks, 1,092,608 -> **7,384,117** bytes per call (**fails AC-P1**); 1 KB and 64 KB unchanged. Time: `prepared[1 MB]` 433.0 -> 434.3 µs on Linux, 321.7 -> 326.4 µs on macOS; `mixed_sizes` 646 -> 444 µs (Linux); instructions within 1% | **proposal for the lead and the user** (R5(b), (d)): it caps the memory a thread keeps after a large body at 1 MiB instead of about 6x the body, costs no measurable time on either allocator, and turns AC-P1's 1 MB row from 1 block / 1.00x into 3 blocks / 6.8x |
 
@@ -1140,6 +1176,49 @@ One future over this transport is 2,040 bytes, under tokio's debug box size; bef
 
 The verifier (`p5-verify`, at `acd4df3`) found defects that were fixed forward; each entry names its commit.
 
+**D1: the level hint is bounded (`ae65058`).** Candidate 6's hint is the largest score the request asked, and every
+score answer's first level list started at it, empty ones included, with no bound: a server answering many score
+answers turned it into memory. `AnswerContext::with_levels` now holds it to 8 (`MAX_LEVEL_HINT`: 5 to 8 levels is the
+case the candidate targets), and a list reserves it only at its first entry, so an empty `{}` allocates nothing.
+`tests/alloc_level_hint.rs` asks one score of 1,000 levels, answers 500 empty and 500 one-level scores (a 90,359 B
+body), and holds what the response keeps to at most 2x what the same body keeps with no hint, which is what
+`f99594e`, before the hint, keeps for both (170,902 B, measured there with the same test):
+
+| Tree | Kept, no hint | Kept, 1,000 levels asked | Ratio |
+| --- | ---: | ---: | ---: |
+| `f99594e` | 170,902 B | 170,902 B | 1.00 |
+| `acd4df3` | 170,902 B | 32,106,902 B | 187.9 (the test fails) |
+| the clamp alone | 170,902 B | 362,902 B | 2.12 (the test fails) |
+| `ae65058` | 170,902 B | 234,902 B | 1.37 |
+
+The verifier's own probe, re-run on `ae65058`: its 20,002-answer empty flood keeps 2,295,425 B (exactly `f99594e`;
+`acd4df3` kept 642,295,425 B), its one-level flood 793,393 B (`f99594e` 569,393 B, `acd4df3` 64,313,393 B), and its
+12 wrong-hint cases decode to output identical to both trees. Nothing else moved: the 36 `alloc_*` sections are as
+above in dev and release, the 20-question call is still 111 blocks / 8,299 B (a throwaway dhat test of candidate 6's
+shape, five equal runs, dev and release), and the call futures are unchanged. Instructions, five runs each on the
+Linux host (`acd4df3` -> `ae65058`): `typed` 22,982 -> 22,974, `call::sdk` 33,907-34,441 -> 33,645-34,256,
+`call::sdk_20` 193,356-194,152 -> 193,001-193,656, `answers[3]` 23,219-23,928 -> 23,306-23,630, `answers[20]`
+184,280-185,307 -> 183,771-184,993. Reserving at the first entry is free only in this form: a check inside the loop
+cost `typed` +40 and `sdk_20` +0.4%, and bounding the hint a second time inside the decoder stopped it being inlined
+into its hint-0 wrapper (`typed` +115).
+
+**D5: observable changes of candidate 6, accepted.** `AnswerContext` (a public type): its `Debug` output gained the
+field (`AnswerContext { expected_answers: 0, levels: 0 }`), its alignment went from 8 to 4 on 64-bit targets (the
+size stays 8; it goes from 4 to 8 on 32-bit ones), and `Eq` and `Hash` now include the level hint, so contexts of
+two requests can differ. `size_of::<PreparedQuestions>()` went from 64 to 72 bytes. No signature, no derive
+expansion and no `PartialEq` result of `PreparedQuestions` changed, and no size was ever documented.
+
+**D6: the future-size guard holds the property (`b0cd3f6`).** Its bounds (2,816 / 2,560) could not see tokio's
+debug box threshold, which `06573d7` crossed unnoticed (2,064 bytes). Futures over a custom transport are now
+asserted <= 2,048 on every platform; futures over the default transport at the sizes measured on macOS arm64 and
+Linux x86_64 (2,344 / 2,328 / 2,328 / 2,032, identical on both, dev and release) plus 32 bytes. Windows keeps the old
+bounds: it has not been measured.
+
+**CI (`5a51d1f`):** the feature-powerset step runs clippy with warnings denied instead of `cargo hack check`, so a
+lint in any of the ten combinations between none and all fails CI. **D8 (`0749117`):** the unused `divan` entry is
+gone from `[workspace.dependencies]`; `Cargo.lock` did not change. **D4, D7, N1** are wording fixes in
+`benches/sdk/decode.rs`, `__internals`, and `transport/mod.rs`.
+
 **R17: an 8 MiB ceiling on the retained encode scratch (`codec.rs`, `MAX_RETAINED_SCRATCH`).** Candidate 7 at
 1 MiB failed AC-P1's 1 MB rows. A thread kept six times the largest string state it ever encoded, without bound (a
 64 MiB state left 402,653,228 B on its thread), released only by later calls on that same thread. A scratch over
@@ -1167,3 +1246,4 @@ The 1 KB, 64 KB and 1 MB rows moved by less than 1% on both machines. The unit t
   other sessions.
 - Instruction counts of `loopback` (kept out of the instrumented run on purpose).
 - The R17 ceiling at any value other than 1 MiB and 8 MiB, and under a musl or jemalloc allocator.
+- Future sizes on Windows (the size guard keeps loose bounds there), and CodSpeed's cycle estimate itself.

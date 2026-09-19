@@ -351,8 +351,11 @@ where
     // a scope that is still open when it suspends, even one whose value was
     // moved out, so written at the top level the two would ride in the
     // future beside the copy the transport call already holds: 352 bytes of
-    // every call's future, which tips it over the size at which tokio boxes a
-    // spawned future in a debug build (2,048 bytes).
+    // every call's future, which over a custom transport tips it over the
+    // size at which tokio boxes a spawned future in a debug build (2,048
+    // bytes). Over the default transport hyper's response future keeps the
+    // call over that size either way (2,344 bytes), so a debug-build call
+    // spawned on the default client is boxed.
     let (started, exchanged) = {
         let mut headers = exchange.base_headers.clone();
         for (name, value) in exchange.call_headers {
