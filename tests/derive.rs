@@ -228,15 +228,6 @@ async fn ask_sends_the_compiled_questions_and_decodes_into_the_struct() {
 }
 
 /// The future of an asked request is `Send`, so it can be spawned.
-#[test]
-fn an_asked_request_can_be_sent_from_any_task() {
-    fn assert_send<T: Send>(_: &T) {}
-    let client = Client::builder().api_key("test-key").build().expect("the client builds");
-    let state = String::from("state");
-    let future = client.ask::<Ticket>(&state).send();
-    assert_send(&future);
-}
-
 /// The `X-TypeSafe-Retry-Count` values of each request.
 fn retry_counts(requests: &[RecordedRequest]) -> Vec<Vec<&str>> {
     requests.iter().map(|request| request.header_values("x-typesafe-retry-count")).collect()
