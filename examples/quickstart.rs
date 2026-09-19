@@ -10,7 +10,7 @@
 //!
 //! Every call is billed by the API.
 
-use std::{process::ExitCode, time::Duration};
+use std::process::ExitCode;
 
 use typesafe_sdk::{Choice, Client, Error, Noul, Questions, Score};
 
@@ -42,8 +42,7 @@ async fn run() -> Result<(), Error> {
         .prepare()?;
 
     let state = "I was charged twice for the same order. Please fix it before Friday.";
-    let response =
-        client.system_one(state, &questions).timeout(Duration::from_secs(5)).send().await?;
+    let response = client.system_one(state, &questions).send().await?;
 
     println!("model: {}", response.model());
     for (name, answer) in response.answers().nouls() {

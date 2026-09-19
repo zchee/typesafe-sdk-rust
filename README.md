@@ -41,8 +41,6 @@ A call asks a set of named questions about a state. The set is validated and ser
 `Questions::prepare`, and the resulting `PreparedQuestions` is reused by every call that asks it.
 
 ```rust,no_run
-use std::time::Duration;
-
 use typesafe_sdk::{Choice, Client, Noul, Questions, Score};
 
 #[tokio::main]
@@ -57,12 +55,7 @@ async fn main() -> Result<(), typesafe_sdk::Error> {
         .prepare()?;
 
     let state = "I was charged twice for one order.";
-    let response = client
-        .system_one(state, &questions)
-        .model("jev-latest")
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await?;
+    let response = client.system_one(state, &questions).model("jev-latest").send().await?;
 
     let answers = response.answers();
     if let Some(billing) = answers.noul("billing") {
