@@ -4,6 +4,9 @@ Every number below comes from a run made on the machine described under **Enviro
 above the table that holds it. Nothing here is estimated, and no measurement was repeated until it gave a wanted
 answer. Results that contradict the plan are marked **Contradicts the plan** and carry the size of the gap.
 
+The plan is the port's plan, which is not part of this repository; identifiers such as AC-P1, R17, T0.1 and v3.5 name
+its acceptance criteria, risks, tasks and revisions.
+
 ## Environment
 
 | Item | Value |
@@ -34,10 +37,10 @@ The binaries land in the shared target directory that `config.dev.toml` names; t
 
 ---
 
-## Phase 0 foundation findings (from `.omc/handoffs/phase-0-notes.md`)
+## Phase 0 foundation findings
 
 Carried into the ledger so that a reader of this file alone has the transport and dependency facts the spikes build on.
-These six were established in T0.1-T0.3, not in this task.
+These six were established in T0.1-T0.3.
 
 | # | Finding | Consequence |
 | --- | --- | --- |
@@ -488,7 +491,7 @@ Cost of the recommendation, stated plainly: `iii-1shot` retains up to ~6x the la
 thread (6.29 MB after a 1 MB state), where `iv` retains nothing for string states. The decay plus the one-shot shrink
 bounds that over time and it satisfies AC-P1's `<= 8x hint` rule, but on a 16-worker runtime a burst of 1 MB states
 leaves ~100 MB retained until the hint decays. If that matters more than 11x the encode CPU, `iv-1shot` is the
-alternative, and the choice belongs to the lead, not to this spike.
+alternative.
 
 **Open question for the freeze worker:** an absolute ceiling on the retained scratch (drop it entirely when a body
 exceeded, say, 256 KiB) was not measured. It would bound the retained memory without the 11x CPU of the two-pass path,
@@ -542,8 +545,8 @@ is a real check and not a silent pass.
 
 **Stated explicitly: this proves `add_root_certificate` on macOS only. Linux and Windows remain unproven until CI can
 run them**, and rustls-platform-verifier takes a different code path on each (`src/verification/apple.rs`,
-`.../linux.rs`, `.../windows.rs`). The Phase 0 exit gate says "CI green on 3 OSes"; push is not authorized in this run,
-so that part of the gate cannot be closed here.
+`.../linux.rs`, `.../windows.rs`). The Phase 0 exit gate says "CI green on 3 OSes"; CI later closed that part of the
+gate on all three.
 
 Two facts worth carrying into Phase 2: the request-id header is spelled **`x-typesafe-request-id`**, and the 403 body
 matches AC-F4's expected `error_type` and message exactly, so that criterion is confirmed against the live server
@@ -780,7 +783,8 @@ normalize first. This is not covered by any current acceptance criterion.
 
 ### Proposed frozen budget table
 
-Proposed only. The lead and a verifier freeze it; nothing here is adopted by this spike.
+Proposed only, and superseded: the budgets as frozen are in the final AC-P1 / AC-P2 / AC-P3 / AC-P6 check below, and
+as tightened under `compact_str` for names.
 
 Every number is from the tables above, with the plan's rule applied: tightening is free, loosening needs a ledger entry
 and the user's sign-off. Where a measurement left no headroom, the budget is set at the measurement and said to be
@@ -1343,7 +1347,7 @@ clones were removed afterwards.
 | --- | --- |
 | First pull-request run (`ca5f02e`) | run 35428694878: build ok, then CodSpeed's runner stopped with "Unsupported system" on `ubuntu-26.04`. Its valgrind setup accepts Ubuntu 22.04 / 24.04 and Debian 12 only (`CodSpeedHQ/runner`, `src/executor/valgrind/setup.rs`, runner 5.2.1 and 5.3.1) |
 | Image pin | `a5a0795`: the `codspeed` job alone runs on `ubuntu-24.04`, the newest GitHub-hosted image the runner supports, with the reason and the condition for going back beside the label (wording made exact in `15952c4`) |
-| Proof | run 35429672326 at `a5a0795`, on `ubuntu-24.04`: 35 benchmarks measured, uploaded through OIDC, and CodSpeed's check reports the app installed. `call::sdk` 108.8 µs against `call::naive` 159.3 µs (**0.68x**), `call::sdk_20` 233 µs against `call::naive_20` 511.3 µs (**0.46x**). These are CodSpeed's simulated times (instruction counts with its cache and cycle estimate), relayed by the lead and checked by the Phase 5 verifier, not measured on the Linux host |
+| Proof | run 35429672326 at `a5a0795`, on `ubuntu-24.04`: 35 benchmarks measured, uploaded through OIDC, and CodSpeed's check reports the app installed. `call::sdk` 108.8 µs against `call::naive` 159.3 µs (**0.68x**), `call::sdk_20` 233 µs against `call::naive_20` 511.3 µs (**0.46x**). These are CodSpeed's simulated times (instruction counts with its cache and cycle estimate), checked by the Phase 5 verifier, not measured on the Linux host |
 | `push` trigger | added after that run: `bench.yaml` now also runs on every push to `main`, the baseline CodSpeed compares pull requests with. A `main` run is never cancelled by a newer one (`cancel-in-progress` is off for `refs/heads/main`, as in `ci.yaml`) |
 
 AC-P7's condition, "the instruction count of the SDK full-call benchmark is lower than the naive comparator's", holds on
@@ -1395,7 +1399,6 @@ same `&str`. So a body is validated once: a `decode_seed` body was validated twi
   Round-to-round drift within one tree reaches 4.9% (base `answers[20]`: 9.729 to 9.249 us), so none of these moves
   is resolved.
 
-**Not measured.** Instruction counts on the Linux host: the host was not available to this phase, so the change has
-no callgrind numbers. The expected delta is small (std's UTF-8 pass replaces sonic's for most bodies), and that
-expectation is unverified until the Linux run. Nor was any fuzzing done on x86_64, where sonic-rs picks other SIMD
-paths.
+**Not measured.** Instruction counts on the Linux host: none were taken, and the host was retired, so CodSpeed's run is
+the Linux evidence. The expected delta is small (std's UTF-8 pass replaces sonic's for most bodies). Nor was any
+fuzzing done on x86_64, where sonic-rs picks other SIMD paths.
