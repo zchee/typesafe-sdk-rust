@@ -1,8 +1,4 @@
-# Tests against the live API. With both `TYPESAFE_LIVE_TESTS=1` and
-# `TYPESAFE_API_KEY` set they make real, BILLED calls; without either they
-# FAIL - they never skip - before any request is made. So this crate is a
-# workspace member for the lints and never a default member: `cargo test` and
-# `cargo nextest run` without `--workspace` or `-p` never reach it.
+# Billed tests against the live API; see src/lib.rs. Never a default member.
 # `publish = false`: it is not a library anybody depends on.
 [package]
 name = "typesafe-sdk-rust-live-tests"
