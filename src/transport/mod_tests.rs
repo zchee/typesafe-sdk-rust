@@ -13,6 +13,8 @@ use crate::{
     constants::{RUNTIME_HEADER, SDK_HEADER},
 };
 
+include!("../printable_tests.rs");
+
 /// A configuration with a key, a base URL and the given default headers.
 fn config(base_url: &str, defaults: &[(&str, &str)]) -> Config {
     let mut headers = HeaderMap::new();
@@ -286,10 +288,7 @@ fn text_a_transport_chose_is_escaped_and_cut_and_its_error_kept_whole() {
         "Connection error: ".len() + MAX_CONNECTION_MESSAGE_CHARS + 1
     );
     for shown in [rendered.clone(), format!("{rendered:?}")] {
-        assert!(!shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f), "{shown:?}");
-        for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
-            assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
-        }
+        assert_printable(&shown);
     }
     let source = error.source().expect("the transport's error is kept");
     assert_eq!(source.to_string(), Loud.to_string(), "the cause keeps its full text");

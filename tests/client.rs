@@ -37,6 +37,8 @@ use typesafe_sdk::{
     HttpVersion, Noul, PreparedQuestions, Questions, RawQuestion, RetryPolicy, Score,
 };
 
+include!("../src/printable_tests.rs");
+
 // ------------------------------------------------------------- fixtures
 
 /// `RESULT` of `tests/test_clients.py:42-56`.
@@ -482,18 +484,6 @@ async fn error_messages() {
     }
 }
 
-/// No byte a terminal or a log reader would act on, and none of the
-/// characters that hide or reorder text.
-fn assert_printable(shown: &str) {
-    assert!(
-        !shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
-        "a control byte reached the rendering: {shown:?}"
-    );
-    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
-        assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
-    }
-}
-
 /// Section 6, "cut to 200 characters + U+2026 on every path": what a server
 /// puts in an error body or its request id reaches `Display` and `Debug`
 /// escaped and cut, over each protocol; the body and the header stay whole
@@ -710,10 +700,7 @@ async fn a_transport_error_of_any_text_is_escaped_and_cut_in_the_message() {
     // 18 characters of prefix, 200 of the transport's text, the mark.
     assert_eq!(rendered.chars().count(), 18 + 200 + 1);
     for shown in [rendered.clone(), format!("{rendered:?}")] {
-        assert!(!shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f), "{shown:?}");
-        for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
-            assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
-        }
+        assert_printable(&shown);
     }
     let cause = error.source().and_then(|cause| cause.downcast_ref::<Loud>());
     assert_eq!(cause.map(ToString::to_string), Some(Loud.to_string()));

@@ -6,6 +6,8 @@ use serde_json::json;
 use super::*;
 use crate::{ErrorKind, response::Answer};
 
+include!("printable_tests.rs");
+
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("../tests/fixtures/result.json");
 const UNKNOWN_ANSWER_TYPE: &[u8] = include_bytes!("../tests/fixtures/unknown-answer-type.json");
@@ -556,13 +558,7 @@ fn assert_rendered(failure: &ResponseValidationError, path: &str) {
         )
     );
     for rendered in [failure.to_string(), format!("{failure:?}")] {
-        assert!(
-            !rendered.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
-            "a control byte reached the text: {rendered:?}"
-        );
-        for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
-            assert!(!rendered.contains(hidden), "{hidden:?} reached the text: {rendered:?}");
-        }
+        assert_printable(&rendered);
     }
 }
 

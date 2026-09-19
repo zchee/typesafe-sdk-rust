@@ -12,6 +12,8 @@ use http::{HeaderName, HeaderValue};
 use super::*;
 use crate::DecodeErrorKind;
 
+include!("printable_tests.rs");
+
 // ------------------------------------------------------------- fixtures
 
 /// The instant the `Retry-After` date cases measure against, chosen so the
@@ -518,18 +520,6 @@ fn nothing_that_could_be_a_secret_reaches_a_debug_rendering() {
 }
 
 // ------------------------------------------------- server text in a message
-
-/// No byte a terminal or a log reader would act on, and none of the
-/// characters that hide or reorder text.
-fn assert_printable(shown: &str) {
-    assert!(
-        !shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
-        "a control byte reached the rendering: {shown:?}"
-    );
-    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
-        assert!(!shown.contains(hidden), "{hidden:?} reached the rendering: {shown:?}");
-    }
-}
 
 /// Asserts that neither rendering of `error`, nor of the [`Error`] wrapping
 /// it, holds a character a log reader would act on, and returns its

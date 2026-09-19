@@ -15,6 +15,8 @@ use serde::{Deserialize, de::IgnoredAny};
 
 use super::*;
 
+include!("printable_tests.rs");
+
 // ------------------------------------------------------------- fixtures
 
 /// A response-shaped target, cut down to what the field-path tests need.
@@ -246,18 +248,6 @@ fn keyed_path(key: &str) -> String {
     let error = decode::<Keyed>(document.as_bytes()).expect_err("the answer has no `noul`");
     assert_eq!(error.kind(), DecodeErrorKind::Data, "kind of {error}");
     error.path().to_owned()
-}
-
-/// Asserts that `rendered` holds no byte a terminal or a log reader would act
-/// on: nothing below 0x20, no DEL, and no ESC in particular.
-fn assert_printable(rendered: &str) {
-    assert!(
-        !rendered.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
-        "a control byte reached the text: {rendered:?}"
-    );
-    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
-        assert!(!rendered.contains(hidden), "{hidden:?} reached the text: {rendered:?}");
-    }
 }
 
 #[test]

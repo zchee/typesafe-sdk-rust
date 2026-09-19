@@ -3,17 +3,7 @@
 
 use super::*;
 
-/// No byte a terminal or a log reader would act on, and none of the
-/// characters that hide or reorder text.
-fn assert_printable(rendered: &str) {
-    assert!(
-        !rendered.bytes().any(|byte| byte < 0x20 || byte == 0x7f),
-        "a control byte reached the text: {rendered:?}"
-    );
-    for hidden in ['\u{202e}', '\u{2066}', '\u{200b}', '\u{feff}', '\u{2028}', '\u{85}'] {
-        assert!(!rendered.contains(hidden), "{hidden:?} reached the text: {rendered:?}");
-    }
-}
+include!("printable_tests.rs");
 
 #[test]
 fn control_and_format_characters_are_escaped_and_printable_text_is_kept() {
