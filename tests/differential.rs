@@ -620,13 +620,13 @@ fn generated_documents_decode_the_same_or_diverge_only_as_listed() {
     );
 }
 
-/// Which of the listed divergences the codecs actually have today. Two of them
-/// occur. The other three are listed because they are where JSON parsers
-/// commonly part ways, and a codec upgrade may make them occur; today both
-/// codecs refuse the document or read the same double, so the judge sees
-/// agreement.
+/// Which of the listed divergences the pinned codec versions actually have.
+/// Two of them occur. The other three are listed because they are where JSON
+/// parsers commonly part ways, and a codec upgrade may make them occur; at the
+/// pinned versions both codecs refuse the document or read the same double, so
+/// the judge sees agreement.
 #[test]
-fn only_negative_zero_and_nesting_depth_divergences_occur_today() {
+fn only_negative_zero_and_nesting_depth_divergences_occur() {
     let too_deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
     let cases: [(&str, Features, Option<Divergence>); 10] = [
         ("[-0.0, 1]", Features::default(), Some(Divergence::NegativeZeroSign)),
