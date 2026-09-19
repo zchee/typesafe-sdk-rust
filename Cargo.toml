@@ -172,6 +172,10 @@ tracing = { workspace = true, optional = true }
 typesafe-sdk-rust-macros = { version = "=0.1.0", path = "crates/macros", optional = true }
 
 [dev-dependencies]
+# divan with CodSpeed's instrumentation: it runs as plain divan under
+# `cargo bench` and reports instruction counts under `cargo codspeed run`.
+# The benches import it under the name `divan`.
+codspeed-divan-compat = { workspace = true }
 dhat = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
@@ -204,6 +208,20 @@ required-features = ["macros"]
 name = "alloc_derive"
 path = "tests/alloc_derive.rs"
 required-features = ["internals", "macros"]
+
+# divan supplies its own `main`, so the benches opt out of libtest's harness.
+# `sdk` is the CPU-only set that CodSpeed measures; `loopback` is a real
+# socket and stays out of that run (see the file).
+[[bench]]
+name = "sdk"
+path = "benches/sdk/main.rs"
+harness = false
+required-features = ["internals", "macros"]
+
+[[bench]]
+name = "loopback"
+path = "benches/loopback.rs"
+harness = false
 
 [lints]
 workspace = true
