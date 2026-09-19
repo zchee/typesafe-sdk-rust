@@ -22,7 +22,7 @@ use crate::{
     config::ZERO_TIMEOUT,
     de::{self, AnswerSet},
     error::Error,
-    question::PreparedQuestions,
+    question::{PreparedQuestions, upsert},
     response::{Answers, SystemOneResponse},
     retry::{self, RetryPolicy},
     text,
@@ -203,11 +203,7 @@ where
     {
         let mut encoded = Vec::new();
         let value = codec::encode_into(&mut encoded, value).map(|()| encoded);
-        let name = name.into();
-        match self.extra.iter_mut().find(|(known, _)| *known == name) {
-            Some((_, slot)) => *slot = value,
-            None => self.extra.push((name, value)),
-        }
+        upsert(&mut self.extra, name.into(), value);
         self
     }
 

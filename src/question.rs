@@ -684,10 +684,10 @@ where
 /// moving it: the semantics of a Python `dict`, which is what the upstream SDK
 /// holds questions, options and raw fields in.
 ///
-/// The lookup is linear. These lists are the options or questions of one
-/// request, a handful to a few hundred entries, where a scan of a `Vec` is
-/// cheaper than hashing and keeps the insertion order for free.
-fn upsert<'a, V>(entries: &mut Vec<(Cow<'a, str>, V)>, name: Cow<'a, str>, value: V) {
+/// The lookup is linear. These lists are the options, questions, members or
+/// headers of one request, a handful to a few hundred entries, where a scan of
+/// a `Vec` is cheaper than hashing and keeps the insertion order for free.
+pub(crate) fn upsert<K: PartialEq, V>(entries: &mut Vec<(K, V)>, name: K, value: V) {
     match entries.iter_mut().find(|(key, _)| *key == name) {
         Some((_, slot)) => *slot = value,
         None => entries.push((name, value)),

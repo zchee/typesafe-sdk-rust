@@ -46,6 +46,7 @@ use crate::{
         SDK_IDENTIFIER, TRANSPORT_HEADERS,
     },
     error::{ApiError, Error, format_endpoint},
+    question::upsert,
     telemetry,
     text::{self, Backslash, SafeText},
 };
@@ -268,10 +269,7 @@ where
         if is_sdk_owned(&name, with_body) {
             continue;
         }
-        match parsed.iter_mut().find(|(known, _)| *known == name) {
-            Some((_, slot)) => *slot = value,
-            None => parsed.push((name, value)),
-        }
+        upsert(&mut parsed, name, value);
     }
     Ok(parsed)
 }
