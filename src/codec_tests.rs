@@ -620,6 +620,47 @@ fn an_outlier_body_stops_pinning_the_scratch() {
     assert!(capacity < large.len(), "the megabyte buffer is gone: {capacity}");
 }
 
+#[test]
+fn a_scratch_past_the_ceiling_is_not_kept() {
+    reset_scratch();
+
+    // The codec reserves six times a string's length, so 2 MiB of text needs
+    // about 12 MiB of scratch.
+    let state = "L".repeat(2 * 1024 * 1024);
+    for call in 1..=3 {
+        let body = encode_body(|buffer| encode_into(buffer, state.as_str())).expect("encodes");
+        assert_eq!(body.len(), state.len() + 2, "call {call}");
+        assert_eq!(
+            scratch_capacity(),
+            0,
+            "call {call}: a {} B state's scratch is kept, over the {MAX_RETAINED_SCRATCH} B ceiling",
+            state.len()
+        );
+    }
+
+    let small = "s".repeat(1024);
+    let body = encode_body(|buffer| encode_into(buffer, small.as_str())).expect("encodes");
+    assert_eq!(&body[..3], b"\"ss", "a later call encodes into a fresh buffer");
+    assert!(scratch_capacity() >= small.len(), "and keeps that one: {}", scratch_capacity());
+}
+
+#[test]
+fn a_scratch_under_the_ceiling_is_kept() {
+    reset_scratch();
+
+    let state = "L".repeat(1024 * 1024);
+    for call in 1..=3 {
+        encode_body(|buffer| encode_into(buffer, state.as_str())).expect("encodes");
+        let capacity = scratch_capacity();
+        assert!(
+            capacity > 6 * state.len() && capacity <= MAX_RETAINED_SCRATCH,
+            "call {call}: a {} B state keeps {capacity} B, not its six-fold reserve under the \
+             {MAX_RETAINED_SCRATCH} B ceiling",
+            state.len()
+        );
+    }
+}
+
 // ------------------------------------------------------------- raw JSON
 
 #[derive(Debug, Deserialize)]

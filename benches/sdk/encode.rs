@@ -25,6 +25,11 @@ use crate::{service::body, support::text};
 /// 1 KB, 64 KB and 1 MB states.
 const SIZES: [usize; 3] = [1 << 10, 64 << 10, 1 << 20];
 
+/// [`SIZES`] and a 4 MB state, whose scratch is over the size a thread keeps
+/// between calls: it is dropped after every call and grown again by the next,
+/// so that row times what a state that large pays on every call.
+const PREPARED_SIZES: [usize; 4] = [1 << 10, 64 << 10, 1 << 20, 4 << 20];
+
 /// A state object holding one large string field, AC-P1's object case.
 #[derive(Serialize)]
 struct Ticket {
@@ -32,7 +37,7 @@ struct Ticket {
     body: String,
 }
 
-#[divan::bench(args = SIZES)]
+#[divan::bench(args = PREPARED_SIZES)]
 fn prepared(bencher: Bencher<'_, '_>, len: usize) {
     let state = text(len);
     drop(body(state.as_str()));

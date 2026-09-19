@@ -202,6 +202,18 @@ thread_local! {
     static SCRATCH_HINT: Cell<usize> = const { Cell::new(0) };
 }
 
+/// The most encode scratch a thread keeps between calls: 8 MiB.
+///
+/// The codec reserves six times a string's length before writing it, so the
+/// scratch a large string state leaves behind is six times the state, and a
+/// thread would keep it until later calls on that same thread decayed it
+/// away - never, on a thread that goes idle. A 64 MiB state left
+/// 402,653,228 B on its thread. A scratch over this size is dropped after its
+/// call instead, and a state that large grows it afresh on every call, as a
+/// first call does. A 1 MB state, the largest one a call is budgeted for,
+/// leaves 6,291,587 B, under the ceiling, so its calls keep reusing it.
+const MAX_RETAINED_SCRATCH: usize = 8 * 1024 * 1024;
+
 /// Appends the JSON form of `value` to `buf`.
 ///
 /// The buffer is not cleared, which is what lets a request body be spliced out
@@ -234,7 +246,8 @@ pub(crate) fn write_json_string(buf: &mut Vec<u8>, text: &str) {
 ///
 /// `fill` writes the whole body into a buffer this thread keeps between calls,
 /// so a repeated call of the same shape allocates once: the copy into the
-/// returned buffer. That buffer has `len == capacity`, which makes
+/// returned buffer. A buffer that grew past [`MAX_RETAINED_SCRATCH`] is not
+/// kept. That buffer has `len == capacity`, which makes
 /// `Bytes::from` a move rather than a copy and defers the shared-header
 /// allocation to the first `clone`.
 ///
@@ -260,11 +273,16 @@ where
     let hint = SCRATCH_HINT.get();
     let decayed = scratch.len().max(hint - hint / 16);
     SCRATCH_HINT.set(decayed);
-    // The shrink goes all the way down to the hint rather than to the ceiling:
-    // stopping at the ceiling leaves the capacity exactly at a bound that the
-    // still-decaying hint lowers again, so every following call re-allocates
-    // the whole buffer.
-    if scratch.capacity() > decayed.saturating_mul(8) {
+    if scratch.capacity() > MAX_RETAINED_SCRATCH {
+        // Not shrunk to the hint either: a hint this large is the body that
+        // just passed the ceiling, and keeping it would hold the memory the
+        // ceiling exists to release.
+        scratch = Vec::new();
+    } else if scratch.capacity() > decayed.saturating_mul(8) {
+        // The shrink goes all the way down to the hint rather than to the
+        // bound: stopping at the bound leaves the capacity exactly where the
+        // still-decaying hint lowers it again, so every following call
+        // re-allocates the whole buffer.
         scratch.shrink_to(decayed);
     }
     SCRATCH.with(|cell| cell.replace(Some(scratch)));

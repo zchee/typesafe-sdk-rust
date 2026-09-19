@@ -1136,6 +1136,28 @@ dev and the release profile**:
 The unpinned whole call now costs the same as the pinned one in the dev profile too (22 blocks), because the System
 One future over this transport is 2,040 bytes, under tokio's debug box size; before `7493955` it cost 23.
 
+### After the exit gate
+
+The verifier (`p5-verify`, at `acd4df3`) found defects that were fixed forward; each entry names its commit.
+
+**R17: an 8 MiB ceiling on the retained encode scratch (`codec.rs`, `MAX_RETAINED_SCRATCH`).** Candidate 7 at
+1 MiB failed AC-P1's 1 MB rows. A thread kept six times the largest string state it ever encoded, without bound (a
+64 MiB state left 402,653,228 B on its thread), released only by later calls on that same thread. A scratch over
+8 MiB is now dropped after its call. Every frozen AC-P1 row needs a ceiling of at least 6,291,587 B (the 1 MB object
+row's scratch; 6 MiB fails it), so 8 MiB leaves every row as it was: the 20 `alloc_encode` sections print the same
+five runs as at `acd4df3`, in dev and in release (diffed). A state whose scratch passes the ceiling (a string over
+about 1.33 MiB) pays on every call what a first call pays. B1 gained a 4 MiB row for that case (`prepared[4194304]`);
+its wall clock with the ceiling against without it, three runs of 100 samples each, medians:
+
+| Machine | Without the ceiling | With it | Change |
+| --- | ---: | ---: | ---: |
+| macOS arm64 (load average 6 to 10) | 1.270-1.274 ms | 1.272-1.279 ms | +0.3% |
+| Linux x86_64, `taskset -c 2` | 1.813-1.819 ms | 1.871-1.872 ms | +2.9% |
+
+The 1 KB, 64 KB and 1 MB rows moved by less than 1% on both machines. The unit tests
+`a_scratch_past_the_ceiling_is_not_kept` (a 2 MiB state keeps 0 B after each of three calls) and
+`a_scratch_under_the_ceiling_is_kept` (a 1 MiB state keeps its scratch) pin the rule.
+
 ### Unmeasured
 
 - Instruction counts on arm64 (callgrind is not available for macOS arm64), and CodSpeed's own runner: AC-P7 is proved
@@ -1144,4 +1166,4 @@ One future over this transport is 2,040 bytes, under tokio's debug box size; bef
 - Wall-clock numbers on an idle macOS machine: every macOS table here was taken under a load average of 8 to 15 from
   other sessions.
 - Instruction counts of `loopback` (kept out of the instrumented run on purpose).
-- The R17 ceiling at any value other than 1 MiB, and under a musl or jemalloc allocator.
+- The R17 ceiling at any value other than 1 MiB and 8 MiB, and under a musl or jemalloc allocator.
