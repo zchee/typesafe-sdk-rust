@@ -1,0 +1,17 @@
+error: the question name "spam" is used twice, by field `spam` and by field `other`: answers are matched to fields by name, so each field needs a name of its own; rename one field or give it `#[question(name = "...")]`
+ --> tests/ui/names.rs:9:23
+  |
+9 |     #[question(name = "spam")]
+  |                       ^^^^^^
+
+error: expected `name = "..."`
+  --> tests/ui/names.rs:16:16
+   |
+16 |     #[question(name)]
+   |                ^^^^
+
+error: unknown key `rename` in `#[question(...)]`: the one key is `name = "..."`, the name the question is asked under
+  --> tests/ui/names.rs:19:16
+   |
+19 |     #[question(rename = "x")]
+   |                ^^^^^^

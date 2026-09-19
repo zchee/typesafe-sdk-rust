@@ -175,6 +175,8 @@ proptest = { workspace = true }
 serde_json = { workspace = true }
 # `net` and `io-util` for the raw sockets the failure tests answer with.
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+# Compiles the derive's misuse cases and compares rustc's messages.
+trybuild = { workspace = true }
 # Path only, no version: cargo strips a path dev-dependency when it publishes,
 # and this crate is never published.
 typesafe-sdk-rust-test-support = { path = "crates/test-support" }
@@ -190,6 +192,16 @@ required-features = ["internals"]
 name = "alloc_call"
 path = "tests/alloc_call.rs"
 required-features = ["internals"]
+
+[[test]]
+name = "derive"
+path = "tests/derive.rs"
+required-features = ["macros"]
+
+[[test]]
+name = "alloc_derive"
+path = "tests/alloc_derive.rs"
+required-features = ["internals", "macros"]
 
 [lints]
 workspace = true

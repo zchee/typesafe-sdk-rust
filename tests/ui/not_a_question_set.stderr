@@ -1,0 +1,18 @@
+error[E0277]: `Answers` is not a question set
+ --> tests/ui/not_a_question_set.rs:7:33
+  |
+7 |     let _request = client.ask::<Answers>("state");
+  |                           ---   ^^^^^^^ no questions are declared for this type
+  |                           |
+  |                           required by a bound introduced by this call
+  |
+  = help: the trait `QuestionSet` is not implemented for `Answers`
+  = note: derive it: `#[derive(typesafe_sdk::QuestionSet)]` on a struct with one `NoulAnswer`, `ChoiceAnswer` or `ScoreAnswer` field per question
+note: required by a bound in `question::<impl Client<S>>::ask`
+ --> src/question.rs
+  |
+  |     pub fn ask<'a, Q>(
+  |            --- required by a bound in this associated function
+...
+  |         Q: QuestionSet,
+  |            ^^^^^^^^^^^ required by this bound in `question::<impl Client<S>>::ask`

@@ -1,0 +1,71 @@
+error: `#[choice]` needs its options: `options("a", "b")`, each one optionally described as `"a" = "..."`, as in `#[choice(instructions = "...", options("a" = "...", "b"))]`
+ --> tests/ui/grammar.rs:9:5
+  |
+9 |     #[choice(instructions = "Tone?")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `#[score]` needs its levels, lowest first: `levels("low", "high")`, as in `#[score(instructions = "...", levels("low", "high"))]`
+  --> tests/ui/grammar.rs:11:5
+   |
+11 |     #[score]
+   |     ^^^^^^^^
+
+error: the option "calm" is listed twice: each option of a choice is listed once, with its description if it has one
+  --> tests/ui/grammar.rs:17:50
+   |
+17 |     #[choice(options("calm" = "polite", "angry", "calm"))]
+   |                                                  ^^^^^^
+
+error: `instructions` is given twice
+  --> tests/ui/grammar.rs:19:32
+   |
+19 |     #[noul(instructions = "a", instructions = "b")]
+   |                                ^^^^^^^^^^^^
+
+error: unknown key `options` in `#[noul(...)]`: the keys are `instructions`, `yes` and `no`
+  --> tests/ui/grammar.rs:25:12
+   |
+25 |     #[noul(options("x"))]
+   |            ^^^^^^^
+
+error: unknown key `weight` in `#[score(...)]`: the keys are `instructions` and `levels(...)`
+  --> tests/ui/grammar.rs:27:28
+   |
+27 |     #[score(levels("low"), weight = "3")]
+   |                            ^^^^^^
+
+error: expected a string literal: the derive takes text as string literals only; object or array content is a runtime `Questions` feature
+  --> tests/ui/grammar.rs:33:27
+   |
+33 |     #[noul(instructions = INSTRUCTIONS)]
+   |                           ^^^^^^^^^^^^
+
+error: expected an option name: the derive takes text as string literals only; object or array content is a runtime `Questions` feature
+  --> tests/ui/grammar.rs:35:22
+   |
+35 |     #[choice(options(calm))]
+   |                      ^^^^
+
+error: expected a level description: the derive takes text as string literals only; object or array content is a runtime `Questions` feature
+  --> tests/ui/grammar.rs:37:27
+   |
+37 |     #[score(levels("low", 2))]
+   |                           ^
+
+error: unexpected suffix `suffix` on a string literal
+  --> tests/ui/grammar.rs:39:27
+   |
+39 |     #[noul(instructions = "x"suffix)]
+   |                           ^^^^^^^^^
+
+error: expected `#[noul(instructions = "...")]`, not `#[noul = ...]`
+  --> tests/ui/grammar.rs:45:5
+   |
+45 |     #[noul = "Spam?"]
+   |     ^^^^^^^^^^^^^^^^^
+
+error: expected `options(...)`, a parenthesized list
+  --> tests/ui/grammar.rs:47:14
+   |
+47 |     #[choice(options = "calm")]
+   |              ^^^^^^^

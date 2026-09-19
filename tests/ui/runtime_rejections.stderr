@@ -1,0 +1,11 @@
+error: Score question "urgency" has no criteria; at least one score is required: list the levels, lowest first, as `levels("low", "high")`
+ --> tests/ui/runtime_rejections.rs:8:43
+  |
+8 |     #[score(instructions = "How urgent?", levels())]
+  |                                           ^^^^^^
+
+error: Score question "renamed \"score\"" has no criteria; at least one score is required: list the levels, lowest first, as `levels("low", "high")`
+  --> tests/ui/runtime_rejections.rs:11:13
+   |
+11 |     #[score(levels())]
+   |             ^^^^^^
