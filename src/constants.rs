@@ -91,7 +91,10 @@ pub(crate) const RETRY_COUNT_HEADER: HeaderName = HeaderName::from_static("x-typ
 /// stream and leaves an HTTP/1.1 exchange waiting for bytes that never come,
 /// on a connection other calls share. `Host` is not among them: over HTTP/1.1
 /// it is the request's host, and over HTTP/2 it travels as an ordinary header
-/// beside the `:authority` the base URL gives.
+/// beside the `:authority` the base URL gives. Over HTTP/2 a `Host` that
+/// differs from that authority is outside RFC 9113 (section 8.3.1), and a
+/// conforming server may refuse the request as malformed; a caller that needs
+/// another `Host` routes by the base URL or speaks HTTP/1.1.
 pub(crate) const TRANSPORT_HEADERS: [HeaderName; 8] = [
     header::CONTENT_LENGTH,
     header::TRANSFER_ENCODING,

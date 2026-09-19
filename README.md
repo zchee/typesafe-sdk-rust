@@ -425,8 +425,12 @@ application's own filter on the `typesafe_sdk` target.
   `upgrade` set as a client default or on a call are dropped without an error, on every protocol,
   as the SDK's own headers are: a caller's `content-length` that disagrees with the body would
   fail an HTTP/2 stream and leave an HTTP/1.1 call waiting until its deadline. `host` is sent as
-  given, on every protocol; over HTTP/2 the request's `:authority` still comes from the base URL,
-  so a front end that routes on `host` rather than `:authority` sees the caller's value.
+  given, on every protocol; over HTTP/2 the request's `:authority` still comes from the base URL.
+  Over HTTP/2 a `host` that differs from the base URL's authority is outside RFC 9113 (section
+  8.3.1), and a conforming server may refuse the request as malformed. A caller that needs another
+  `Host` routes by the base URL instead, or speaks HTTP/1.1: `HttpVersion::Auto` does on an `http`
+  base URL, and on an `https` one only when the server picks HTTP/1.1 through ALPN; the default
+  transport cannot insist on HTTP/1.1 over TLS.
 - **Responses are bounded.** A body is read under a 16 MiB cap, and a JSON document nested deeper
   than 16 levels is refused before it reaches the parser (see below).
 

@@ -241,8 +241,13 @@ impl ClientBuilder {
     /// `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`,
     /// `Proxy-Connection`, `TE`, `Trailer` and `Upgrade`. `Host` is sent as
     /// given, on every protocol; over HTTP/2 the request's `:authority` still
-    /// comes from the base URL. A later call with the same name replaces an
-    /// earlier one.
+    /// comes from the base URL. Over HTTP/2 a `Host` that differs from the
+    /// base URL's authority is outside RFC 9113 (section 8.3.1), and a
+    /// conforming server may refuse the request as malformed. A caller that
+    /// needs another `Host` routes by the base URL instead, or speaks
+    /// HTTP/1.1: [`HttpVersion::Auto`] does on an `http` base URL, and on an
+    /// `https` one only when the server picks HTTP/1.1 through ALPN. A later
+    /// call with the same name replaces an earlier one.
     #[must_use]
     pub fn default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.default_headers.push((name.into(), value.into()));
