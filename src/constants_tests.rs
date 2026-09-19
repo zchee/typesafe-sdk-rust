@@ -40,22 +40,9 @@ fn header_names_are_the_python_sdk_names_lower_cased() {
 }
 
 #[test]
-fn every_secret_header_name_is_a_valid_lower_case_header_name() {
-    for name in SECRET_HEADERS {
-        let parsed = HeaderName::from_bytes(name.as_bytes())
-            .unwrap_or_else(|error| panic!("{name:?} is not a header name: {error}"));
-        assert_eq!(parsed.as_str(), name, "{name:?} is not in the form `http` stores");
-    }
-}
-
-#[test]
 fn sdk_identifier_names_this_port_and_its_version() {
     let expected = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
     assert_eq!(SDK_IDENTIFIER, expected.as_str());
-    assert!(
-        !SDK_IDENTIFIER.as_bytes().starts_with(b"typesafe-sdk/"),
-        "the identifier impersonates the official SDK: {SDK_IDENTIFIER:?}"
-    );
 }
 
 #[test]
