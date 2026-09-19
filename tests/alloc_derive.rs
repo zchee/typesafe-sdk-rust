@@ -1,8 +1,9 @@
 //! What a derived question set costs in allocations.
 //!
 //! Budgets are dhat `total_blocks` and `total_bytes` deltas, as in
-//! `alloc_decode.rs`, and one profiler exists per process, so all of it runs
-//! in a single test:
+//! `alloc_decode.rs`, each held to the stable minimum of [`support::RUNS`]
+//! identical runs after a warm-up, for the reason `support` gives, and one
+//! profiler exists per process, so all of it runs in a single test:
 //!
 //! - `prepared()` allocates nothing, on its first call or any later one: the
 //!   set is a `static` the compiler initialized.
@@ -26,6 +27,8 @@
 //!   blocks: the worst-case buffer, its shrink to exact size, and the name
 //!   ends.
 
+mod support;
+
 use std::hint::black_box;
 
 use bytes::Bytes;
@@ -34,6 +37,8 @@ use typesafe_sdk::{
     __internals as sdk, Answers, Choice, ChoiceAnswer, Noul, NoulAnswer, QuestionSet, Questions,
     Score, ScoreAnswer, SystemOneResponse,
 };
+
+use crate::support::{Measured, measure, measure_min};
 
 // A plain wrapper type, so declaring it as the global allocator stays safe
 // code even though the crate under test forbids `unsafe`.
@@ -63,37 +68,14 @@ struct Review {
     quality: ScoreAnswer,
 }
 
-/// The change in dhat's counters across one section.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Measured {
-    blocks: u64,
-    bytes: u64,
-}
-
-fn measure<F, T>(body: F) -> (Measured, T)
-where
-    F: FnOnce() -> T,
-{
-    let before = dhat::HeapStats::get();
-    let value = body();
-    let after = dhat::HeapStats::get();
-    (
-        Measured {
-            blocks: after.total_blocks - before.total_blocks,
-            bytes: after.total_bytes - before.total_bytes,
-        },
-        value,
-    )
-}
-
-/// Runs `body` once to warm up, then measures it a second time, as the other
-/// allocation budgets are measured.
+/// Runs `body` once to warm up, then measures the identical runs after it,
+/// as the other allocation budgets are measured.
 fn second_run<F, T>(label: &str, body: F) -> Measured
 where
     F: Fn() -> T,
 {
     drop(body());
-    let (measured, value) = measure(&body);
+    let (measured, value) = measure_min(label, || (), |()| body());
     drop(value);
     println!("{label:<48} blocks={:>3} bytes={:>5}", measured.blocks, measured.bytes);
     measured
@@ -108,10 +90,14 @@ fn decode<A: typesafe_sdk::AnswerSet>() -> SystemOneResponse<A> {
 fn a_derived_set_allocates_nothing_to_ask_and_less_to_decode() {
     let _profiler = dhat::Profiler::builder().testing().build();
 
-    // The very first call: there is no initializer to run.
+    // The very first call: there is no initializer to run. Being the first,
+    // it cannot be repeated, so it is the one section measured once.
     let (first, _) = measure(|| black_box(Review::prepared()).len());
-    let (thousand, _) =
-        measure(|| (0..1000).map(|_| black_box(Review::prepared()).names().count()).sum::<usize>());
+    let (thousand, _) = measure_min(
+        "prepared() x 1000 with names() walked",
+        || (),
+        |()| (0..1000).map(|_| black_box(Review::prepared()).names().count()).sum::<usize>(),
+    );
     println!(
         "prepared(), first call                           blocks={:>3} bytes={:>5}",
         first.blocks, first.bytes
@@ -133,8 +119,10 @@ fn a_derived_set_allocates_nothing_to_ask_and_less_to_decode() {
             .score("urgency", Score::new(["can wait", "this week", "today"]))
     };
     drop(example().prepare().expect("the runtime set is valid"));
-    let set = example();
-    let (prepare, prepared) = measure(move || set.prepare().expect("the runtime set is valid"));
+    let (prepare, prepared) =
+        measure_min("Questions::prepare(), runtime example set", example, |set| {
+            set.prepare().expect("the runtime set is valid")
+        });
     drop(prepared);
     println!(
         "{:<48} blocks={:>3} bytes={:>5}",

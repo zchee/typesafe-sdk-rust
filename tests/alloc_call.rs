@@ -9,8 +9,10 @@
 //!
 //! Scenario, as the budget pins it: a 1 KB string `state`, three questions,
 //! no per-call headers, the default deadline, no `tracing` subscriber, the
-//! second of two identical calls. Both runs consume the response body the
-//! same way - frame by frame - and the SDK additionally keeps it.
+//! identical calls after a warm-up call. Both runs consume the response body
+//! the same way - frame by frame - and the SDK additionally keeps it. Every
+//! section, the itemized steps included, is measured [`support::RUNS`] times
+//! and held to its stable minimum, for the reason `support` gives.
 //!
 //! The budget is the frozen inventory: encode 1 + the retained retry body 1 +
 //! header map 2 + request assembly 0 + the queue of collected frames 1 +
@@ -33,6 +35,8 @@
 //!
 //! One profiler exists per process, so all of it runs in a single test.
 
+mod support;
+
 use std::{
     convert::Infallible,
     future::{Ready, ready},
@@ -49,6 +53,8 @@ use typesafe_sdk::{
     __internals as sdk, Body, Choice, Client, Noul, PreparedQuestions, Questions, RetryPolicy,
     Score, response::Answers,
 };
+
+use crate::support::measure_min;
 
 // A plain wrapper type, so declaring it as the global allocator stays safe
 // code even though the crate under test forbids `unsafe`.
@@ -84,29 +90,6 @@ impl Service<Request<Body>> for InMemory {
         response.headers_mut().insert("x-typesafe-request-id", HeaderValue::from_static("req-1"));
         ready(Ok(response))
     }
-}
-
-/// The change in dhat's counters across one section.
-#[derive(Clone, Copy, Debug)]
-struct Measured {
-    blocks: u64,
-    bytes: u64,
-}
-
-fn measure<F, T>(body: F) -> (Measured, T)
-where
-    F: FnOnce() -> T,
-{
-    let before = dhat::HeapStats::get();
-    let value = body();
-    let after = dhat::HeapStats::get();
-    (
-        Measured {
-            blocks: after.total_blocks - before.total_blocks,
-            bytes: after.total_bytes - before.total_bytes,
-        },
-        value,
-    )
 }
 
 /// The three questions the fixture answers.
@@ -192,13 +175,17 @@ fn a_whole_call_costs_its_own_steps_and_nothing_else() {
     drop(unpinned_once());
     assert_eq!(runtime.block_on(pin!(call_directly(prebuilt_request()))), StatusCode::OK);
 
-    let (whole, response) = measure(call);
-    let (whole_untimed, untimed_response) = measure(untimed);
-    let (whole_once, once_response) = measure(once);
-    let (whole_unpinned, unpinned_response) = measure(unpinned);
-    let (whole_unpinned_once, unpinned_once_response) = measure(unpinned_once);
-    let request = prebuilt_request();
-    let (direct, status) = measure(|| runtime.block_on(pin!(call_directly(request))));
+    let (whole, response) = measure_min("whole call", || (), |()| call());
+    let (whole_untimed, untimed_response) =
+        measure_min("whole call, no deadline", || (), |()| untimed());
+    let (whole_once, once_response) = measure_min("whole call, no retry", || (), |()| once());
+    let (whole_unpinned, unpinned_response) =
+        measure_min("whole call, unpinned", || (), |()| unpinned());
+    let (whole_unpinned_once, unpinned_once_response) =
+        measure_min("whole call, unpinned, no retry", || (), |()| unpinned_once());
+    let (direct, status) = measure_min("transport called directly", prebuilt_request, |request| {
+        runtime.block_on(pin!(call_directly(request)))
+    });
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response.answers().len(), 3);
     assert_eq!(untimed_response.answers(), response.answers());
@@ -208,17 +195,21 @@ fn a_whole_call_costs_its_own_steps_and_nothing_else() {
     drop((response, untimed_response, once_response, unpinned_response, unpinned_once_response));
 
     // The steps on their own, through the same code the call runs.
-    let (encode, body) = measure(|| {
-        sdk::encode_body(|buffer| {
-            buffer.extend_from_slice(br#"{"state":"#);
-            sdk::encode_into(buffer, state.as_str())?;
-            buffer.extend_from_slice(br#","model":"jev-latest","questions":"#);
-            buffer.extend_from_slice(b"{}");
-            buffer.push(b'}');
-            Ok(())
-        })
-        .expect("the body encodes")
-    });
+    let (encode, body) = measure_min(
+        "encode",
+        || (),
+        |()| {
+            sdk::encode_body(|buffer| {
+                buffer.extend_from_slice(br#"{"state":"#);
+                sdk::encode_into(buffer, state.as_str())?;
+                buffer.extend_from_slice(br#","model":"jev-latest","questions":"#);
+                buffer.extend_from_slice(b"{}");
+                buffer.push(b'}');
+                Ok(())
+            })
+            .expect("the body encodes")
+        },
+    );
     drop(body);
     let mut headers = HeaderMap::with_capacity(6);
     for name in ["authorization", "accept", "user-agent", "x-typesafe-sdk", "x-typesafe-runtime"] {
@@ -228,12 +219,15 @@ fn a_whole_call_costs_its_own_steps_and_nothing_else() {
     // The first clone moves the names' bytes into shared storage, once; the
     // client's own map went through that during the warm-up call.
     drop(headers.clone());
-    let (header_clone, cloned) = measure(|| headers.clone());
+    let (header_clone, cloned) = measure_min("header map clone", || (), |()| headers.clone());
     drop(cloned);
     let fixture = Bytes::from_static(RESULT);
     drop(sdk::decode_system_one::<Answers>(fixture.clone(), StatusCode::OK, HeaderMap::new(), 3));
-    let (decode, decoded) =
-        measure(|| sdk::decode_system_one::<Answers>(fixture, StatusCode::OK, HeaderMap::new(), 3));
+    let (decode, decoded) = measure_min(
+        "decode",
+        || fixture.clone(),
+        |fixture| sdk::decode_system_one::<Answers>(fixture, StatusCode::OK, HeaderMap::new(), 3),
+    );
     drop(decoded);
 
     let sdk_blocks = whole.blocks - direct.blocks;

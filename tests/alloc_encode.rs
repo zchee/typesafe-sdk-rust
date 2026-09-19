@@ -5,15 +5,21 @@
 //! block whose byte contribution is the full new size - which is exactly what
 //! makes a buffer that grows inside a call visible here.
 //!
-//! Everything is measured on the **second** identical call. The first call of
-//! a shape fills the thread's encode scratch; the SDK's steady state is what
-//! follows it.
+//! Everything is measured after one warm-up call of the same shape. The
+//! first call of a shape fills the thread's encode scratch; the SDK's steady
+//! state is what follows it. Each asserted section is measured
+//! [`support::RUNS`] times and held to the stable minimum, for the reason
+//! `support` gives: libtest's own thread can allocate inside a section.
 //!
 //! One profiler exists per process, so all of it runs in a single test.
+
+mod support;
 
 use bytes::Bytes;
 use serde::Serialize;
 use typesafe_sdk::__internals as codec;
+
+use crate::support::{Measured, RUNS, measure, measure_min, stable_min};
 
 // A plain wrapper type, so declaring it as the global allocator stays safe
 // code even though the crate under test forbids `unsafe`.
@@ -33,29 +39,6 @@ const QUESTIONS: &[u8] = br#"{"billing":{"type":"noul","instructions":"Is this a
 struct Ticket<'a> {
     subject: &'a str,
     body: &'a str,
-}
-
-/// The change in dhat's counters across one section.
-#[derive(Clone, Copy)]
-struct Measured {
-    blocks: u64,
-    bytes: u64,
-}
-
-fn measure<F, T>(body: F) -> (Measured, T)
-where
-    F: FnOnce() -> T,
-{
-    let before = dhat::HeapStats::get();
-    let value = body();
-    let after = dhat::HeapStats::get();
-    (
-        Measured {
-            blocks: after.total_blocks - before.total_blocks,
-            bytes: after.total_bytes - before.total_bytes,
-        },
-        value,
-    )
 }
 
 /// `{"state":<state>,"model":"jev-latest","questions":<prepared>}`.
@@ -88,13 +71,14 @@ fn filler(len: usize) -> String {
     text
 }
 
-/// Encodes the same body twice and reports what the second call cost.
+/// Encodes the body once to warm up, then reports what each identical call
+/// after it costs.
 fn steady_state<F>(label: &str, encode: F) -> Measured
 where
     F: Fn() -> Bytes,
 {
     drop(encode());
-    let (measured, body) = measure(&encode);
+    let (measured, body) = measure_min(label, || (), |()| encode());
 
     let allowance = (body.len() as f64 * 1.05) as u64 + 4096;
     println!(
@@ -156,32 +140,63 @@ fn a_repeated_request_body_costs_one_block() {
 /// that follows goes all the way down to the hint - not to the eight-times
 /// ceiling, which the still-decaying hint would cross again on the very next
 /// call, re-allocating the whole buffer every time.
+///
+/// The sequence is what is measured, so it is not one call repeated: the
+/// whole sequence runs [`RUNS`] times, each from an empty scratch, which makes
+/// every run the same sequence, and each small call is held to its stable
+/// minimum across the runs. The large call's line is printed, not asserted,
+/// and it stays the first run's.
 fn mixed_sizes_return_to_one_block() {
-    codec::reset_scratch();
+    const SMALL_CALLS: usize = 16;
 
     let large = filler(1024 * 1024);
     let small = filler(1024);
 
-    let (first, large_body) = measure(|| encode_body(large.as_str()));
+    // Per small call: its measurement in each run, and the body length,
+    // scratch and hint it left, which are the same in every run.
+    let mut calls: Vec<Vec<Measured>> =
+        std::iter::repeat_with(|| Vec::with_capacity(RUNS)).take(SMALL_CALLS).collect();
+    let mut states = [(0, 0, 0); SMALL_CALLS];
+    let mut first_run_large = None;
+    for _ in 0..RUNS {
+        codec::reset_scratch();
+        let (first, large_body) = measure(|| encode_body(large.as_str()));
+        first_run_large.get_or_insert((first, large_body.len(), codec::scratch_capacity()));
+        drop(large_body);
+        for (call, state) in calls.iter_mut().zip(&mut states) {
+            let (measured, body) = measure(|| encode_body(small.as_str()));
+            call.push(measured);
+            *state = (body.len(), codec::scratch_capacity(), codec::scratch_hint());
+        }
+        assert!(
+            codec::scratch_capacity() <= codec::scratch_hint().saturating_mul(8),
+            "the scratch still holds {} bytes against a hint of {}",
+            codec::scratch_capacity(),
+            codec::scratch_hint()
+        );
+        assert!(
+            codec::scratch_capacity() < large.len(),
+            "the megabyte buffer is still retained: {} bytes",
+            codec::scratch_capacity()
+        );
+    }
+
+    let (first, large_len, large_scratch) =
+        first_run_large.expect("invariant: RUNS is at least one");
     println!(
-        "mixed: 1 MB     body={:>9} blocks={} bytes={:>9} scratch={}",
-        large_body.len(),
-        first.blocks,
-        first.bytes,
-        codec::scratch_capacity()
+        "mixed: 1 MB     body={large_len:>9} blocks={} bytes={:>9} scratch={large_scratch}",
+        first.blocks, first.bytes
     );
 
     let mut shrinks = 0;
     let mut last = Measured { blocks: 0, bytes: 0 };
-    for call in 1..=16 {
-        let (measured, body) = measure(|| encode_body(small.as_str()));
+    for (index, (runs, (len, scratch, hint))) in calls.iter().zip(states).enumerate() {
+        let call = index + 1;
+        let measured = stable_min(&format!("mixed: 1 KB #{call}"), runs);
         println!(
-            "mixed: 1 KB #{call:<2} body={:>9} blocks={} bytes={:>9} scratch={} hint={}",
-            body.len(),
-            measured.blocks,
-            measured.bytes,
-            codec::scratch_capacity(),
-            codec::scratch_hint()
+            "mixed: 1 KB #{call:<2} body={len:>9} blocks={} bytes={:>9} scratch={scratch} \
+             hint={hint}",
+            measured.blocks, measured.bytes
         );
         assert!(
             measured.blocks <= 2,
@@ -200,15 +215,4 @@ fn mixed_sizes_return_to_one_block() {
          to the hint is what makes it repeat"
     );
     assert_eq!(last.blocks, 1, "after the outlier the per-call cost must be back to one block");
-    assert!(
-        codec::scratch_capacity() <= codec::scratch_hint().saturating_mul(8),
-        "the scratch still holds {} bytes against a hint of {}",
-        codec::scratch_capacity(),
-        codec::scratch_hint()
-    );
-    assert!(
-        codec::scratch_capacity() < large.len(),
-        "the megabyte buffer is still retained: {} bytes",
-        codec::scratch_capacity()
-    );
 }

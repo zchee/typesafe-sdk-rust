@@ -1,8 +1,9 @@
 //! What decoding one response costs in allocations.
 //!
 //! The budget is stated in dhat's `total_blocks` and `total_bytes` deltas, and
-//! it is measured on the **second** identical decode, after one warm-up of the
-//! same shape, exactly as the encode budget is.
+//! it is measured on the identical decodes after one warm-up of the same
+//! shape, exactly as the encode budget is: [`support::RUNS`] of them, held to
+//! the stable minimum, for the reason `support` gives.
 //!
 //! The fixture is the upstream `RESULT` (three answers: a noul, a choice, a
 //! score). Every block it costs is one the answer representation asks for -
@@ -29,6 +30,8 @@
 // is what a `required-features` entry would otherwise do.
 #![cfg(feature = "internals")]
 
+mod support;
+
 use std::{collections::HashMap, fmt};
 
 use bytes::Bytes;
@@ -42,6 +45,8 @@ use typesafe_sdk::{
     de::{AnswerContext, AnswerSet},
     response::{Answers, ChoiceAnswer, NoulAnswer, ScoreAnswer, SystemOneResponse},
 };
+
+use crate::support::{Measured, measure_min};
 
 // A plain wrapper type, so declaring it as the global allocator stays safe
 // code even though the crate under test forbids `unsafe`.
@@ -59,33 +64,10 @@ const MAX_BLOCKS: u64 = 14;
 const MAX_BYTES: u64 = 700;
 const MAX_RATIO_TO_NAIVE: f64 = 0.7;
 
-/// The change in dhat's counters across one section.
-#[derive(Clone, Copy, Debug)]
-struct Measured {
-    blocks: u64,
-    bytes: u64,
-}
-
-fn measure<F, T>(body: F) -> (Measured, T)
-where
-    F: FnOnce() -> T,
-{
-    let before = dhat::HeapStats::get();
-    let value = body();
-    let after = dhat::HeapStats::get();
-    (
-        Measured {
-            blocks: after.total_blocks - before.total_blocks,
-            bytes: after.total_bytes - before.total_bytes,
-        },
-        value,
-    )
-}
-
-/// Decodes the fixture twice through `decode` and reports what the second
-/// decode cost. The response and the inputs are made outside the measured
-/// section: a response body arrives as `Bytes` and the headers as a
-/// `HeaderMap`, and both are moved in, not copied.
+/// Decodes the fixture once through `decode` to warm up and reports what each
+/// identical decode after it costs. The response and the inputs are made
+/// outside the measured section: a response body arrives as `Bytes` and the
+/// headers as a `HeaderMap`, and both are moved in, not copied.
 fn second_decode<T, F>(label: &str, decode: F) -> Measured
 where
     T: fmt::Debug,
@@ -93,8 +75,11 @@ where
 {
     drop(decode(Bytes::from_static(RESULT), HeaderMap::new()));
 
-    let (body, headers) = (Bytes::from_static(RESULT), HeaderMap::new());
-    let (measured, value) = measure(move || decode(body, headers));
+    let (measured, value) = measure_min(
+        label,
+        || (Bytes::from_static(RESULT), HeaderMap::new()),
+        |(body, headers)| decode(body, headers),
+    );
     println!("{label:<44} blocks={:>3} bytes={:>5}", measured.blocks, measured.bytes);
     drop(value);
     measured
