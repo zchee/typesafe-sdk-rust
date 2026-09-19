@@ -549,6 +549,68 @@ async fn transport_errors_are_connection_errors_with_their_cause() {
     assert!(cause::<hyper::Error>(&error).is_some_and(hyper::Error::is_parse), "{error:?}");
 }
 
+/// A transport error that says whatever it likes: a newline, an ANSI
+/// colour, a right-to-left override, and 100,000 characters.
+#[derive(Debug)]
+struct Loud;
+
+impl std::fmt::Display for Loud {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "bad\nline \u{1b}[31mred \u{202e}rtl {}", "x".repeat(100_000))
+    }
+}
+
+impl StdError for Loud {}
+
+/// A transport that fails every request with [`Loud`].
+#[derive(Debug, Clone, Copy)]
+struct Failing;
+
+impl Service<Request<Body>> for Failing {
+    type Response = Response<Body>;
+    type Error = Loud;
+    type Future = std::future::Ready<Result<Response<Body>, Loud>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Loud>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Request<Body>) -> Self::Future {
+        std::future::ready(Err(Loud))
+    }
+}
+
+/// Text a caller's own transport puts in its error reaches the message
+/// escaped and cut 200 characters after `Connection error: `; the error
+/// itself, whole, is the cause.
+#[tokio::test]
+async fn a_transport_error_of_any_text_is_escaped_and_cut_in_the_message() {
+    let client = Client::builder()
+        .api_key("test-key")
+        .base_url("https://api.typesafe.ai")
+        .build_with_service(Failing)
+        .expect("the client builds");
+    let error = client.models().list().send().await.expect_err("the transport fails");
+
+    assert!(matches!(error.kind(), ErrorKind::Connection), "{error:?}");
+    let rendered = error.to_string();
+    assert_eq!(
+        rendered,
+        format!(
+            "Connection error: bad\\nline \\u{{1b}}[31mred \\u{{202e}}rtl {}\u{2026}",
+            "x".repeat(164)
+        )
+    );
+    // 18 characters of prefix, 200 of the transport's text, the mark.
+    assert_eq!(rendered.chars().count(), 18 + 200 + 1);
+    for shown in [rendered.clone(), format!("{rendered:?}")] {
+        assert!(!shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f), "{shown:?}");
+        assert!(!shown.contains('\u{202e}'), "{shown:?}");
+    }
+    let cause = error.source().and_then(|cause| cause.downcast_ref::<Loud>());
+    assert_eq!(cause.map(ToString::to_string), Some(Loud.to_string()));
+}
+
 /// A TLS server whose certificate the client was not told to trust.
 #[tokio::test]
 async fn an_untrusted_certificate_is_a_connection_error_naming_the_certificate() {
@@ -1204,7 +1266,7 @@ mod logging {
         assert!(debug[0].contains(&format!("body_len={sent}")), "{}", debug[0]);
         assert!(debug[1].contains("message=received response"), "{}", debug[1]);
         assert!(debug[1].contains("status=200"), "{}", debug[1]);
-        assert!(debug[1].contains(r#"request_id="req_log""#), "{}", debug[1]);
+        assert!(debug[1].contains("request_id=req_log "), "{}", debug[1]);
         assert!(debug.iter().all(|line| !line.contains("hello")), "a body at DEBUG: {debug:#?}");
 
         let trace = recorder.at(Level::TRACE);

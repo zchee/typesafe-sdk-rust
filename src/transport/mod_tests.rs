@@ -251,6 +251,49 @@ fn a_transport_failure_reads_as_its_chain_of_messages() {
     assert!(timeout.source().is_none());
 }
 
+/// A transport error that says whatever it likes: a newline, an ANSI
+/// colour, a right-to-left override, and 100,000 characters.
+#[derive(Debug)]
+struct Loud;
+
+impl fmt::Display for Loud {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "bad\nline \u{1b}[31mred \u{202e}rtl {}", "x".repeat(100_000))
+    }
+}
+
+impl StdError for Loud {}
+
+/// The message a [`Loud`] error renders as: escaped, and cut 200 characters
+/// after the prefix. The escapes count as the characters they print as:
+/// 36 before the run of `x`, so 164 of those, then the mark.
+pub(super) fn loud_message() -> String {
+    format!(
+        "Connection error: bad\\nline \\u{{1b}}[31mred \\u{{202e}}rtl {}\u{2026}",
+        "x".repeat(164)
+    )
+}
+
+#[test]
+fn text_a_transport_chose_is_escaped_and_cut_and_its_error_kept_whole() {
+    let error = connection(Box::new(Loud));
+
+    assert!(matches!(error.kind(), ErrorKind::Connection), "{error:?}");
+    let rendered = error.to_string();
+    assert_eq!(rendered, loud_message());
+    assert_eq!(
+        rendered.chars().count(),
+        "Connection error: ".len() + MAX_CONNECTION_MESSAGE_CHARS + 1
+    );
+    for shown in [rendered.clone(), format!("{rendered:?}")] {
+        assert!(!shown.bytes().any(|byte| byte < 0x20 || byte == 0x7f), "{shown:?}");
+        assert!(!shown.contains('\u{202e}'), "{shown:?}");
+    }
+    let source = error.source().expect("the transport's error is kept");
+    assert_eq!(source.to_string(), Loud.to_string(), "the cause keeps its full text");
+    assert_eq!(source.to_string().chars().count(), 100_023);
+}
+
 #[test]
 fn a_chain_longer_than_eight_links_is_cut() {
     let mut error: BoxError = Box::new(io::Error::other("root"));

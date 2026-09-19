@@ -64,3 +64,13 @@ fn a_prefix_is_kept_and_not_counted() {
     text.untrusted("abcdef", usize::MAX);
     assert_eq!(text.into_string(), "Connection error: abc\u{2026}");
 }
+
+#[test]
+fn a_display_streams_through_the_writer_and_stops_at_the_limit() {
+    let long = "x".repeat(100_000);
+    let mut text = SafeText::new(10, Backslash::Keep);
+    write!(text.untrusted_writer(), "\u{1b}{long}").expect("the writer never fails");
+    // A later write after the limit is dropped too, and still succeeds.
+    write!(text.untrusted_writer(), "more").expect("the writer never fails");
+    assert_eq!(text.into_string(), format!("\\u{{1b}}{}\u{2026}", "x".repeat(4)));
+}

@@ -12,6 +12,34 @@
 
 use std::fmt::{self, Write as _};
 
+/// The most characters a name the SDK did not choose - a header name, a body
+/// member's name - is quoted with in a message.
+pub(crate) const MAX_NAME_CHARS: usize = 128;
+
+/// The most characters of someone else's sentence - a TLS library's, an
+/// encoder's, a transport's - a message holds, as for an error body.
+pub(crate) const MAX_MESSAGE_CHARS: usize = 200;
+
+/// `name` between double quotes, escaped - a backslash doubled, so the name
+/// reads back unambiguously - and cut at [`MAX_NAME_CHARS`].
+pub(crate) fn quoted(name: &str) -> String {
+    let mut text = SafeText::after(String::from('"'), usize::MAX, Backslash::Double);
+    text.untrusted(name, MAX_NAME_CHARS);
+    let mut quoted = text.into_string();
+    quoted.push('"');
+    quoted
+}
+
+/// What `sentence` displays as, escaped with backslashes kept - it is
+/// usually some library's own `Display`, which escapes on its own - and cut
+/// at `limit` characters.
+pub(crate) fn bounded(sentence: &dyn fmt::Display, limit: usize) -> String {
+    let mut text = SafeText::new(limit, Backslash::Keep);
+    write!(text.untrusted_writer(), "{sentence}")
+        .expect("invariant: the escaping writer never fails");
+    text.into_string()
+}
+
 /// What a backslash in the text becomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Backslash {
@@ -62,6 +90,13 @@ impl SafeText {
             };
             written += len;
         }
+    }
+
+    /// A writer that escapes what is written to it, for text that arrives as
+    /// a `Display`: it is escaped as it streams, and dropped once the limit is
+    /// reached, so a long `Display` is never held in memory past the cap.
+    pub(crate) fn untrusted_writer(&mut self) -> impl fmt::Write + '_ {
+        Untrusted { into: self }
     }
 
     /// The rendering.
@@ -115,6 +150,29 @@ impl SafeText {
         write!(self.text, "{piece}").expect("invariant: writing to a String cannot fail");
         self.chars += len;
         true
+    }
+}
+
+/// See [`SafeText::untrusted_writer`].
+struct Untrusted<'a> {
+    into: &'a mut SafeText,
+}
+
+impl fmt::Write for Untrusted<'_> {
+    /// Never fails: text past the limit is dropped rather than refused, so
+    /// that the `Display` writing into it finishes normally.
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let mut written = 0usize;
+        for character in text.chars() {
+            if self.into.full {
+                break;
+            }
+            match self.into.character(character, &mut written, usize::MAX) {
+                Some(len) => written += len,
+                None => break,
+            }
+        }
+        Ok(())
     }
 }
 

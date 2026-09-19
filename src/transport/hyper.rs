@@ -34,7 +34,7 @@ use rustls_platform_verifier::{BuilderVerifierExt as _, Verifier};
 use tower_service::Service;
 
 use super::{Body, BoxError};
-use crate::error::Error;
+use crate::{error::Error, text};
 
 /// How long an idle pooled connection is kept before it is closed.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -246,8 +246,15 @@ fn tls_config(extra_roots: Vec<CertificateDer<'static>>) -> Result<ClientConfig,
 }
 
 /// The error for a TLS configuration that cannot be built.
+///
+/// The verifier's text can quote a certificate the caller added or the
+/// platform's own diagnostics, so it is escaped and bounded like any text
+/// this SDK did not write.
 fn verifier_error(error: rustls::Error) -> Error {
-    Error::config(format!("The TLS certificate verifier could not be built: {error}."))
+    Error::config(format!(
+        "The TLS certificate verifier could not be built: {}.",
+        text::bounded(&error, text::MAX_MESSAGE_CHARS)
+    ))
 }
 
 #[cfg(test)]

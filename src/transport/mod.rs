@@ -47,6 +47,7 @@ use crate::{
     },
     error::{ApiError, Error, format_endpoint},
     telemetry,
+    text::{self, Backslash, SafeText},
 };
 
 /// The error type a transport may fail with: any error that can cross
@@ -272,19 +273,23 @@ where
 
 /// Parses one header, or says which part of it is not valid.
 ///
-/// The message names the header by its name, escaped so that it prints on
-/// one line, and never repeats the value: a value is where a caller puts a
-/// token. `whose` is the word before `header` in the message: `default ` for
+/// The message names the header by its name - escaped, and cut at 128
+/// characters, since a name that fails here can be anything - and never
+/// repeats the value: a value is where a caller puts a token. `whose` is the word before `header` in the message: `default ` for
 /// a client default, empty for a per-call header.
 pub(crate) fn parse_header(
     name: &str,
     value: &str,
     whose: &str,
 ) -> Result<(HeaderName, HeaderValue), String> {
-    let parsed = HeaderName::from_bytes(name.as_bytes())
-        .map_err(|_| format!("The {whose}header name {name:?} is not a valid HTTP header name."))?;
+    let parsed = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+        format!("The {whose}header name {} is not a valid HTTP header name.", text::quoted(name))
+    })?;
     let value = HeaderValue::from_str(value).map_err(|_| {
-        format!("The value of the {whose}header {name:?} is not a valid HTTP header value.")
+        format!(
+            "The value of the {whose}header {} is not a valid HTTP header value.",
+            text::quoted(name)
+        )
     })?;
     Ok((parsed, value))
 }
@@ -450,6 +455,10 @@ fn connection(error: impl Into<BoxError>) -> Error {
     }
 }
 
+/// The most characters of a transport's own text a connection error's message
+/// holds after its `Connection error: ` prefix, as for an error body.
+const MAX_CONNECTION_MESSAGE_CHARS: usize = 200;
+
 /// `Connection error: ` and then every message of the error chain, joined
 /// with `: `.
 ///
@@ -457,20 +466,37 @@ fn connection(error: impl Into<BoxError>) -> Error {
 /// `tcp connect error: Connection refused`, `invalid peer certificate:
 /// UnknownIssuer` - and holds neither a header nor a body. It is cut after
 /// eight links, which no real chain reaches.
+///
+/// It can still hold text the server chose: an HTTP/2 GOAWAY's debug data
+/// (up to a frame, 16 KiB by default), the subject of a certificate the
+/// platform refused, and whatever a caller's own transport puts in its
+/// `Display`. So every link is written as text this SDK did not write -
+/// control and format characters escaped - and the whole of it after the
+/// prefix is cut at [`MAX_CONNECTION_MESSAGE_CHARS`] characters and marked
+/// with U+2026; the full chain stays reachable through
+/// [`source`](StdError::source). A backslash is written as it is: h2 and
+/// rustls already print their own text through `Debug`, where a doubled
+/// backslash would only make an escape harder to read, and nothing is ever
+/// parsed back out of this message.
 fn connection_message(error: &(dyn StdError + 'static)) -> String {
     use fmt::Write as _;
 
-    let mut message = String::from("Connection error: ");
+    let mut message = SafeText::after(
+        String::from("Connection error: "),
+        MAX_CONNECTION_MESSAGE_CHARS,
+        Backslash::Keep,
+    );
     let mut link = Some(error);
     for index in 0..8 {
         let Some(current) = link else { break };
         if index > 0 {
-            message.push_str(": ");
+            message.fixed(": ");
         }
-        write!(message, "{current}").expect("invariant: writing to a String cannot fail");
+        write!(message.untrusted_writer(), "{current}")
+            .expect("invariant: the escaping writer never fails");
         link = current.source();
     }
-    message
+    message.into_string()
 }
 
 /// The sentence for a failure response whose body was over the limit; a

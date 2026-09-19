@@ -42,6 +42,7 @@ use crate::error::Error;
 use crate::{
     constants::{REQUEST_ID_HEADER, SECRET_HEADERS},
     error::{ErrorKind, format_endpoint},
+    text::{Backslash, MAX_NAME_CHARS, SafeText},
 };
 
 /// The target every event of this crate is emitted under.
@@ -136,7 +137,7 @@ pub(crate) fn responded(
         Endpoint(exchange),
         status.as_u16(),
         Elapsed(started),
-        headers.get(REQUEST_ID_HEADER).and_then(|id| id.to_str().ok()).unwrap_or("-"),
+        RequestId(headers),
     );
 }
 
@@ -158,7 +159,7 @@ pub(crate) fn received(
         method = %exchange.method,
         endpoint = %exchange.uri,
         status = status.as_u16(),
-        request_id = headers.get(REQUEST_ID_HEADER).and_then(|id| id.to_str().ok()).unwrap_or("-"),
+        request_id = %RequestId(headers),
         elapsed = %Elapsed(started),
         headers = ?redact(headers),
         body_len = body.len(),
@@ -248,21 +249,49 @@ impl fmt::Display for Elapsed {
     }
 }
 
-/// A body as text, with anything that is not UTF-8 replaced, written straight
-/// into the formatter so that nothing is copied unless an event is recorded.
+/// The server's identifier for a request, from `x-typesafe-request-id`, or
+/// `-`. It is the server's text: `http` lets only visible ASCII and tabs
+/// through `to_str`, and the rendering escapes the tabs and cuts the id at
+/// 128 characters, which no real id reaches.
+#[cfg(feature = "tracing")]
+struct RequestId<'a>(&'a HeaderMap);
+
+#[cfg(feature = "tracing")]
+impl fmt::Display for RequestId<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.get(REQUEST_ID_HEADER).and_then(|id| id.to_str().ok()) {
+            Some(id) => {
+                let mut shown = SafeText::new(MAX_NAME_CHARS, Backslash::Keep);
+                shown.untrusted(id, MAX_NAME_CHARS);
+                formatter.write_str(&shown.into_string())
+            }
+            None => formatter.write_str("-"),
+        }
+    }
+}
+
+/// A body as text, with anything that is not UTF-8 replaced and every
+/// control or format character escaped, so that a body cannot break the log
+/// line it is printed on. Nothing is built unless an event is recorded; the
+/// body is not cut, since logging it whole is what `TRACE` is for.
 #[cfg(feature = "tracing")]
 struct Lossy<'a>(&'a [u8]);
 
 #[cfg(feature = "tracing")]
 impl fmt::Display for Lossy<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use fmt::Write as _;
+
+        let mut shown = SafeText::new(usize::MAX, Backslash::Keep);
+        let mut writer = shown.untrusted_writer();
         for chunk in self.0.utf8_chunks() {
-            formatter.write_str(chunk.valid())?;
+            writer.write_str(chunk.valid())?;
             if !chunk.invalid().is_empty() {
-                formatter.write_str("\u{fffd}")?;
+                writer.write_str("\u{fffd}")?;
             }
         }
-        Ok(())
+        drop(writer);
+        formatter.write_str(&shown.into_string())
     }
 }
 

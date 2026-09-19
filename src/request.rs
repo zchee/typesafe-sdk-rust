@@ -24,6 +24,7 @@ use crate::{
     error::Error,
     question::PreparedQuestions,
     response::{Answers, SystemOneResponse},
+    text,
     transport::{self, Exchange, HttpService},
 };
 
@@ -269,7 +270,8 @@ where
     fn encode(&self) -> Result<Bytes, Error> {
         for (name, value) in &self.extra {
             if let Err(error) = value {
-                return Err(encode_failure(&format!("the extra member {name:?}"), error));
+                let part = format!("the extra member {}", text::quoted(name));
+                return Err(encode_failure(&part, error));
             }
         }
         let extra = |wanted: &str| {
@@ -328,9 +330,11 @@ where
 
 /// The error for a part of the body that could not be encoded.
 fn encode_failure(part: &str, error: &EncodeError) -> Error {
+    // The encoder's message can be the caller's own `Serialize` error, of any
+    // length and content.
     Error::invalid_request(format!(
         "The request body could not be encoded as JSON: {part}: {}",
-        error.message()
+        text::bounded(&error.message(), text::MAX_MESSAGE_CHARS)
     ))
 }
 
