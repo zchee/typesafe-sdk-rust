@@ -5,7 +5,7 @@
 //! rather than the size of the largest failure; the detail lives behind
 //! [`Error::kind`].
 //!
-//! Three things here are not what a plain `thiserror` enum would do:
+//! Four things here are not what a plain `thiserror` enum would do:
 //!
 //! * **An API failure's message is extracted from the server's body in a fixed
 //!   order.** Servers put the human-readable sentence under `error`,
