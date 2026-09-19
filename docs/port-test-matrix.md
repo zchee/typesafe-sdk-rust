@@ -5,10 +5,13 @@ Every test function of the Python SDK's `tests/test_*.py`
 `2ce5c65`) and where its behaviour is covered here: a Rust test that exists in this repository,
 named `path::function`, or a row of the deviations table in [`README.md`](../README.md), quoted
 by its first cell; a test of the Python repository's own tooling is listed as excluded, with its
-reason. `.github/scripts/port-test-matrix.py` checks every row, allows exclusions only for the
-five tooling files, and holds the Counts table to the function counts of upstream `2ce5c65`,
-which it pins; with `--upstream <checkout>` it also checks that every upstream `test_*` function
-has exactly one row.
+reason. `.github/scripts/port-test-matrix.py` checks every row and allows exclusions only for the
+five tooling files. It pins the `(file, name)` pair of each of the 121 `test_*` functions of
+upstream `2ce5c65` and requires exactly one row for each pair and no row for any other, and it
+holds the Counts table both to the rows and to the function counts of the pinned pairs. With
+`--upstream <checkout>` it also checks the pin against that checkout: every `test_*` function
+the checkout defines is pinned, every pinned one is defined, and each of its test files has a
+line in the Counts table.
 
 A parametrized upstream test is one row, and **Cases** is the number of cases pytest collects
 for it. Upstream's `clients` fixture runs most client tests twice, once with the synchronous client

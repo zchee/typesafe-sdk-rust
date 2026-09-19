@@ -560,8 +560,9 @@ def main(argv: list[str]) -> int:
     deviation = sum(counts.deviation for counts in tally.values())
     excluded = sum(counts.excluded for counts in tally.values())
     summary = (
-        f"{len(matrix.rows)} upstream tests in {len(tally)} files: {rust} to Rust tests, "
-        f"{deviation} to deviations, {excluded} excluded as Python tooling"
+        f"{len(matrix.rows)} rows for {len(UPSTREAM_TESTS)} upstream tests in "
+        f"{len(UPSTREAM_FUNCTIONS)} files: {rust} to Rust tests, {deviation} to "
+        f"deviations, {excluded} excluded as Python tooling"
     )
     if faults:
         print(f"\n{len(faults)} fault(s); {summary}")
