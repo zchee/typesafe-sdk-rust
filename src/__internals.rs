@@ -1,4 +1,5 @@
-//! Thin wrappers around the codec, for allocation tests and benchmarks.
+//! Thin wrappers around the codec and the retry delay, for allocation tests
+//! and benchmarks.
 //!
 //! This module exists only because an allocation budget has to be asserted
 //! against the same code the SDK runs, and that code is crate-private. It is
@@ -106,8 +107,13 @@ where
     crate::de::decode_system_one(body, status, headers, questions, None)
 }
 
-/// See `retry::backoff_seconds`: the delay before the attempt after attempt
-/// number `attempt` failed, with `draw` standing in for the random number.
+/// Forwards to `retry::backoff_seconds`, unchanged: the delay in seconds
+/// before the attempt after attempt number `attempt` failed, with `draw`
+/// standing in for the random number in `[0, 1)`.
+///
+/// Inlined so that a benchmark measures the function as the retry loop runs
+/// it, not a call across the crate boundary.
+#[inline]
 #[must_use]
 pub fn backoff_seconds(attempt: u32, initial: f64, max: f64, jitter: f64, draw: f64) -> f64 {
     crate::retry::backoff_seconds(attempt, initial, max, jitter, draw)
