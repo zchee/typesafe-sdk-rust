@@ -94,42 +94,9 @@ where
 
 // ------------------------------------------------------ naive comparator
 
-/// A comparator that is not a strawman: the same codec, answers internally
-/// tagged by `type` in a `HashMap<String, _>`, maps for every container.
-#[expect(dead_code, reason = "the comparator is decoded to be measured and is never read")]
-#[derive(Debug, Deserialize)]
-struct NaiveResponse {
-    model: String,
-    usage: NaiveUsage,
-    answers: HashMap<String, NaiveAnswer>,
-}
-
-#[expect(dead_code, reason = "the comparator is decoded to be measured and is never read")]
-#[derive(Debug, Deserialize)]
-struct NaiveUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-}
-
-#[expect(dead_code, reason = "the comparator is decoded to be measured and is never read")]
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum NaiveAnswer {
-    Noul {
-        noul: f64,
-    },
-    Choice {
-        choice: String,
-        confidence: f64,
-        probabilities: HashMap<String, f64>,
-    },
-    Score {
-        score: f64,
-        confidence: f64,
-        legend: HashMap<String, String>,
-        probabilities: HashMap<String, f64>,
-    },
-}
+// A comparator that is not a strawman: the same codec, answers internally
+// tagged by `type` in a `HashMap<String, _>`, maps for every container.
+include!("../benches/support/naive_response.rs");
 
 // ------------------------------------------------- a struct answer set
 

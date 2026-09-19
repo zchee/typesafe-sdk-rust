@@ -33,43 +33,7 @@ use typesafe_sdk::Body;
 /// What the naive client returns for anything that is not a decoded answer.
 pub(crate) type NaiveError = Box<dyn Error + Send + Sync>;
 
-/// A decoded response.
-#[expect(dead_code, reason = "decoded to be measured; only the answer count is read")]
-#[derive(Debug, Deserialize)]
-pub(crate) struct NaiveResponse {
-    model: String,
-    usage: NaiveUsage,
-    pub(crate) answers: HashMap<String, NaiveAnswer>,
-}
-
-/// Token counts.
-#[expect(dead_code, reason = "decoded to be measured")]
-#[derive(Debug, Deserialize)]
-pub(crate) struct NaiveUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-}
-
-/// One answer, tagged by its `type` member.
-#[expect(dead_code, reason = "decoded to be measured")]
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub(crate) enum NaiveAnswer {
-    Noul {
-        noul: f64,
-    },
-    Choice {
-        choice: String,
-        confidence: f64,
-        probabilities: HashMap<String, f64>,
-    },
-    Score {
-        score: f64,
-        confidence: f64,
-        legend: HashMap<String, String>,
-        probabilities: HashMap<String, f64>,
-    },
-}
+include!("naive_response.rs");
 
 /// The client's configuration, as a naive client keeps it: strings, and the
 /// questions as a value tree built once from the caller's definitions.
