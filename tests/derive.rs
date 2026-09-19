@@ -8,15 +8,16 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use bytes::Bytes;
-use http::{Response, StatusCode};
+use http::{HeaderValue, Response, StatusCode};
 use http_body_util::Full;
-use test_support::{Protocol, TestResponse, TestServer};
+use test_support::{Protocol, RecordedRequest, TestResponse, TestServer};
 use typesafe_sdk::{
-    Answers, Choice, ChoiceAnswer, Client, Error, ErrorKind, Noul, NoulAnswer, PreparedQuestions,
-    QuestionSet, Questions, Score, ScoreAnswer, SystemOneResponse,
+    Answers, ApiErrorKind, Choice, ChoiceAnswer, Client, Error, ErrorKind, Noul, NoulAnswer,
+    PreparedQuestions, QuestionSet, Questions, RetryPolicy, Score, ScoreAnswer, SystemOneResponse,
 };
 
 // ------------------------------------------------------------- sets
@@ -248,6 +249,102 @@ fn an_asked_request_can_be_sent_from_any_task() {
     let state = String::from("state");
     let future = client.ask::<Ticket>(&state).send();
     assert_send(&future);
+}
+
+/// The `X-TypeSafe-Retry-Count` values of each request.
+fn retry_counts(requests: &[RecordedRequest]) -> Vec<Vec<&str>> {
+    requests
+        .iter()
+        .map(|request| {
+            request
+                .headers
+                .get_all("x-typesafe-retry-count")
+                .iter()
+                .map(|value| value.to_str().expect("text"))
+                .collect()
+        })
+        .collect()
+}
+
+/// The error of a call whose last attempt the server answered with 503
+/// `down`: an API error, whole.
+#[track_caller]
+fn assert_unavailable(error: &Error, endpoint: &str) {
+    let ErrorKind::Api(api) = error.kind() else {
+        panic!("expected an API error, got {error:?}");
+    };
+    assert_eq!(api.kind(), ApiErrorKind::InternalServer);
+    assert_eq!(api.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(api.message(), "down");
+    assert_eq!(api.body(), br#"{"message": "down"}"#);
+    assert_eq!(error.to_string(), format!("{endpoint}: 503 down"));
+}
+
+/// A derived set is retried like any other call: `ask::<T>().retry(..)`
+/// replaces the client's policy for that call, and without it the client's
+/// default applies. Every 503 asks for no wait (`retry-after-ms: 0`), which
+/// the default policy respects, so its 0.5 s and 1 s backoff is never slept.
+#[tokio::test]
+async fn an_asked_request_is_retried_by_the_policy_that_applies_to_it() {
+    let served = AtomicUsize::new(0);
+    let server = TestServer::start(Protocol::Http1, move |_| {
+        // One failure for the call that may not retry, three for the call
+        // that retries twice, then the fixture.
+        let response = if served.fetch_add(1, Ordering::SeqCst) < 4 {
+            let mut response =
+                json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"message": "down"}"#);
+            response.headers_mut().insert("retry-after-ms", HeaderValue::from_static("0"));
+            response
+        } else {
+            json_response(StatusCode::OK, RESULT)
+        };
+        async move { response }
+    })
+    .await
+    .expect("the test server starts");
+    let client = client_for(&server);
+    let endpoint = format!("POST {}/v1/systemone", server.base_url());
+
+    let error = client
+        .ask::<Review>("I was charged twice.")
+        .retry(RetryPolicy::default().max_retries(0))
+        .send()
+        .await
+        .expect_err("the one attempt fails");
+    assert_unavailable(&error, &endpoint);
+    assert_eq!(server.request_count(), 1, "a call that may not retry is sent once");
+
+    let error =
+        client.ask::<Review>("I was charged twice.").send().await.expect_err("every attempt fails");
+    assert_unavailable(&error, &endpoint);
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4, "the client's default retries twice");
+    assert_eq!(retry_counts(&requests[1..]), [vec![], vec!["1"], vec!["2"]]);
+
+    let response = client
+        .ask::<Review>("I was charged twice.")
+        .send()
+        .await
+        .expect("the fixture decodes as a Review");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 5, "a success is not retried");
+    assert_eq!(retry_counts(&requests[4..]), [Vec::<&str>::new()]);
+    assert_eq!(response.answers().spam.noul(), 0.98);
+    assert_eq!(response.answers().tone.choice(), "friendly");
+    assert_eq!(response.answers().quality.score(), 1.7);
+    assert_eq!(response.meta().raw_body().as_ref(), RESULT);
+
+    // Every attempt of every call sent the same body, the compiled questions
+    // included.
+    let expected_body = concat!(
+        r#"{"state":"I was charged twice.","model":"jev-latest","questions":"#,
+        r#"{"spam":{"type":"noul","instructions":"Spam?"},"#,
+        r#""tone":{"type":"choice","instructions":"Tone?","criteria":{"friendly":null,"hostile":null}},"#,
+        r#""quality":{"type":"score","instructions":"Quality?","criteria":["bad","ok","great"]}}}"#,
+    );
+    for (index, request) in requests.iter().enumerate() {
+        assert_eq!(std::str::from_utf8(&request.body).expect("UTF-8"), expected_body, "{index}");
+    }
 }
 
 const ENVELOPE_START: &str =

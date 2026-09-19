@@ -10,14 +10,15 @@ use std::{
     convert::Infallible,
     future::{Ready, ready},
     mem::{size_of, size_of_val},
+    sync::LazyLock,
     task::{Context, Poll},
 };
 
 use http::{Request, Response};
 use tower_service::Service;
 use typesafe_sdk::{
-    Body, Client, Error, HttpService, HyperResponseFuture, HyperTransport, Noul, Questions,
-    ResponseBody, RetryPolicy, StatusSet, SystemOneResponse,
+    Body, Client, Error, HttpService, HyperResponseFuture, HyperTransport, Noul, PreparedQuestions,
+    QuestionSet, Questions, ResponseBody, RetryPolicy, StatusSet, SystemOneResponse,
     de::{AnswerContext, AnswerSet},
     response::NoulAnswer,
 };
@@ -64,8 +65,10 @@ impl Service<Request<Body>> for Echo {
     }
 }
 
-/// A struct answer set, standing in for what `ask::<T>()` will decode into:
-/// that call is `system_one(state, T::prepared()).typed::<T>()`.
+/// A question set written by hand, as one is without the `macros` feature
+/// (this file is also built without it). `ask::<Ticket>()` sends its questions
+/// and decodes into it; that call is
+/// `system_one(state, Ticket::prepared()).typed::<Ticket>()`.
 struct Ticket {
     spam: NoulAnswer,
 }
@@ -81,6 +84,18 @@ impl AnswerSet for Ticket {
         }
         let Fields { spam } = serde::Deserialize::deserialize(deserializer)?;
         Ok(Self { spam })
+    }
+}
+
+impl QuestionSet for Ticket {
+    fn prepared() -> &'static PreparedQuestions {
+        static PREPARED: LazyLock<PreparedQuestions> = LazyLock::new(|| {
+            Questions::new()
+                .noul("spam", Noul::new().instructions("?"))
+                .prepare()
+                .expect("prepares")
+        });
+        &PREPARED
     }
 }
 
@@ -101,11 +116,13 @@ fn the_future_of_every_call_is_send() {
         .expect("the client builds");
     is_send(&client.system_one(state.as_str(), &questions).send());
     is_send(&client.system_one(&state, &questions).typed::<Ticket>().send());
+    is_send(&client.ask::<Ticket>(&state).send());
     is_send(&client.models().list().send());
     is_send(&client.warm_up());
     let policy = RetryPolicy::default().predicate(|_| true);
     is_send(&client.system_one(state.as_str(), &questions).retry(policy.clone()).send());
     is_send(&client.models().list().retry(policy.clone()).send());
+    is_send(&client.ask::<Ticket>(&state).retry(policy.clone()).send());
 
     let custom = Client::builder()
         .api_key("test-key")
@@ -114,9 +131,11 @@ fn the_future_of_every_call_is_send() {
         .expect("the client builds");
     is_send(&custom.system_one(state.as_str(), &questions).send());
     is_send(&custom.system_one(&state, &questions).typed::<Ticket>().send());
+    is_send(&custom.ask::<Ticket>(&state).send());
     is_send(&custom.models().list().send());
     is_send(&custom.warm_up());
     is_send(&custom.system_one(&state, &questions).typed::<Ticket>().retry(policy.clone()).send());
+    is_send(&custom.ask::<Ticket>(&state).retry(policy.clone()).send());
     is_send(&custom.models().list().retry(policy).send());
 
     // The typed call answers with the struct, read by field.
@@ -134,10 +153,12 @@ fn the_future_of_every_call_is_send() {
 #[test]
 fn the_future_of_every_call_stays_small() {
     // Measured over the default transport, whose response future is the
-    // larger one: 2760, 2744 and 2448 bytes (2392, 2376 and 2080 over a
-    // transport with a small future), in both profiles.
+    // larger one: 2760, 2744 and 2448 bytes, `ask` the same 2744 as `typed`
+    // (2392, 2376 and 2080 over a transport with a small future), in both
+    // profiles; 24 bytes less each without the default features.
     const SYSTEM_ONE: usize = 2816;
     const TYPED: usize = 2816;
+    const ASK: usize = 2816;
     const MODELS: usize = 2560;
 
     let questions =
@@ -167,6 +188,7 @@ fn the_future_of_every_call_stays_small() {
             size_of_val(&client.system_one(&state, &questions).typed::<Ticket>().send()),
             TYPED,
         ),
+        ("ask", size_of_val(&client.ask::<Ticket>(&state).send()), ASK),
         ("models", size_of_val(&client.models().list().send()), MODELS),
         (
             "system_one, custom",
@@ -178,6 +200,7 @@ fn the_future_of_every_call_stays_small() {
             size_of_val(&custom.system_one(&state, &questions).typed::<Ticket>().send()),
             TYPED,
         ),
+        ("ask, custom", size_of_val(&custom.ask::<Ticket>(&state).send()), ASK),
         ("models, custom", size_of_val(&custom.models().list().send()), MODELS),
     ];
     for (call, size, bound) in sizes {
