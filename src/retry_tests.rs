@@ -651,25 +651,12 @@ async fn holding(held: usize) -> (TestServer, watch::Sender<bool>) {
 
 // -------------------------------------------------- ports of test_retry.py
 
-/// The defaults are upstream's `RetryPolicy` fields (`_core/retry.py:52-86`),
-/// field by field; `exceptions` has no Rust counterpart (section 6 row
-/// "`RetryPolicy.exceptions`").
+/// The default policy runs on the real clock. Its public settings are
+/// upstream's, pinned by their `Debug` in
+/// `tests/retry.rs::the_default_policy_is_upstreams_and_prints_every_setting`.
 #[test]
-fn the_defaults_are_upstreams_field_by_field() {
-    let policy = RetryPolicy::default();
-    assert_eq!(policy.max_retries, 2);
-    assert_eq!(policy.backoff_initial, Duration::from_millis(500));
-    assert_eq!(policy.backoff_max, Duration::from_secs(5));
-    assert_same_f64(policy.backoff_jitter, 0.25, "backoff_jitter");
-    let mut statuses = vec![408, 429];
-    statuses.extend(500..600);
-    assert_eq!(policy.http_statuses.iter().collect::<Vec<_>>(), statuses);
-    assert!(policy.respect_retry_after);
-    assert!(policy.api_connection_error);
-    assert!(policy.api_timeout_error);
-    assert!(policy.predicate.is_none());
-    assert_eq!(policy.timeout, Some(Duration::from_secs(30)));
-    assert!(policy.time.is_none(), "the default runs on the real clock");
+fn the_default_policy_runs_on_the_real_clock() {
+    assert!(RetryPolicy::default().time.is_none());
 }
 
 /// `test_retry_policy_invalid_timeout`: a budget of zero is refused with
@@ -762,7 +749,16 @@ async fn the_largest_backoff_degrades_as_upstream_test_invalid_backoff() {
 /// upstream's message; both ends are accepted.
 #[test]
 fn a_jitter_outside_zero_to_one_is_refused_as_upstream_test_invalid_backoff_jitter() {
-    for jitter in [-0.1, 1.1, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -f64::MIN_POSITIVE] {
+    for jitter in [
+        -0.25,
+        -0.1,
+        1.000_001,
+        1.1,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -f64::MIN_POSITIVE,
+    ] {
         assert_config(
             RetryPolicy::default().backoff_jitter(jitter),
             "backoff_jitter must be between zero and one.",

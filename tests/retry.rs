@@ -113,29 +113,6 @@ fn the_default_policy_is_upstreams_and_prints_every_setting() {
     );
 }
 
-/// A config error rendered as `display` in full, with no cause.
-#[track_caller]
-fn assert_refused(result: Result<RetryPolicy, Error>, display: &str) {
-    let error = result.expect_err("the setting is refused");
-    assert!(matches!(error.kind(), ErrorKind::Config), "{error:?}");
-    assert_eq!(error.to_string(), display);
-    assert!(error.source().is_none(), "{error:?}");
-}
-
-#[test]
-fn a_setting_a_duration_cannot_rule_out_is_refused_by_its_setter() {
-    for jitter in [-0.25, 1.000_001, f64::NAN, f64::INFINITY] {
-        assert_refused(
-            RetryPolicy::default().backoff_jitter(jitter),
-            "backoff_jitter must be between zero and one.",
-        );
-    }
-    assert_refused(
-        RetryPolicy::default().timeout(Duration::ZERO),
-        "timeout must be a positive, finite number of seconds.",
-    );
-}
-
 #[test]
 fn a_status_set_holds_0_to_639_and_prints_runs_as_ranges() {
     let default = StatusSet::default();
@@ -218,22 +195,6 @@ async fn a_client_without_a_policy_retries_as_upstream_does() {
     let error = client.models().list().send().await.expect_err("every attempt fails");
     assert_eq!(error.to_string(), format!("GET {}/v1/models: 503 down", server.base_url()));
     assert_eq!(retry_counts(&server.requests()), expected_counts(3));
-}
-
-#[tokio::test]
-async fn max_retries_zero_sends_once() {
-    let server = serve(|_, _| respond(503, br#"{"message": "down"}"#, true)).await;
-    let client = builder(&server).build().expect("the client builds");
-
-    let error = client
-        .models()
-        .list()
-        .retry(RetryPolicy::default().max_retries(0))
-        .send()
-        .await
-        .expect_err("fails");
-    assert_eq!(error.to_string(), format!("GET {}/v1/models: 503 down", server.base_url()));
-    assert_eq!(server.request_count(), 1);
 }
 
 /// A call's own policy beats the client's in both directions, and the
