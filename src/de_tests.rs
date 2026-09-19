@@ -136,16 +136,10 @@ fn a_missing_noul_fails_at_its_full_path() {
     let failure =
         rejection::<Answers>(br#"{"model":"test","usage":{},"answers":{"spam":{"type":"noul"}}}"#);
 
-    assert_eq!(failure.field_path(), "answers.spam.noul");
-    assert_eq!(failure.message(), "Invalid response data at 'answers.spam.noul'.");
+    assert_rendered(&failure, "answers.spam.noul", "");
     assert_eq!(failure.decode_error().kind(), crate::DecodeErrorKind::Data);
     assert_eq!(failure.status(), StatusCode::OK);
     assert_eq!(failure.request_id(), Some("req-123"));
-    assert_eq!(
-        failure.to_string(),
-        "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at \
-         'answers.spam.noul'. (request_id=req-123)"
-    );
 }
 
 // ------------------------------------------- ported from test_responses.py
@@ -182,18 +176,10 @@ fn a_malformed_response_fails_where_the_python_sdk_says_it_does() {
 
         let failure = rejection::<Answers>(text.as_bytes());
 
-        assert_eq!(failure.field_path(), path, "body {text}");
+        assert_rendered(&failure, path, &format!("body {text}"));
         assert_eq!(failure.status(), StatusCode::OK, "body {text}");
         assert_eq!(failure.request_id(), Some("req-123"), "body {text}");
         assert_eq!(failure.body(), text.as_bytes(), "body {text}");
-        assert_eq!(
-            failure.to_string(),
-            format!(
-                "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at \
-                 '{path}'. (request_id=req-123)"
-            ),
-            "body {text}"
-        );
     }
 }
 
@@ -462,13 +448,7 @@ fn an_answer_that_names_two_different_types_is_refused_at_its_type() {
         let failure = rejection::<Answers>(text.as_bytes());
 
         assert_eq!(failure.decode_error().kind(), crate::DecodeErrorKind::Data, "body {text}");
-        assert_eq!(failure.field_path(), "answers.x.type", "body {text}");
-        assert_eq!(
-            failure.to_string(),
-            "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at \
-             'answers.x.type'. (request_id=req-123)",
-            "body {text}"
-        );
+        assert_rendered(&failure, "answers.x.type", &format!("body {text}"));
     }
 }
 
@@ -546,16 +526,19 @@ fn around_keys(answers: &str, keys: &[&str]) -> String {
     around(&text)
 }
 
-/// Asserts the whole rendering of a response-validation failure at `path`.
-fn assert_rendered(failure: &ResponseValidationError, path: &str) {
-    assert_eq!(failure.field_path(), path);
-    assert_eq!(failure.message(), format!("Invalid response data at '{path}'."));
+/// Asserts the whole rendering of a response-validation failure at `path`;
+/// `context` names the case in a failure's message.
+#[track_caller]
+fn assert_rendered(failure: &ResponseValidationError, path: &str, context: &str) {
+    assert_eq!(failure.field_path(), path, "{context}");
+    assert_eq!(failure.message(), format!("Invalid response data at '{path}'."), "{context}");
     assert_eq!(
         failure.to_string(),
         format!(
             "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at '{path}'. \
              (request_id=req-123)"
-        )
+        ),
+        "{context}"
     );
     for rendered in [failure.to_string(), format!("{failure:?}")] {
         assert_printable(&rendered);
@@ -567,25 +550,25 @@ fn a_question_name_the_server_chose_is_echoed_but_made_safe_to_print() {
     // A plain name is echoed: which question failed is what the path is for.
     let plain =
         rejection::<Answers>(br#"{"model":"m","usage":{},"answers":{"SECRETH":{"type":"noul"}}}"#);
-    assert_rendered(&plain, "answers.SECRETH.noul");
+    assert_rendered(&plain, "answers.SECRETH.noul", "");
 
     // A name carrying a line break and a terminal colour sequence cannot
     // break the log line or recolour the terminal it is printed to.
     let text = around_keys(r#"{@0:{"type":"noul"}}"#, &["x\ny\u{1b}[31mz"]);
     let injected = rejection::<Answers>(text.as_bytes());
-    assert_rendered(&injected, r"answers.x\ny\u{1b}[31mz.noul");
+    assert_rendered(&injected, r"answers.x\ny\u{1b}[31mz.noul", "");
 
     // A bidi override is escaped; a printable non-ASCII name is not.
     let text = around_keys(r#"{@0:{"type":"noul"}}"#, &["ok\u{202e}gnp.exe"]);
-    assert_rendered(&rejection::<Answers>(text.as_bytes()), r"answers.ok\u{202e}gnp.exe.noul");
+    assert_rendered(&rejection::<Answers>(text.as_bytes()), r"answers.ok\u{202e}gnp.exe.noul", "");
     let text = around_keys(r#"{@0:{"type":"noul"}}"#, &["\u{54c1}\u{8cea}"]);
-    assert_rendered(&rejection::<Answers>(text.as_bytes()), "answers.\u{54c1}\u{8cea}.noul");
+    assert_rendered(&rejection::<Answers>(text.as_bytes()), "answers.\u{54c1}\u{8cea}.noul", "");
 
     // 100 KB of name gives a message of bounded size.
     let huge = "n".repeat(100_000);
     let text = around_keys(r#"{@0:{"type":"noul"}}"#, &[&huge]);
     let failure = rejection::<Answers>(text.as_bytes());
-    assert_rendered(&failure, &format!("answers.{}\u{2026}.noul", "n".repeat(128)));
+    assert_rendered(&failure, &format!("answers.{}\u{2026}.noul", "n".repeat(128)), "");
     assert!(failure.to_string().len() < 300, "{} bytes", failure.to_string().len());
 }
 
@@ -595,7 +578,7 @@ fn legend_levels_and_choice_options_go_through_the_same_rendering() {
         r#"{"q":{"type":"score","score":1,"confidence":1,"legend":{@0:"x"},"probabilities":{}}}"#,
         &["\u{1b}[2J7"],
     );
-    assert_rendered(&rejection::<Answers>(text.as_bytes()), r"answers.q.legend.\u{1b}[2J7");
+    assert_rendered(&rejection::<Answers>(text.as_bytes()), r"answers.q.legend.\u{1b}[2J7", "");
 
     let text = around_keys(
         r#"{"c":{"type":"choice","choice":"a","confidence":1,"probabilities":{@0:"high"}}}"#,
@@ -604,6 +587,7 @@ fn legend_levels_and_choice_options_go_through_the_same_rendering() {
     assert_rendered(
         &rejection::<Answers>(text.as_bytes()),
         r"answers.c.probabilities.opt\r\nion\u{2066}",
+        "",
     );
 
     let long_level = "9".repeat(300);
@@ -614,6 +598,7 @@ fn legend_levels_and_choice_options_go_through_the_same_rendering() {
     assert_rendered(
         &rejection::<Answers>(text.as_bytes()),
         &format!("answers.q.legend.{}\u{2026}", "9".repeat(128)),
+        "",
     );
 }
 
@@ -966,12 +951,7 @@ fn a_response_without_answers_is_empty_for_a_map_and_missing_answers_for_a_struc
     assert_eq!(map.model(), "m");
 
     let failure = rejection::<Ticket>(without_answers);
-    assert_eq!(failure.field_path(), "answers");
-    assert_eq!(failure.message(), "Invalid response data at 'answers'.");
-    assert_eq!(
-        failure.to_string(),
-        "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at 'answers'. (request_id=req-123)"
-    );
+    assert_rendered(&failure, "answers", "");
     assert_eq!(failure.decode_error().kind(), codec::DecodeErrorKind::Data);
 
     // `answers` placed anywhere, or `null`, is not the missing case.
