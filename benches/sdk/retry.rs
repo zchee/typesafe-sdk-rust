@@ -15,6 +15,11 @@
 //! (0.5 s initial, 5 s cap, 0.25 jitter), at the first attempt, at one past
 //! the cap, and far past it, where the cap is tested in log2 space before
 //! any doubling. The random draw is an argument, so no generator is timed.
+//! Every input goes through `black_box` and the result is returned to divan,
+//! so the compiler can neither fold the call nor drop it. The number is the
+//! function alone, a few hundred nanoseconds of pure `f64` arithmetic and one
+//! format-and-parse round: it is reported for completeness, not as a target,
+//! since it runs once per retry beside a sleep of hundreds of milliseconds.
 
 use std::pin::pin;
 
@@ -67,6 +72,13 @@ fn retry_after(bencher: Bencher<'_, '_>, spelling: &str) {
 #[divan::bench(args = [1, 6, 1000])]
 fn backoff(bencher: Bencher<'_, '_>, attempt: u32) {
     assert!(sdk::backoff_seconds(attempt, 0.5, 5.0, 0.25, 0.5) > 0.0);
-    bencher
-        .bench_local(|| sdk::backoff_seconds(black_box(attempt), 0.5, 5.0, 0.25, black_box(0.5)));
+    bencher.bench_local(|| {
+        sdk::backoff_seconds(
+            black_box(attempt),
+            black_box(0.5),
+            black_box(5.0),
+            black_box(0.25),
+            black_box(0.5),
+        )
+    });
 }
