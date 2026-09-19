@@ -406,7 +406,7 @@ enum Seen<'de> {
 /// What one answer object decodes into, and how.
 ///
 /// The runtime set reads any kind and skips unknown ones; the typed answers
-/// each accept exactly one kind. Both share the walk in [`AnswerVisitor`] and
+/// each accept exactly one kind. Both share the walk in [`AnswerSeed`] and
 /// differ only in what they build from what it collected, which is why the
 /// errors a typed field reports have the same paths as the runtime set's.
 trait Target: Sized {
