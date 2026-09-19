@@ -68,7 +68,9 @@ CFG_ATTR = re.compile(r"#\s*+(?:!\s*+)?\[\s*+cfg_attr\s*+\(")
 #: One token of Rust source, read both in a whole ``.rs`` file and in an
 #: attribute's arguments. The literals and comments are opaque: nothing inside
 #: them opens or closes a delimiter, is a word or starts an attribute. A
-#: string or raw string left open runs to the end of the file. Every unbounded
+#: string or raw string left open runs to the end of the file. Escapes are
+#: read, not checked: a ``\u{..}`` takes any run of hex digits and underscores,
+#: since Rust caps its digits at six but not its underscores. Every unbounded
 #: repetition is possessive and every alternative starts on a character that
 #: it then consumes, so a match never backtracks over what it has read.
 TOKEN = re.compile(
@@ -78,7 +80,7 @@ TOKEN = re.compile(
     | (?P<block_comment>/\*)
     | (?P<raw_string>[bc]?r(?P<hashes>\#*+)")
     | (?P<string>[bc]?"(?:[^"\\]++|\\.?)*+"?)
-    | (?P<char>b?'(?:[^\\'\n]|\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|.))')
+    | (?P<char>b?'(?:[^\\'\n]|\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]*+\}|.))')
     | (?P<lifetime>'\w++)
     | (?P<raw_word>r\#(?P<raw_name>\w++))
     | (?P<word>\w++)
