@@ -147,19 +147,32 @@ fn the_future_of_every_call_is_send() {
 /// transport and a custom one. Tokio boxes a future larger than its
 /// `BOX_FUTURE_THRESHOLD` (16384 bytes in a release build, 2048 in a debug
 /// one) when it is spawned or blocked on, so a change that grows a call's
-/// future is meant to be seen here, not found in a profile. The bounds sit
-/// just above the sizes measured when the retry loop landed; raising one is a
+/// future is meant to be seen here, not found in a profile.
+///
+/// Over a custom transport the bound IS that threshold, on every platform: a
+/// call spawned in a debug build is not boxed, and a change that makes it
+/// boxed fails here rather than passing under a looser number. Over the
+/// default transport the futures are over the threshold anyway (hyper's
+/// response future is the larger one), so what is guarded there is growth:
+/// the bounds are the sizes measured on macOS arm64 and Linux x86_64 -
+/// identical on both, in both profiles, 24 bytes less each without the
+/// default features - plus 32 bytes. Windows has not been measured, so it
+/// keeps the looser bounds the guard had before. Raising a bound is a
 /// decision to state, not a number to bump.
 #[test]
 fn the_future_of_every_call_stays_small() {
-    // Measured over the default transport, whose response future is the
-    // larger one: 2760, 2744 and 2448 bytes, `ask` the same 2744 as `typed`
-    // (2392, 2376 and 2080 over a transport with a small future), in both
-    // profiles; 24 bytes less each without the default features.
-    const SYSTEM_ONE: usize = 2816;
-    const TYPED: usize = 2816;
-    const ASK: usize = 2816;
-    const MODELS: usize = 2560;
+    // Tokio 1.53.1 `runtime/mod.rs`: the debug build's `BOX_FUTURE_THRESHOLD`.
+    const TOKIO_DEBUG_BOX: usize = 2048;
+    // Measured over the default transport: 2344, 2328 and 2032 bytes, `ask`
+    // the same 2328 as `typed`; over a custom transport 2040, 2024 and 1728.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    const DEFAULT_TRANSPORT: [usize; 4] = [2376, 2360, 2360, 2064];
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    const DEFAULT_TRANSPORT: [usize; 4] = [2816, 2816, 2816, 2560];
+    const SYSTEM_ONE: usize = DEFAULT_TRANSPORT[0];
+    const TYPED: usize = DEFAULT_TRANSPORT[1];
+    const ASK: usize = DEFAULT_TRANSPORT[2];
+    const MODELS: usize = DEFAULT_TRANSPORT[3];
 
     let questions =
         Questions::new().noul("spam", Noul::new().instructions("?")).prepare().expect("prepares");
@@ -193,15 +206,15 @@ fn the_future_of_every_call_stays_small() {
         (
             "system_one, custom",
             size_of_val(&custom.system_one(state.as_str(), &questions).send()),
-            SYSTEM_ONE,
+            TOKIO_DEBUG_BOX,
         ),
         (
             "typed, custom",
             size_of_val(&custom.system_one(&state, &questions).typed::<Ticket>().send()),
-            TYPED,
+            TOKIO_DEBUG_BOX,
         ),
-        ("ask, custom", size_of_val(&custom.ask::<Ticket>(&state).send()), ASK),
-        ("models, custom", size_of_val(&custom.models().list().send()), MODELS),
+        ("ask, custom", size_of_val(&custom.ask::<Ticket>(&state).send()), TOKIO_DEBUG_BOX),
+        ("models, custom", size_of_val(&custom.models().list().send()), TOKIO_DEBUG_BOX),
     ];
     for (call, size, bound) in sizes {
         println!("{call:<20} {size:>6} bytes (bound {bound})");
