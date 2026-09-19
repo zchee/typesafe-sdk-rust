@@ -1,9 +1,7 @@
 # Response fixtures
 
 Response bodies taken from the upstream Python SDK's tests (`typesafe-ai/typesafe-sdk-python`, tag `v0.7.0`, commit
-`2ce5c65`), written as the compact JSON its test transport sends. The unit tests in `src/de_tests.rs`,
-`src/response_tests.rs` and `src/models_tests.rs`, the allocation test `tests/alloc_decode.rs` and the differential
-test `tests/differential.rs` read them from here.
+`2ce5c65`), written as the compact JSON its test transport sends.
 
 | File | Upstream source |
 | --- | --- |

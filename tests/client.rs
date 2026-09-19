@@ -298,7 +298,7 @@ async fn question_schema_validation_is_left_to_api() {
 /// in the answer's legend.
 #[tokio::test]
 async fn rich_descriptions() {
-    const ANSWER: &[u8] = br#"{"model":"custom","usage":{"input_tokens":1,"output_tokens":1},"answers":{"risk":{"type":"score","score":0,"confidence":1,"legend":{"0":{"summary":"duplicated","examples":["charged twice"]}},"probabilities":{"0":1}}}}"#;
+    const ANSWER: &[u8] = include_bytes!("fixtures/structured-legend.json");
     let server = answering(Protocol::Http1, StatusCode::OK, ANSWER).await;
     let criteria = json!({"summary": "duplicated", "examples": ["charged twice"]});
     let structured = || Content::json(&criteria).expect("an object is content");
