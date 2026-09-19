@@ -28,11 +28,6 @@ where
     codec::encode_into(buffer, value)
 }
 
-/// See `codec::write_json_string`.
-pub fn write_json_string(buffer: &mut Vec<u8>, text: &str) {
-    codec::write_json_string(buffer, text);
-}
-
 /// See `codec::encode_body`: the body encoder whose allocation behaviour the
 /// budget is stated on.
 ///
