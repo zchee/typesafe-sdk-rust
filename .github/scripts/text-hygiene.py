@@ -27,7 +27,7 @@ ALLOWED_BINARY: frozenset[str] = frozenset()
 #: Bytes that carry no glyph and no meaning in a text file. Tab (0x09), line
 #: feed (0x0A) and carriage return (0x0D) are left out: they are layout.
 FORBIDDEN_BYTES: frozenset[int] = frozenset(
-    {*range(0x00, 0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0x7F}
+    {*range(0x09), 0x0B, 0x0C, *range(0x0E, 0x20), 0x7F}
 )
 
 #: Characters that render as nothing, or as an ordinary space they are not.
@@ -119,7 +119,9 @@ def main(argv: list[str]) -> int:
     for fault in found:
         print(fault)
     if found:
-        print(f"\n{len(found)} invisible or control character(s) in {len(paths)} file(s)")
+        print(
+            f"\n{len(found)} invisible or control character(s) in {len(paths)} file(s)"
+        )
         return 1
     print(f"{len(paths)} file(s) clean")
     return 0
