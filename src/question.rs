@@ -451,10 +451,6 @@ impl PreparedQuestions {
     }
 
     /// The JSON object that goes after `"questions":` in a request body.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the body encoder that splices this in is written in phase 2")
-    )]
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.buf[..self.json_len]
     }

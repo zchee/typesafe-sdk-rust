@@ -4,11 +4,11 @@
 //! opens its connection before the first real call: the request carries no
 //! body, so a key that is rejected is rejected cheaply.
 //!
-//! This module holds what the endpoint answers with. A model card carries
-//! three strings; members the API adds later are ignored by the decoder and
-//! stay readable in the raw body.
+//! [`Models`] is the resource, reached through [`Client::models`]; a model
+//! card carries three strings, and members the API adds later are ignored by
+//! the decoder and stay readable in the raw body.
 
-use std::fmt;
+use std::{borrow::Cow, fmt, time::Duration};
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode, Uri};
@@ -19,11 +19,125 @@ use serde::{
 };
 
 use crate::{
+    client::Client,
     codec,
     de::{KeyIn, invalid_response},
     error::Error,
+    request::{CallHeaders, Deadline},
     response::ResponseMeta,
+    transport::{self, Exchange, HttpService},
 };
+
+// ------------------------------------------------------------- resource
+
+/// The models endpoint of a client, from [`Client::models`].
+pub struct Models<'a, S> {
+    client: &'a Client<S>,
+}
+
+impl<'a, S> Models<'a, S> {
+    pub(crate) fn new(client: &'a Client<S>) -> Self {
+        Self { client }
+    }
+
+    /// A request for the models the account can use.
+    pub fn list(&self) -> ListModels<'a, S> {
+        ListModels {
+            client: self.client,
+            deadline: Deadline::Client,
+            headers: CallHeaders::default(),
+        }
+    }
+}
+
+impl<S> fmt::Debug for Models<'_, S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Models").finish_non_exhaustive()
+    }
+}
+
+/// A request for the model list, ready to be configured and sent.
+///
+/// Made by [`Models::list`]. Nothing is checked until
+/// [`send`](Self::send).
+#[must_use = "a request does nothing until it is sent"]
+pub struct ListModels<'a, S> {
+    client: &'a Client<S>,
+    deadline: Deadline,
+    headers: CallHeaders<'a>,
+}
+
+impl<'a, S> ListModels<'a, S> {
+    /// The deadline of each attempt of this call, instead of the client's.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.deadline = Deadline::After(timeout);
+        self
+    }
+
+    /// No deadline on any attempt of this call.
+    pub fn no_timeout(mut self) -> Self {
+        self.deadline = Deadline::Never;
+        self
+    }
+
+    /// A header for this call only; see
+    /// [`SystemOne::header`](crate::request::SystemOne::header).
+    pub fn header(mut self, name: impl Into<Cow<'a, str>>, value: impl Into<Cow<'a, str>>) -> Self {
+        self.headers.push(name.into(), value.into());
+        self
+    }
+}
+
+impl<S> ListModels<'_, S>
+where
+    S: HttpService,
+{
+    /// Sends the request and decodes the list.
+    ///
+    /// # Errors
+    ///
+    /// - [`ErrorKind::InvalidRequest`](crate::ErrorKind::InvalidRequest),
+    ///   before anything is sent: a header that is not a valid header, or a
+    ///   deadline of zero.
+    /// - [`ErrorKind::Api`](crate::ErrorKind::Api) for a status outside 2xx.
+    /// - [`ErrorKind::Timeout`](crate::ErrorKind::Timeout) when the attempt
+    ///   ran past its deadline.
+    /// - [`ErrorKind::Connection`](crate::ErrorKind::Connection) when no
+    ///   response could be read.
+    /// - [`ErrorKind::ResponseValidation`](crate::ErrorKind::ResponseValidation)
+    ///   when the body is not a model list.
+    pub async fn send(self) -> Result<ListModelsResponse, Error> {
+        let shared = self.client.shared();
+        let deadline = self.deadline.resolve(shared.config.timeout())?;
+        let headers = self.headers.parse(false)?;
+
+        let uri = shared.config.endpoints().models();
+        let exchange = Exchange {
+            method: &Method::GET,
+            uri,
+            base_headers: &shared.get_headers,
+            call_headers: &headers,
+            deadline,
+            max_response_bytes: shared.config.max_response_bytes(),
+        };
+        let (status, headers, body) =
+            transport::attempt(&shared.service, exchange, 0, None).await?;
+        decode_list_models(body, status, headers, Some((&Method::GET, uri)))
+    }
+}
+
+impl<S> fmt::Debug for ListModels<'_, S> {
+    /// The deadline and the header names; never a header value.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ListModels")
+            .field("deadline", &self.deadline)
+            .field("headers", &self.headers)
+            .finish_non_exhaustive()
+    }
+}
+
+// ------------------------------------------------------------ payload
 
 /// One model the account can use.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -188,10 +302,6 @@ impl<'de> Visitor<'de> for ModelListVisitor {
 /// Returns [`ErrorKind::ResponseValidation`](crate::ErrorKind::ResponseValidation)
 /// when the body does not have the documented shape; its field path names the
 /// card and the member, such as `models[1].name`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the models resource that calls this is written in phase 2")
-)]
 pub(crate) fn decode_list_models(
     body: Bytes,
     status: StatusCode,

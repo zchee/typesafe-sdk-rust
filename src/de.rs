@@ -1307,15 +1307,6 @@ const MIN_KEPT_ANSWER_BYTES: usize = r#""":{"type":"noul","noul":0}"#.len();
 /// Returns [`ErrorKind::ResponseValidation`](crate::ErrorKind::ResponseValidation)
 /// carrying the status, the headers, the whole body and the decode failure,
 /// whose path names the field that did not fit.
-// The first in-crate caller is the request builder, which is not written yet;
-// until then only the `internals` wrapper and the tests reach this. The
-// condition names both, so the expectation applies only where the function is
-// genuinely unreachable and turns into a failed gate once the request builder
-// calls it.
-#[cfg_attr(
-    all(not(test), not(feature = "internals")),
-    expect(dead_code, reason = "the request builder that calls this is written in phase 2")
-)]
 pub(crate) fn decode_system_one<A>(
     body: Bytes,
     status: StatusCode,

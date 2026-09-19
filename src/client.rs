@@ -5,3 +5,468 @@
 //! reference. The API key enters as a secret and is kept only as the finished
 //! `Authorization` header value, marked sensitive, so no formatting of the
 //! client or its configuration can print it.
+
+use std::{ffi::OsString, fmt, sync::Arc, time::Duration};
+
+use bytes::Bytes;
+use http::{HeaderMap, uri::Scheme};
+use secrecy::SecretString;
+use serde::Serialize;
+
+use crate::{
+    codec,
+    config::{Config, Explicit},
+    error::Error,
+    models::Models,
+    question::PreparedQuestions,
+    request::SystemOne,
+    transport::{self, HttpService, HttpVersion, HyperTransport, TransportSettings},
+};
+
+/// A client of the TypeSafe API.
+///
+/// Build one with [`Client::builder`], or with [`Client::from_env`] when the
+/// environment holds everything. Cloning a client is cheap - the settings and
+/// the transport are shared behind one reference count - so a clone per task
+/// is the way to use one from many tasks, and all of them share one
+/// connection pool.
+///
+/// `S` is the transport. The default, [`HyperTransport`], is an HTTP/2 client
+/// over TLS; any `tower` service over `http` requests is accepted through
+/// [`ClientBuilder::build_with_service`].
+///
+/// Every request runs on the caller's Tokio runtime, which needs its time
+/// driver enabled: each attempt has a deadline, and HTTP/2 keep-alive pings
+/// run on a timer.
+pub struct Client<S = HyperTransport> {
+    shared: Arc<Shared<S>>,
+}
+
+/// What every clone of one client shares.
+pub(crate) struct Shared<S> {
+    pub(crate) service: S,
+    pub(crate) config: Config,
+    /// The headers of a request without a body, built once.
+    pub(crate) get_headers: HeaderMap,
+    /// The headers of a request with a JSON body, built once.
+    pub(crate) post_headers: HeaderMap,
+    /// The default model as a JSON string, escaped once.
+    pub(crate) model_json: Bytes,
+}
+
+impl<S> Clone for Client<S> {
+    fn clone(&self) -> Self {
+        Self { shared: Arc::clone(&self.shared) }
+    }
+}
+
+impl<S: fmt::Debug> fmt::Debug for Client<S> {
+    /// The endpoints, the default model, the deadline, the response limit and
+    /// the names of the default headers, then the transport. Never the API key
+    /// and never a header value.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Client")
+            .field("config", &self.shared.config)
+            .field("transport", &self.shared.service)
+            .finish()
+    }
+}
+
+impl Client<HyperTransport> {
+    /// A builder for a client; every setting it leaves unset comes from the
+    /// environment, then from the SDK's default.
+    #[must_use]
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::default()
+    }
+
+    /// A client configured by the environment alone: `TYPESAFE_API_KEY`, and
+    /// optionally `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error when
+    /// no API key is set, a value is unusable, or a variable is not UTF-8.
+    pub fn from_env() -> Result<Self, Error> {
+        Self::builder().build()
+    }
+}
+
+impl<S> Client<S> {
+    /// Assembles a client around a resolved configuration.
+    fn assemble(config: Config, service: S) -> Self {
+        let get_headers = transport::base_headers(&config, false);
+        let post_headers = transport::base_headers(&config, true);
+        let mut model = Vec::with_capacity(config.default_model().len() + 2);
+        codec::write_json_string(&mut model, config.default_model());
+        Self {
+            shared: Arc::new(Shared {
+                service,
+                config,
+                get_headers,
+                post_headers,
+                model_json: Bytes::from(model),
+            }),
+        }
+    }
+
+    /// What every clone of this client shares.
+    pub(crate) fn shared(&self) -> &Shared<S> {
+        &self.shared
+    }
+}
+
+impl<S> Client<S>
+where
+    S: HttpService,
+{
+    /// A System One request asking `questions` about `state`.
+    ///
+    /// `state` is anything that serializes to a JSON string, object or array;
+    /// it is encoded when the request is sent, straight into the body. The
+    /// request is configured with the builder's methods and sent with
+    /// [`send`](SystemOne::send).
+    pub fn system_one<'a, T>(
+        &'a self,
+        state: &'a T,
+        questions: &'a PreparedQuestions,
+    ) -> SystemOne<'a, S, T>
+    where
+        T: Serialize + ?Sized,
+    {
+        SystemOne::new(self, state, questions)
+    }
+
+    /// The models resource.
+    pub fn models(&self) -> Models<'_, S> {
+        Models::new(self)
+    }
+
+    /// Lists the models once and drops the answer.
+    ///
+    /// That checks the API key and leaves an open connection in the pool, so
+    /// requests started together afterwards share it instead of each opening
+    /// one. Call it before a burst of concurrent requests.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`ListModels::send`](crate::models::ListModels::send)
+    /// returns: an authentication failure, for a key the API refuses.
+    pub async fn warm_up(&self) -> Result<(), Error> {
+        self.models().list().send().await.map(drop)
+    }
+}
+
+/// Configures a [`Client`].
+///
+/// Every setting is optional. The API key, base URL and default model fall
+/// back to `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` and
+/// `TYPESAFE_DEFAULT_MODEL`, then to the SDK's defaults (no key, which fails;
+/// `https://api.typesafe.ai`; `jev-latest`). The methods never fail: what
+/// they are given is checked by [`build`](ClientBuilder::build).
+#[derive(Default)]
+pub struct ClientBuilder {
+    api_key: Option<SecretString>,
+    base_url: Option<String>,
+    default_model: Option<String>,
+    /// `None` leaves the default; `Some(None)` asks for no deadline.
+    timeout: Option<Option<Duration>>,
+    default_headers: Vec<(String, String)>,
+    max_response_bytes: Option<usize>,
+    extra_roots: Vec<Vec<u8>>,
+    http_version: Option<HttpVersion>,
+    connect_timeout: Option<Duration>,
+}
+
+impl ClientBuilder {
+    /// The API key. It is sent as `Authorization: Bearer <key>` and is
+    /// printed nowhere.
+    #[must_use]
+    pub fn api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(SecretString::from(key.into()));
+        self
+    }
+
+    /// The API root, such as `https://api.typesafe.ai`; trailing slashes are
+    /// removed and a path prefix is kept.
+    ///
+    /// It must be an absolute `http` or `https` URL without userinfo, query or
+    /// fragment. Do not put a credential in its path: the path is printed by
+    /// the client's `Debug` and in every error message that names an
+    /// endpoint, as the Python SDK prints it.
+    #[must_use]
+    pub fn base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = Some(url.into());
+        self
+    }
+
+    /// The model a request names when the call does not name one.
+    #[must_use]
+    pub fn default_model(mut self, model: impl Into<String>) -> Self {
+        self.default_model = Some(model.into());
+        self
+    }
+
+    /// The deadline of each attempt, from the first byte sent to the last
+    /// byte received. The default is 10 seconds.
+    ///
+    /// A large `state` on a slow link can take longer than that to upload;
+    /// raise the deadline for it, or use [`no_timeout`](Self::no_timeout).
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(Some(timeout));
+        self
+    }
+
+    /// No deadline on any attempt.
+    #[must_use]
+    pub fn no_timeout(mut self) -> Self {
+        self.timeout = Some(None);
+        self
+    }
+
+    /// A header sent on every request. A per-call header of the same name
+    /// replaces it; the SDK's own headers - `Authorization`, `Accept`,
+    /// `User-Agent`, `X-TypeSafe-SDK`, `X-TypeSafe-Runtime`, and
+    /// `Content-Type` on a request with a body - always win, and
+    /// `X-TypeSafe-Retry-Count` is dropped. A later call with the same name
+    /// replaces an earlier one.
+    #[must_use]
+    pub fn default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.default_headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// The largest response body a request reads, in bytes; 16 MiB unless
+    /// set. A larger body is not read past the limit, and the request fails.
+    #[must_use]
+    pub fn max_response_bytes(mut self, limit: usize) -> Self {
+        self.max_response_bytes = Some(limit);
+        self
+    }
+
+    /// Trusts `der`, a DER-encoded certificate, in addition to the operating
+    /// system's roots: for a corporate CA the system store lacks, or a test
+    /// server's own certificate.
+    ///
+    /// The default transport only; see
+    /// [`build_with_service`](Self::build_with_service).
+    #[must_use]
+    pub fn add_root_certificate(mut self, der: impl Into<Vec<u8>>) -> Self {
+        self.extra_roots.push(der.into());
+        self
+    }
+
+    /// Which HTTP versions the default transport speaks. The default is
+    /// [`HttpVersion::Http2Only`] for an `https` base URL and
+    /// [`HttpVersion::Auto`] for an `http` one.
+    ///
+    /// The default transport only; see
+    /// [`build_with_service`](Self::build_with_service).
+    #[must_use]
+    pub fn http_version(mut self, version: HttpVersion) -> Self {
+        self.http_version = Some(version);
+        self
+    }
+
+    /// A deadline for opening a TCP connection, inside the deadline of the
+    /// whole attempt. None unless set. When it passes, the request fails with
+    /// [`ErrorKind::Timeout`](crate::ErrorKind::Timeout) carrying this value.
+    ///
+    /// The default transport only; see
+    /// [`build_with_service`](Self::build_with_service).
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = Some(timeout);
+        self
+    }
+
+    /// Builds a client with the default transport.
+    ///
+    /// Settings left unset are read from the environment. Nothing connects
+    /// here: the first request, or [`Client::warm_up`], does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error when
+    /// no API key is found or the key is blank or not printable ASCII; when
+    /// the base URL is not an absolute `http` or `https` URL without
+    /// userinfo, query or fragment; when the default model is blank; when a
+    /// deadline or the response limit is zero; when a default header is not a
+    /// valid header; when an environment variable is not UTF-8; or when the
+    /// certificate verifier cannot be built, for an added root that is not a
+    /// certificate among other causes. No message repeats the key, a header
+    /// value or the URL.
+    pub fn build(self) -> Result<Client<HyperTransport>, Error> {
+        self.build_with_env(|name: &str| std::env::var_os(name))
+    }
+
+    /// Builds a client that sends its requests through `service`.
+    ///
+    /// This is how a client runs over a transport of the caller's own: a
+    /// proxy, a recorder, a `tower` stack with its own middleware. The
+    /// service owns its connections and their timeouts; the SDK still wraps
+    /// each attempt in its own deadline and reads the response under its own
+    /// limit.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`build`](Self::build) refuses except the certificate
+    /// verifier, and, as a config error, any of
+    /// [`add_root_certificate`](Self::add_root_certificate),
+    /// [`http_version`](Self::http_version) and
+    /// [`connect_timeout`](Self::connect_timeout): they configure the default
+    /// transport, which this client does not have, and are refused rather
+    /// than ignored.
+    pub fn build_with_service<S>(self, service: S) -> Result<Client<S>, Error>
+    where
+        S: HttpService,
+    {
+        let mut unused = Vec::new();
+        if !self.extra_roots.is_empty() {
+            unused.push("add_root_certificate");
+        }
+        if self.http_version.is_some() {
+            unused.push("http_version");
+        }
+        if self.connect_timeout.is_some() {
+            unused.push("connect_timeout");
+        }
+        if !unused.is_empty() {
+            return Err(Error::config(format!(
+                "{} configure the default transport, and a client built with \
+                 build_with_service has a transport of its own.",
+                unused.join(", ")
+            )));
+        }
+        let (explicit, _) = self.split()?;
+        let config = Config::resolve(explicit, |name: &str| std::env::var_os(name))?;
+        Ok(Client::assemble(config, service))
+    }
+
+    /// [`build`](Self::build) with the environment read through `env`.
+    pub(crate) fn build_with_env<V>(
+        self,
+        env: impl Fn(&str) -> Option<V>,
+    ) -> Result<Client<HyperTransport>, Error>
+    where
+        V: Into<OsString>,
+    {
+        let (explicit, transport) = self.split()?;
+        let config = Config::resolve(explicit, env)?;
+        let https = config.endpoints().system_one().scheme() == Some(&Scheme::HTTPS);
+        let settings = TransportSettings {
+            version: transport.version.unwrap_or(if https {
+                HttpVersion::Http2Only
+            } else {
+                HttpVersion::Auto
+            }),
+            extra_roots: transport.extra_roots,
+            connect_timeout: transport.connect_timeout,
+        };
+        Ok(Client::assemble(config, HyperTransport::new(settings)?))
+    }
+
+    /// Checks what only the builder can check and separates the settings of
+    /// the configuration from those of the default transport.
+    fn split(self) -> Result<(Explicit, TransportChoices), Error> {
+        let Self {
+            api_key,
+            base_url,
+            default_model,
+            timeout,
+            default_headers,
+            max_response_bytes,
+            extra_roots,
+            http_version,
+            connect_timeout,
+        } = self;
+
+        if connect_timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(Error::config("connect_timeout must be a positive number of seconds."));
+        }
+        let mut headers = HeaderMap::with_capacity(default_headers.len());
+        for (name, value) in &default_headers {
+            let (name, value) =
+                transport::parse_header(name, value, "default ").map_err(Error::config)?;
+            headers.insert(name, value);
+        }
+
+        let mut explicit = Explicit::default().default_headers(headers);
+        if let Some(key) = api_key {
+            explicit = explicit.api_key(key);
+        }
+        if let Some(url) = base_url {
+            explicit = explicit.base_url(url);
+        }
+        if let Some(model) = default_model {
+            explicit = explicit.default_model(model);
+        }
+        match timeout {
+            Some(Some(timeout)) => explicit = explicit.timeout(timeout),
+            Some(None) => explicit = explicit.no_timeout(),
+            None => {}
+        }
+        if let Some(limit) = max_response_bytes {
+            explicit = explicit.max_response_bytes(limit);
+        }
+        Ok((explicit, TransportChoices { version: http_version, extra_roots, connect_timeout }))
+    }
+}
+
+/// The builder's settings for the default transport, before the base URL
+/// decides the default version.
+struct TransportChoices {
+    version: Option<HttpVersion>,
+    extra_roots: Vec<Vec<u8>>,
+    connect_timeout: Option<Duration>,
+}
+
+impl fmt::Debug for ClientBuilder {
+    /// What was set, without the key, without header values, and with the
+    /// roots as a count. The base URL is shown only once it has passed the
+    /// checks [`build`](ClientBuilder::build) runs, and then as its endpoints,
+    /// the way an error names them: a URL that failed them may still hold
+    /// userinfo.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let base_url = self.base_url.as_deref().map(|url| {
+            crate::config::endpoints(url.trim_end_matches('/'))
+                .map_or_else(|_| Shown::Text("<not a usable URL>"), Shown::Endpoints)
+        });
+        formatter
+            .debug_struct("ClientBuilder")
+            .field("api_key", &self.api_key.as_ref().map(|_| Shown::Text("<redacted>")))
+            .field("base_url", &base_url)
+            .field("default_model", &self.default_model)
+            .field("timeout", &self.timeout)
+            .field(
+                "default_headers",
+                &self.default_headers.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            )
+            .field("max_response_bytes", &self.max_response_bytes)
+            .field("extra_roots", &self.extra_roots.len())
+            .field("http_version", &self.http_version)
+            .field("connect_timeout", &self.connect_timeout)
+            .finish()
+    }
+}
+
+/// A value the builder's `Debug` prints in place of the one it holds.
+enum Shown {
+    Text(&'static str),
+    Endpoints(crate::config::Endpoints),
+}
+
+impl fmt::Debug for Shown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => formatter.write_str(text),
+            Self::Endpoints(endpoints) => fmt::Debug::fmt(endpoints, formatter),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;

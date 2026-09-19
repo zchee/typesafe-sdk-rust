@@ -58,6 +58,11 @@ ignore = false
 multiple-versions = "warn"
 # Every dependency in this project is pinned to a concrete minimum version.
 wildcards = "deny"
+# Except a path dev-dependency, which has no version on purpose: cargo strips
+# it when it publishes, and a versioned one would make publishing require the
+# test-support crate on crates.io. A path or git normal or build dependency of
+# a published crate is still refused.
+allow-wildcard-paths = true
 highlight = "all"
 allow = []
 deny = []

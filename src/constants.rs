@@ -10,7 +10,7 @@
 
 use std::{sync::LazyLock, time::Duration};
 
-use http::{HeaderName, HeaderValue};
+use http::{HeaderName, HeaderValue, header};
 
 /// The response header carrying the server's identifier for a request.
 pub(crate) const REQUEST_ID_HEADER: &str = "x-typesafe-request-id";
@@ -56,11 +56,9 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 // ------------------------------------------------------------ API paths
 
 /// The path of the System One endpoint, appended to the base URL.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) const SYSTEM_ONE_PATH: &str = "/v1/systemone";
 
 /// The path of the model listing endpoint, appended to the base URL.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) const MODELS_PATH: &str = "/v1/models";
 
 // ------------------------------------------------------ request headers
@@ -72,29 +70,35 @@ pub(crate) const MODELS_PATH: &str = "/v1/models";
 // rather than restated here.
 
 /// The header naming the SDK and its version on every request.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) const SDK_HEADER: HeaderName = HeaderName::from_static("x-typesafe-sdk");
 
 /// The header naming the language runtime, operating system and architecture
 /// on every request.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) const RUNTIME_HEADER: HeaderName = HeaderName::from_static("x-typesafe-runtime");
 
 /// The header counting how many times a request has been retried, set by the
 /// SDK on retries only. A caller-supplied one is dropped.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) const RETRY_COUNT_HEADER: HeaderName = HeaderName::from_static("x-typesafe-retry-count");
 
 /// The media type of every request body and of every response the SDK accepts.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) const JSON_CONTENT_TYPE: HeaderValue = HeaderValue::from_static("application/json");
+
+/// The headers the SDK sets on every request, which neither a client default
+/// nor a per-call header can replace.
+///
+/// They say who is calling and with which credential; a caller who could
+/// override them could send a request the SDK cannot vouch for. The Python
+/// SDK protects the same five (`_core/transport.py`), and `Content-Type` is
+/// forced on a request with a body on top of them.
+pub(crate) const PROTECTED_HEADERS: [HeaderName; 5] =
+    [header::AUTHORIZATION, header::ACCEPT, header::USER_AGENT, SDK_HEADER, RUNTIME_HEADER];
 
 /// The header names whose values are credentials, and so are never logged.
 ///
 /// Lower-cased, because that is how `http` stores every name. A name that
 /// merely contains `token` or `secret` is treated the same way; that rule lives
-/// with the redaction that applies it.
-#[cfg_attr(not(test), expect(dead_code, reason = "header logging arrives with the transport"))]
+/// with the redaction that applies it, which exists only when events do.
+#[cfg(any(test, feature = "tracing"))]
 pub(crate) const SECRET_HEADERS: [&str; 6] =
     ["authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "set-cookie"];
 
@@ -106,7 +110,6 @@ pub(crate) const SECRET_HEADERS: [&str; 6] =
 /// Deliberately not the official Python SDK's `typesafe-sdk/<version>`: the
 /// server may count or treat SDKs by this value, and a port must not be
 /// mistaken for the SDK it is a port of.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) const SDK_IDENTIFIER: HeaderValue =
     HeaderValue::from_static(concat!("typesafe-sdk-rust/", env!("CARGO_PKG_VERSION")));
 
@@ -116,7 +119,6 @@ pub(crate) const SDK_IDENTIFIER: HeaderValue =
 /// `macos` and `aarch64`. Those are constants but not literals, and `concat!`
 /// takes only literals, so the value is built on first use and kept for the
 /// life of the process.
-#[cfg_attr(not(test), expect(dead_code, reason = "request assembly arrives with the transport"))]
 pub(crate) static RUNTIME_IDENTIFIER: LazyLock<HeaderValue> = LazyLock::new(|| {
     let text = format!("rust ({}; {})", std::env::consts::OS, std::env::consts::ARCH);
     HeaderValue::from_str(&text)

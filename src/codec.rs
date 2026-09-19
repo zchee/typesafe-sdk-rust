@@ -244,16 +244,6 @@ pub(crate) fn write_json_string(buf: &mut Vec<u8>, text: &str) {
 /// # Errors
 ///
 /// Returns whatever `fill` returns.
-// The first in-crate caller is the request builder, which is not written yet;
-// until then only the `internals` wrappers and the tests reach this. Naming
-// both of those in the condition is what lets this be an `expect` rather than
-// an `allow`: it is applied only in the one configuration where the item is
-// genuinely unreachable, so it cannot go unfulfilled, and it turns into a
-// warning - a failed gate - as soon as the request builder calls it.
-#[cfg_attr(
-    all(not(test), not(feature = "internals")),
-    expect(dead_code, reason = "the request builder that calls this is written in phase 2")
-)]
 pub(crate) fn encode_body<F>(fill: F) -> Result<Bytes, EncodeError>
 where
     F: FnOnce(&mut Vec<u8>) -> Result<(), EncodeError>,

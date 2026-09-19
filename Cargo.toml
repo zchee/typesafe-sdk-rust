@@ -118,9 +118,21 @@ internals = []
 [dependencies]
 bytes = { workspace = true }
 http = { workspace = true }
+# The request body type implements this crate's version of `http_body::Body`,
+# the one bound a custom transport shares with the SDK.
+http-body = { workspace = true }
+# `Limited` collects a response body under the size cap.
+http-body-util = { workspace = true }
 # Used only to read `Retry-After` when a server answers it with an HTTP date
 # rather than a count of seconds.
 httpdate = { workspace = true }
+# The default transport: hyper-util's pooled client over hyper-rustls, with the
+# trust anchors from the operating system through rustls-platform-verifier.
+hyper = { workspace = true }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 # Held for the client's API key: it is kept as a secret until the one place
 # that turns it into an `Authorization` header value, so no formatting of a
 # client or its configuration can print it.
@@ -132,18 +144,33 @@ serde = { workspace = true }
 serde_path_to_error = { workspace = true }
 sonic-rs = { workspace = true }
 thiserror = { workspace = true }
+# The per-attempt deadline, and the runtime the default transport runs on.
+tokio = { workspace = true }
+# The seam a custom transport is plugged into: `tower::Service` without the
+# rest of `tower`.
+tower-service = { workspace = true }
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 dhat = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
+# `net` and `io-util` for the raw sockets the failure tests answer with.
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+# Path only, no version: cargo strips a path dev-dependency when it publishes,
+# and this crate is never published.
+typesafe-sdk-rust-test-support = { path = "crates/test-support" }
 
 # dhat allows one profiler per process, so an allocation scenario gets a test
 # binary of its own rather than a test function in a shared one.
 [[test]]
 name = "alloc_encode"
 path = "tests/alloc_encode.rs"
+required-features = ["internals"]
+
+[[test]]
+name = "alloc_call"
+path = "tests/alloc_call.rs"
 required-features = ["internals"]
 
 [lints]

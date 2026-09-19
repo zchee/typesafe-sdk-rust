@@ -34,10 +34,6 @@
 // where the tests are callers and the expectation could not hold; that is also
 // what keeps this from hiding an item no test reaches, which the test build
 // still reports.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the lanes that raise these failures are written in later phases")
-)]
 
 use std::{
     borrow::Cow,

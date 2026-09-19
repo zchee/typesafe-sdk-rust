@@ -8,21 +8,41 @@
 //!
 //! A call asks a set of named questions about a state. The set is built once,
 //! validated and serialized by [`Questions::prepare`], and the resulting
-//! [`PreparedQuestions`] is reused by every call that asks it. The client that
-//! sends it arrives in a later release; this release provides the question
-//! set, the response types and their decoder.
+//! [`PreparedQuestions`] is reused by every call that asks it. A [`Client`]
+//! sends it: [`Client::system_one`] makes a request, whose methods set the
+//! model, the deadline, extra headers and extra body members, and
+//! [`send`](SystemOne::send) sends it and decodes the answers.
 //!
 //! ```
-//! use typesafe_sdk::{Choice, Noul, Questions, Score};
+//! use std::time::Duration;
 //!
-//! let prepared = Questions::new()
+//! use typesafe_sdk::{Choice, Client, Noul, Questions, Score};
+//!
+//! let questions = Questions::new()
 //!     .noul("billing", Noul::new().instructions("Is this about billing?"))
 //!     .choice("tone", Choice::new(["calm", "angry"]).instructions("What is the tone?"))
 //!     .score("urgency", Score::new(["can wait", "this week", "today"]))
 //!     .prepare()?;
+//! assert_eq!(questions.names().collect::<Vec<_>>(), ["billing", "tone", "urgency"]);
 //!
-//! assert_eq!(prepared.len(), 3);
-//! assert_eq!(prepared.names().collect::<Vec<_>>(), ["billing", "tone", "urgency"]);
+//! // `Client::from_env()` reads the same settings from TYPESAFE_API_KEY and
+//! // friends. Building connects to nothing.
+//! let client = Client::builder().api_key("your-api-key").build()?;
+//!
+//! let state = "I was charged twice for one order.";
+//! let request = client
+//!     .system_one(state, &questions)
+//!     .model("jev-latest")
+//!     .timeout(Duration::from_secs(2))
+//!     .header("x-team", "billing");
+//!
+//! // Sending needs a Tokio runtime; this example stops before it.
+//! async fn ask(request: typesafe_sdk::SystemOne<'_, typesafe_sdk::HyperTransport, str>)
+//! -> Result<f64, typesafe_sdk::Error> {
+//!     let response = request.send().await?;
+//!     Ok(response.answers().noul("billing").map_or(0.0, |answer| answer.noul()))
+//! }
+//! drop(ask(request));
 //! # Ok::<(), typesafe_sdk::Error>(())
 //! ```
 //!
@@ -46,7 +66,7 @@
 
 pub mod client;
 mod codec;
-pub mod config;
+mod config;
 pub mod constants;
 pub mod content;
 pub mod de;
@@ -56,7 +76,7 @@ pub mod question;
 pub mod request;
 pub mod response;
 pub mod retry;
-pub mod telemetry;
+mod telemetry;
 pub mod transport;
 
 #[cfg(feature = "internals")]
@@ -64,14 +84,17 @@ pub mod transport;
 pub mod __internals;
 
 pub use crate::{
+    client::{Client, ClientBuilder},
     codec::{DecodeError, DecodeErrorKind, EncodeError, RawJson},
     content::{Content, ContentError},
     de::{AnswerContext, AnswerSet},
     error::{ApiError, ApiErrorKind, Error, ErrorKind, ResponseValidationError},
-    models::{ListModelsResponse, ModelMetadata},
+    models::{ListModels, ListModelsResponse, ModelMetadata, Models},
     question::{Choice, Noul, PreparedQuestions, Question, Questions, RawQuestion, Score},
+    request::SystemOne,
     response::{
         Answer, Answers, ChoiceAnswer, NoulAnswer, ResponseMeta, ScoreAnswer, SystemOneResponse,
         Usage,
     },
+    transport::{Body, BoxError, HttpService, HttpVersion, HyperResponseFuture, HyperTransport},
 };

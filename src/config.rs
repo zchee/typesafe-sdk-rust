@@ -11,18 +11,6 @@
 //! trimmed, a blank one counts as unset, a trailing slash comes off the base
 //! URL, and a deadline must be above zero when there is one.
 
-// Nothing builds a client yet, so nothing outside the tests resolves a
-// configuration. `expect` rather than `allow`, so the attribute turns into a
-// failed gate by itself once the client builder calls in here; it is left off
-// under `cfg(test)`, where the tests are the callers.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the client builder that resolves a configuration arrives with the transport"
-    )
-)]
-
 use std::{ffi::OsString, fmt, time::Duration};
 
 use bytes::Bytes;

@@ -8,19 +8,171 @@
 //! body is reported by its length at the ordinary level and in full only at the
 //! most verbose one, and the headers that carry secrets are redacted wherever
 //! they are printed.
+//!
+//! Every event has the target `typesafe_sdk`, so one filter directive selects
+//! all of them. At `DEBUG` a request is reported as it leaves and as its
+//! answer arrives - method, endpoint, status, request id, the headers with
+//! their secrets redacted, and the body's length. At `TRACE` the bodies
+//! themselves follow.
+//!
+//! Without the `tracing` feature every function here is empty and the
+//! compiler removes the calls. With it, and with no subscriber interested, a
+//! call costs a check per event and allocates nothing: the fields are values
+//! that know how to print themselves, and nothing is printed unless an event
+//! is recorded.
 
-// The events that print headers arrive with the transport; until then only the
-// tests call in here. `expect` rather than `allow`, so the attribute fails the
-// gate by itself once a real caller exists.
-#![cfg_attr(not(test), expect(dead_code, reason = "header logging arrives with the transport"))]
+#[cfg(feature = "tracing")]
+use std::{fmt, time::Duration};
 
-use std::fmt;
+#[cfg(feature = "tracing")]
+use bytes::Bytes;
+use http::{HeaderMap, Method, StatusCode, Uri};
+#[cfg(feature = "tracing")]
+use http::{HeaderName, HeaderValue};
 
-use http::{HeaderMap, HeaderName, HeaderValue};
+#[cfg(feature = "tracing")]
+use crate::constants::{REQUEST_ID_HEADER, SECRET_HEADERS};
+use crate::error::Error;
 
-use crate::constants::SECRET_HEADERS;
+/// The target every event of this crate is emitted under.
+#[cfg(feature = "tracing")]
+const TARGET: &str = "typesafe_sdk";
+
+/// One request, as the events about it name it.
+#[derive(Clone, Copy)]
+pub(crate) struct Exchange<'a> {
+    #[cfg(feature = "tracing")]
+    method: &'a Method,
+    #[cfg(feature = "tracing")]
+    uri: &'a Uri,
+    #[cfg(feature = "tracing")]
+    retry: u32,
+    /// Holds the lifetime when the fields above are compiled out.
+    #[cfg(not(feature = "tracing"))]
+    request: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> Exchange<'a> {
+    /// The attempt numbered `retry` of a request to `method uri`.
+    #[cfg(feature = "tracing")]
+    pub(crate) fn new(method: &'a Method, uri: &'a Uri, retry: u32) -> Self {
+        Self { method, uri, retry }
+    }
+
+    /// Without events there is nothing to name a request for.
+    #[cfg(not(feature = "tracing"))]
+    pub(crate) fn new(_: &'a Method, _: &'a Uri, _: u32) -> Self {
+        Self { request: std::marker::PhantomData }
+    }
+}
+
+/// A request is about to be handed to the transport.
+#[cfg(feature = "tracing")]
+pub(crate) fn sending(exchange: Exchange<'_>, headers: &HeaderMap, body: Option<&Bytes>) {
+    tracing::debug!(
+        target: TARGET,
+        method = %exchange.method,
+        endpoint = %exchange.uri,
+        retry = exchange.retry,
+        headers = ?redact(headers),
+        body_len = body.map_or(0, Bytes::len),
+        "sending request"
+    );
+    if let Some(body) = body {
+        tracing::trace!(
+            target: TARGET,
+            method = %exchange.method,
+            endpoint = %exchange.uri,
+            body = %Lossy(body),
+            "request body"
+        );
+    }
+}
+
+/// A request is about to be handed to the transport.
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn sending(_: Exchange<'_>, _: &HeaderMap, _: Option<&bytes::Bytes>) {}
+
+/// A response arrived and its body was read in full.
+#[cfg(feature = "tracing")]
+pub(crate) fn received(
+    exchange: Exchange<'_>,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &Bytes,
+    elapsed: Duration,
+) {
+    tracing::debug!(
+        target: TARGET,
+        method = %exchange.method,
+        endpoint = %exchange.uri,
+        status = status.as_u16(),
+        request_id = headers.get(REQUEST_ID_HEADER).and_then(|id| id.to_str().ok()).unwrap_or("-"),
+        elapsed_ms = elapsed.as_millis(),
+        headers = ?redact(headers),
+        body_len = body.len(),
+        "received response"
+    );
+    tracing::trace!(
+        target: TARGET,
+        method = %exchange.method,
+        endpoint = %exchange.uri,
+        body = %Lossy(body),
+        "response body"
+    );
+}
+
+/// A response arrived and its body was read in full.
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn received(
+    _: Exchange<'_>,
+    _: StatusCode,
+    _: &HeaderMap,
+    _: &bytes::Bytes,
+    _: std::time::Duration,
+) {
+}
+
+/// An attempt ended without a response this crate could read.
+///
+/// The error's `Display` is written by this crate and carries no header value
+/// and no body, so it is safe to record.
+#[cfg(feature = "tracing")]
+pub(crate) fn failed(exchange: Exchange<'_>, error: &Error, elapsed: Duration) {
+    tracing::debug!(
+        target: TARGET,
+        method = %exchange.method,
+        endpoint = %exchange.uri,
+        elapsed_ms = elapsed.as_millis(),
+        error = %error,
+        "request failed"
+    );
+}
+
+/// An attempt ended without a response this crate could read.
+#[cfg(not(feature = "tracing"))]
+pub(crate) fn failed(_: Exchange<'_>, _: &Error, _: std::time::Duration) {}
+
+/// A body as text, with anything that is not UTF-8 replaced, written straight
+/// into the formatter so that nothing is copied unless an event is recorded.
+#[cfg(feature = "tracing")]
+struct Lossy<'a>(&'a [u8]);
+
+#[cfg(feature = "tracing")]
+impl fmt::Display for Lossy<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for chunk in self.0.utf8_chunks() {
+            formatter.write_str(chunk.valid())?;
+            if !chunk.invalid().is_empty() {
+                formatter.write_str("\u{fffd}")?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// What a secret header value is printed as.
+#[cfg(feature = "tracing")]
 const REDACTED: &str = "***";
 
 /// A view of `headers` that prints every secret value as `***`.
@@ -34,14 +186,17 @@ const REDACTED: &str = "***";
 ///
 /// Nothing is copied: the view borrows the map and redacts as it writes, so a
 /// log event that is filtered out costs nothing beyond building the view.
+#[cfg(feature = "tracing")]
 pub(crate) fn redact(headers: &HeaderMap) -> RedactedHeaders<'_> {
     RedactedHeaders(headers)
 }
 
 /// Headers as the logs show them. See [`redact`].
+#[cfg(feature = "tracing")]
 #[derive(Clone, Copy)]
 pub(crate) struct RedactedHeaders<'a>(&'a HeaderMap);
 
+#[cfg(feature = "tracing")]
 impl RedactedHeaders<'_> {
     /// Each header in the map's order, a name repeated once per value, with
     /// its value or `None` when that value is secret.
@@ -50,6 +205,7 @@ impl RedactedHeaders<'_> {
     }
 }
 
+#[cfg(feature = "tracing")]
 impl fmt::Debug for RedactedHeaders<'_> {
     /// `{"name": "value", "authorization": "***"}`, each value in the quoted,
     /// escaped form `HeaderValue`'s own `Debug` uses.
@@ -61,6 +217,7 @@ impl fmt::Debug for RedactedHeaders<'_> {
     }
 }
 
+#[cfg(feature = "tracing")]
 impl fmt::Display for RedactedHeaders<'_> {
     /// `{name: value, authorization: ***}`, each value as plain text when it
     /// is UTF-8 and in its quoted, escaped `Debug` form when it is not.
@@ -87,8 +244,10 @@ impl fmt::Display for RedactedHeaders<'_> {
 }
 
 /// One header value in a `Debug` map: the value, or the redaction marker.
+#[cfg(feature = "tracing")]
 struct Shown<'a>(Option<&'a HeaderValue>);
 
+#[cfg(feature = "tracing")]
 impl fmt::Debug for Shown<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
@@ -102,6 +261,7 @@ impl fmt::Debug for Shown<'_> {
 ///
 /// `http` stores every header name lower-cased, which is what makes the
 /// comparisons here case-insensitive without lower-casing anything.
+#[cfg(feature = "tracing")]
 fn is_secret(name: &HeaderName, value: &HeaderValue) -> bool {
     let name = name.as_str();
     value.is_sensitive()
@@ -110,6 +270,6 @@ fn is_secret(name: &HeaderName, value: &HeaderValue) -> bool {
         || name.contains("secret")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tracing"))]
 #[path = "telemetry_tests.rs"]
 mod tests;
