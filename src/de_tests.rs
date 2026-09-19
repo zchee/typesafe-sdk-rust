@@ -1323,6 +1323,239 @@ impl fmt::Display for Expecting<'_> {
     }
 }
 
+// ------------------------------------------------- foreign size hints
+
+/// The answer types read from any serde format, and a self-describing binary
+/// one (MessagePack, CBOR) reports a map's DECLARED length as its size hint:
+/// the input chooses it. These tests read answers from a stand-in for such a
+/// format, whose maps declare whatever length the test says, and check that
+/// no capacity follows the declaration.
+mod foreign_size_hint {
+    use serde::de::{IntoDeserializer, MapAccess, Visitor, value::Error as FormatError};
+
+    use super::*;
+
+    /// One value of the stand-in format.
+    #[derive(Debug, Clone)]
+    enum Foreign {
+        Text(&'static str),
+        Number(f64),
+        /// A map that claims `declared` entries and holds `entries`.
+        Map {
+            declared: usize,
+            entries: Vec<(&'static str, Foreign)>,
+        },
+    }
+
+    fn map(declared: usize, entries: &[(&'static str, Foreign)]) -> Foreign {
+        Foreign::Map { declared, entries: entries.to_vec() }
+    }
+
+    impl<'de> Deserializer<'de> for Foreign {
+        type Error = FormatError;
+
+        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, FormatError> {
+            match self {
+                Foreign::Text(text) => visitor.visit_borrowed_str(text),
+                Foreign::Number(number) => visitor.visit_f64(number),
+                Foreign::Map { declared, entries } => visitor.visit_map(Declared {
+                    declared,
+                    entries: entries.into_iter(),
+                    value: None,
+                }),
+            }
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum
+            identifier ignored_any
+        }
+    }
+
+    impl IntoDeserializer<'_, FormatError> for Foreign {
+        type Deserializer = Self;
+
+        fn into_deserializer(self) -> Self {
+            self
+        }
+    }
+
+    /// A map's entries, with the length its input declared as the hint.
+    struct Declared {
+        declared: usize,
+        entries: std::vec::IntoIter<(&'static str, Foreign)>,
+        value: Option<Foreign>,
+    }
+
+    impl<'de> MapAccess<'de> for Declared {
+        type Error = FormatError;
+
+        fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, FormatError>
+        where
+            K: DeserializeSeed<'de>,
+        {
+            let Some((key, value)) = self.entries.next() else {
+                return Ok(None);
+            };
+            self.value = Some(value);
+            seed.deserialize(Foreign::Text(key)).map(Some)
+        }
+
+        fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, FormatError>
+        where
+            V: DeserializeSeed<'de>,
+        {
+            let value = self.value.take().expect("a key was read before its value");
+            seed.deserialize(value)
+        }
+
+        fn size_hint(&self) -> Option<usize> {
+            Some(self.declared)
+        }
+    }
+
+    /// The lengths a hostile input declares: one that overflows any
+    /// capacity, the 2^32 that asked for 128 GiB through MessagePack, and the
+    /// 2^24 that asked for 512 MiB.
+    const DECLARED: [(&str, usize); 3] =
+        [("usize::MAX", usize::MAX), ("2^32", 1 << 32), ("2^24", 1 << 24)];
+
+    fn choice(declared: usize) -> Foreign {
+        map(
+            declared,
+            &[
+                ("type", Foreign::Text("choice")),
+                ("choice", Foreign::Text("spam")),
+                ("confidence", Foreign::Number(0.9)),
+                (
+                    "probabilities",
+                    map(declared, &[("spam", Foreign::Number(0.9)), ("ham", Foreign::Number(0.1))]),
+                ),
+            ],
+        )
+    }
+
+    fn score(declared: usize) -> Foreign {
+        map(
+            declared,
+            &[
+                ("type", Foreign::Text("score")),
+                ("score", Foreign::Number(2.0)),
+                ("confidence", Foreign::Number(0.8)),
+                // A legend description is read as JSON text in every format,
+                // so the stand-in carries each one as a JSON string literal.
+                (
+                    "legend",
+                    map(
+                        declared,
+                        &[("1", Foreign::Text(r#""low""#)), ("2", Foreign::Text(r#""high""#))],
+                    ),
+                ),
+                (
+                    "probabilities",
+                    map(declared, &[("1", Foreign::Number(0.2)), ("2", Foreign::Number(0.8))]),
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_declared_length_does_not_size_a_choice_or_a_score_read_through_the_public_impls() {
+        for (label, declared) in DECLARED {
+            let read_choice = ChoiceAnswer::deserialize(choice(declared))
+                .unwrap_or_else(|error| panic!("{label}: the choice did not read: {error}"));
+            assert_eq!(read_choice.choice(), "spam", "{label}");
+            assert_eq!(
+                read_choice.probabilities().collect::<Vec<_>>(),
+                [("spam", 0.9), ("ham", 0.1)],
+                "{label}"
+            );
+
+            let read_score = ScoreAnswer::deserialize(score(declared))
+                .unwrap_or_else(|error| panic!("{label}: the score did not read: {error}"));
+            assert_eq!(
+                read_score.probabilities().collect::<Vec<_>>(),
+                [(1, 0.2), (2, 0.8)],
+                "{label}"
+            );
+            assert_eq!(read_score.legend().count(), 2, "{label}");
+
+            let any = Answer::deserialize(choice(declared))
+                .unwrap_or_else(|error| panic!("{label}: the answer did not read: {error}"));
+            assert!(any.as_choice().is_some(), "{label}: {any:?}");
+
+            let set = Answers::deserialize(map(
+                declared,
+                &[("topic", choice(declared)), ("rating", score(declared))],
+            ))
+            .unwrap_or_else(|error| panic!("{label}: the set did not read: {error}"));
+            assert_eq!(set.names().collect::<Vec<_>>(), ["topic", "rating"], "{label}");
+        }
+    }
+
+    #[test]
+    fn a_declared_length_with_a_bad_entry_is_an_error_not_a_panic() {
+        for (label, declared) in DECLARED {
+            let bad = map(
+                declared,
+                &[
+                    ("type", Foreign::Text("choice")),
+                    ("choice", Foreign::Text("spam")),
+                    ("confidence", Foreign::Number(0.9)),
+                    ("probabilities", map(declared, &[("spam", Foreign::Text("high"))])),
+                ],
+            );
+            let error = ChoiceAnswer::deserialize(bad)
+                .expect_err(&format!("{label}: a probability that is text must be refused"));
+            assert_eq!(error.to_string(), "invalid type: string \"high\", expected f64", "{label}");
+        }
+    }
+
+    /// The bound itself, read off the lists the seeds build: whatever the
+    /// declared length, a choice's list starts at no more than
+    /// `MAX_OPTION_HINT` and a score's at no more than `MAX_LEVEL_HINT`.
+    #[test]
+    fn a_declared_length_reserves_no_more_than_the_small_caps() {
+        for (label, declared) in DECLARED {
+            let named = NamedSeed
+                .deserialize(map(declared, &[("spam", Foreign::Number(0.9))]))
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            assert_eq!(named.len(), 1, "{label}");
+            assert!(
+                named.capacity() <= MAX_OPTION_HINT,
+                "{label}: a choice's list reserved {} entries",
+                named.capacity()
+            );
+
+            // The legend and the score probabilities are sized when their
+            // member is reached, from the answer object's map: that map
+            // declares the hostile length here.
+            for member in [Member::Legend, Member::Probabilities] {
+                let value = match member {
+                    Member::Legend => map(declared, &[("1", Foreign::Text(r#""low""#))]),
+                    _ => map(declared, &[("1", Foreign::Number(1.0))]),
+                };
+                let mut outer =
+                    Declared { declared, entries: Vec::new().into_iter(), value: Some(value) };
+                let mut members = Members::default();
+                members
+                    .read(member, Kind::Score, &mut outer)
+                    .unwrap_or_else(|error| panic!("{label} {member:?}: {error}"));
+                let capacity = match (&members.legend, &members.probabilities) {
+                    (Slot::Read(legend), _) => legend.capacity(),
+                    (_, Probabilities::Levels(levels)) => levels.capacity(),
+                    _ => panic!("{label} {member:?}: nothing was read"),
+                };
+                assert!(
+                    capacity <= MAX_LEVEL_HINT,
+                    "{label} {member:?}: a level list reserved {capacity} entries"
+                );
+            }
+        }
+    }
+}
+
 // ----------------------------------------------------------------- tracing
 
 #[cfg(feature = "tracing")]

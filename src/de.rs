@@ -103,6 +103,18 @@ impl AnswerContext {
 /// as it would without a hint.
 const MAX_LEVEL_HINT: usize = 8;
 
+/// The largest capacity a choice's probability list starts at from a
+/// deserializer's size hint.
+///
+/// The answer types deserialize from any serde format, so that a caller can
+/// store answers and read them back; a self-describing binary format such as
+/// MessagePack or CBOR reports a map's declared length as its hint, and that
+/// length is whatever the input says. Trusted as it is, 61 bytes asked for a
+/// 128 GiB allocation and a declared 2^59 entries panicked with a capacity
+/// overflow. A choice has a handful of options, and a longer list grows as it
+/// would without a hint, as serde's own collections do past their cap.
+const MAX_OPTION_HINT: usize = 8;
+
 /// `count` as a `u32`, or `u32::MAX` when it does not fit.
 fn saturate(count: usize) -> u32 {
     u32::try_from(count).unwrap_or(u32::MAX)
@@ -786,8 +798,7 @@ struct Members<'de> {
     score: Slot<'de, f64>,
     legend: Slot<'de, Vec<(u32, Content<'static>)>>,
     probabilities: Probabilities<'de>,
-    /// The capacity a score's first level list starts at when the codec
-    /// gives no hint.
+    /// The capacity a score's first level list starts at.
     levels: usize,
 }
 
@@ -824,18 +835,23 @@ impl<'de> Members<'de> {
             Member::Confidence => self.confidence = Slot::Read(map.next_value()?),
             Member::Score => self.score = Slot::Read(map.next_value()?),
             // A score's legend and probabilities have one entry per level, so
-            // whichever of the two arrives second is sized from the first.
+            // whichever of the two arrives second is sized from the first. The
+            // first is sized from the request's level hint, never from
+            // `map.size_hint()`: that counts the answer object's remaining
+            // members, not levels, and a binary format reports whatever
+            // length its input declares, so a few bytes could ask for
+            // gigabytes.
             Member::Legend => {
                 let capacity = match &self.probabilities {
                     Probabilities::Levels(levels) => levels.len(),
-                    _ => map.size_hint().unwrap_or(self.levels),
+                    _ => self.levels,
                 };
                 self.legend = Slot::Read(map.next_value_seed(LegendSeed { capacity })?);
             }
             Member::Probabilities if kind == Kind::Score => {
                 let capacity = match &self.legend {
                     Slot::Read(legend) => legend.len(),
-                    _ => map.size_hint().unwrap_or(self.levels),
+                    _ => self.levels,
                 };
                 self.probabilities =
                     Probabilities::Levels(map.next_value_seed(LevelsSeed { capacity })?);
@@ -1068,7 +1084,9 @@ impl<'de> Visitor<'de> for NamedSeed {
     where
         M: MapAccess<'de>,
     {
-        let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0));
+        // The JSON codec gives no hint; a binary format gives the length its
+        // input declares, which is only trusted up to a few entries.
+        let mut entries = Vec::with_capacity(map.size_hint().unwrap_or(0).min(MAX_OPTION_HINT));
         while let Some(name) = map.next_key_seed(TextSeed)? {
             let probability = map.next_value()?;
             entries.push((Name::from(name), probability));
