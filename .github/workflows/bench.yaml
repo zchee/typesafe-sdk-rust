@@ -1,0 +1,57 @@
+name: Benchmarks
+
+# Pull requests and manual runs only. A `push` trigger on `main` would send
+# results to CodSpeed before the repository is set up there, and fail the
+# branch for it; add it once the CodSpeed app is installed and a pull
+# request run has been green.
+on:
+  pull_request:
+  # CodSpeed starts manual runs itself to measure older commits.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Instruction counts of the CPU benchmarks under CodSpeed's simulation
+  # (valgrind). Only the `sdk` bench target runs here: `loopback` times a
+  # real socket, whose instruction count follows the kernel and the
+  # scheduler rather than the SDK (see `benches/loopback.rs`).
+  codspeed:
+    name: codspeed
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      # CodSpeed authenticates the upload through GitHub's OpenID Connect
+      # token, so no upload token is stored in the repository.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # The toolchain rust-toolchain.toml pins, as in ci.yaml.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install --no-self-update
+
+      # Major version only: cargo-codspeed has to match the major of the
+      # codspeed-divan-compat the benches link.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-codspeed@5
+
+      # No RUSTFLAGS and no target-cpu: the counts are meant to be those of
+      # the build a consumer gets by default.
+      - name: Build the benchmarks
+        run: cargo codspeed build -m simulation -p typesafe-sdk-rust --features internals --bench sdk
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: cargo codspeed run -p typesafe-sdk-rust --bench sdk
