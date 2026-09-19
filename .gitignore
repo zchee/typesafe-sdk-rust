@@ -22,11 +22,9 @@ rustc-ice-*.txt
 
 # Local environment files hold credentials such as TYPESAFE_API_KEY. The
 # repository is public, so they are kept out here rather than left to each
-# contributor's global ignore file. An example file with placeholder values is
-# the one exception.
+# contributor's global ignore file.
 .env
 .env.*
-!.env.example
 
 # cargo-fuzz output: the build, the inputs a run finds (the committed seeds
 # live in fuzz/corpus and a run is pointed at another directory for its own
@@ -34,3 +32,6 @@ rustc-ice-*.txt
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
+
+# Bytecode Python writes beside the CI scripts when their tests run.
+__pycache__/

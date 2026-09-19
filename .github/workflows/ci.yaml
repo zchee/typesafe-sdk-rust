@@ -43,14 +43,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # `rustup toolchain install` with no toolchain named installs the active
-      # one, which is the one rust-toolchain.toml names, together with its
-      # components. It is spelled out rather than left to happen on the first
-      # cargo call: rustup 1.28.0 removed that automatic install, 1.28.1 put it
-      # back as a default that `RUSTUP_AUTO_INSTALL=0` turns off and 1.29.0
-      # added `rustup set auto-install disable` beside it, so whether a bare
-      # cargo call installs anything is a property of the runner image, not of
-      # this workflow. `rustup show` never installed; it only reports.
+      # `rustup toolchain install` with no toolchain named installs the one
+      # rust-toolchain.toml names, with its components. Whether a bare cargo
+      # call would install it depends on the runner's rustup settings.
       - name: Install the pinned toolchain
         run: rustup toolchain install --no-self-update
 
@@ -69,13 +64,6 @@ jobs:
       # cannot see that: every feature is on there.
       - name: Lints without default features
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-
-      # The live tests compile here and run nowhere in CI: with a key they
-      # make billed calls, without one they fail on purpose. The two steps
-      # above already lint them through `--workspace`; naming the package
-      # keeps them linted if either step ever drops `--workspace`.
-      - name: Lints of the live tests
-        run: cargo clippy -p typesafe-sdk-rust-live-tests --all-targets -- -D warnings
 
       # No `--workspace`: this one runs code. A crate whose tests need a live
       # API key is a workspace member and not a default member, so the default
@@ -127,9 +115,7 @@ jobs:
         run: cargo deny check
 
       # The fuzz targets are a workspace of their own with a lock file of
-      # their own, which the step above never reads. The same deny.toml
-      # judges it; its one crate-scoped license exception (NCSA, for
-      # libfuzzer-sys) is used only by this graph.
+      # their own, which the step above never reads.
       - name: Dependency policy of the fuzz targets
         run: cargo deny --manifest-path fuzz/Cargo.toml check
 
@@ -141,20 +127,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # A task marker, a macro that panics where code should be, or a test
-      # switched off with an attribute compiles, passes every lint above and
-      # reads as finished in a review. One platform is enough for a scan of
-      # the tracked text.
-      - name: No placeholders
-        if: matrix.os == 'ubuntu-26.04'
-        run: python3 .github/scripts/no-placeholders.py
-
-      # The fuzz targets are a workspace of their own, excluded from the one
-      # every step above builds, and running them needs nightly. Checking
-      # them needs neither: stable compiles them, together with libFuzzer's
-      # C++ runtime, so a change to the hidden seam they call through breaks
-      # here instead of on the next fuzzing run. One platform is enough for a
-      # compile check; `--locked` holds it to the committed lock file.
+      # Running the fuzz targets needs nightly; checking them does not:
+      # stable compiles them, together with libFuzzer's C++ runtime, so a
+      # change to the hidden seam they call through breaks here instead of
+      # on the next fuzzing run. One platform is enough for a compile check;
+      # `--locked` holds it to the committed lock file.
       - name: Fuzz targets compile
         if: matrix.os == 'ubuntu-26.04'
         run: cargo check --locked --manifest-path fuzz/Cargo.toml
@@ -200,14 +177,16 @@ jobs:
         with:
           persist-credentials: false
 
-      # Nothing else in the toolchain looks for these: a NUL byte made git
-      # treat a text file as binary once already, and an invisible character
-      # survives every formatter this repository runs.
       - name: Invisible and control characters
         run: python3 .github/scripts/text-hygiene.py
 
-      # Every upstream test is mapped to a Rust test that exists or to a row
-      # of the README's deviations table. A renamed test or a reworded row
-      # still reads as a mapping, so only a check notices it stopped being one.
+      - name: No placeholders
+        run: python3 .github/scripts/no-placeholders.py
+
       - name: Port test matrix
         run: python3 .github/scripts/port-test-matrix.py
+
+      # pipx ships with the runner image and runs pytest from a throwaway
+      # environment, so nothing is installed into the image's Python.
+      - name: Tests of the scripts
+        run: pipx run --spec 'pytest==9.*' pytest .github/scripts/tests -q

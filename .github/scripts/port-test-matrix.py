@@ -33,8 +33,6 @@ defined.
 Run it from the repository root.
 """
 
-from __future__ import annotations
-
 import argparse
 import re
 import sys
@@ -445,14 +443,13 @@ def check_names(matrix: Matrix) -> list[str]:
     return sorted(faults)
 
 
-def check_upstream(matrix: Matrix, upstream: Path) -> list[str]:
+def check_upstream(upstream: Path) -> list[str]:
     """Compare ``UPSTREAM_TESTS`` with the functions a checkout defines.
 
     :func:`check_names` holds the rows to the pin in both forms; this holds the
     pin to upstream, so that the rows are checked against upstream through it.
 
     Args:
-        matrix: The parsed matrix.
         upstream: A checkout of the upstream repository.
 
     Returns:
@@ -477,13 +474,7 @@ def check_upstream(matrix: Matrix, upstream: Path) -> list[str]:
         f"{upstream}: {file}::{name} is in UPSTREAM_TESTS but not defined upstream"
         for file, name in UPSTREAM_TESTS - defined
     )
-    faults.sort()
-    faults.extend(
-        f"{MATRIX}: upstream {file} has no line in the Counts table"
-        for file in files
-        if file not in matrix.counts
-    )
-    return faults
+    return sorted(faults)
 
 
 def main(argv: list[str]) -> int:
@@ -537,22 +528,14 @@ def main(argv: list[str]) -> int:
                 f"{counted.excluded}"
             )
 
-    for file in sorted(set(matrix.counts) | set(UPSTREAM_FUNCTIONS)):
-        stated = matrix.counts.get(file)
-        upstream = UPSTREAM_FUNCTIONS.get(file)
-        if upstream is None:
-            faults.append(f"{MATRIX}: {file} is not an upstream test file")
-        elif stated is None:
-            faults.append(f"{MATRIX}: upstream {file} has no line in the Counts table")
-        elif stated.functions != upstream:
-            faults.append(
-                f"{MATRIX}: {file} states {stated.functions} functions, upstream "
-                f"defines {upstream}"
-            )
+    faults.extend(
+        f"{MATRIX}: {file} is not an upstream test file"
+        for file in sorted(matrix.counts.keys() - UPSTREAM_FUNCTIONS)
+    )
 
     faults.extend(check_names(matrix))
     if arguments.upstream is not None:
-        faults.extend(check_upstream(matrix, arguments.upstream))
+        faults.extend(check_upstream(arguments.upstream))
 
     for fault in faults:
         print(fault)

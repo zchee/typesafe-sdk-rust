@@ -9,8 +9,6 @@ them, so this does.
 Run it over the whole tree with no arguments, or over named paths.
 """
 
-from __future__ import annotations
-
 import re
 import subprocess
 import sys
@@ -22,23 +20,14 @@ from pathlib import Path
 #: HTML (``<!--``).
 COMMENT = re.compile(r"//|/\*|#|<!--")
 
-#: A task marker as a whole word in any letter case, refused after a comment
-#: opener on the same line. The line's first opener is found first, with one
-#: search, and the words are then searched for once, from where that opener
-#: ends: the first opener to start is also the first to end, so a word after
-#: any opener is a word after the first one, and a line is read a constant
-#: number of times however many openers it holds.
+#: A task marker as a whole word in any letter case, searched after a line's
+#: first comment opener; one in capitals is left to ``PLACEHOLDERS``.
 COMMENT_TASK = re.compile(r"\b(?:" + "to" + "do|" + "fix" + r"me)\b", re.IGNORECASE)
 
-#: What is refused on any line, each with the reason printed beside a hit.
-#:
-#: The patterns are assembled from pieces so that this file does not match
-#: itself; spelled out whole, every one of them would be a hit here. The two
-#: task markers are refused in capitals anywhere, and in any letter case after
-#: a comment opener (``COMMENT_TASK``), as whole words only, so that an
-#: identifier that merely contains one stays clean. A test switched off
-#: outright is refused in the plain and the raw-identifier spelling
-#: (``r#`` before the word), which rustc accepts alike.
+#: What is refused on any line, each with the reason printed beside a hit,
+#: assembled from pieces so that this file does not match itself. A test
+#: switched off outright is refused in the plain and the raw-identifier
+#: spelling (``r#`` before the word), which rustc accepts alike.
 PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b" + "TO" + r"DO\b"), "a task marker"),
     (re.compile(r"\b" + "FIX" + r"ME\b"), "a task marker"),
@@ -67,12 +56,8 @@ CFG_ATTR = re.compile(r"#\s*+(?:!\s*+)?\[\s*+cfg_attr\s*+\(")
 
 #: One token of an attribute's arguments, read as Rust source. The literals
 #: and comments are opaque: nothing inside them opens or closes a delimiter or
-#: is a word. A string or raw string left open runs to the end of the file.
-#: Escapes are read, not checked: a ``\u{..}`` takes any run of hex digits and
-#: underscores, since Rust caps its digits at six but not its underscores.
-#: Every unbounded repetition is possessive and every alternative starts on a
-#: character that it then consumes, so a match never backtracks over what it
-#: has read.
+#: is a word. A ``\u{..}`` escape takes any run of hex digits and underscores,
+#: since Rust caps its digits at six but not its underscores.
 TOKEN = re.compile(
     r"""
       (?P<space>\s++)
@@ -203,34 +188,6 @@ def switched_off(text: str) -> Iterator[tuple[int, int | None]]:
     (``ignore = "reason"``, a nested ``cfg_attr`` and the raw identifier
     ``r#ignore`` included) outside every literal and comment.
 
-    Every opener in the file is walked, each on its own, in every kind of
-    file: where one walk stopped has no say in which openers are tried, and
-    nothing outside an attribute's arguments is lexed. So neither a walk
-    thrown out of step with the file's literals nor a mis-read of Rust
-    elsewhere in the file (whose lexing depends on its edition) can hide a
-    later attribute. Two costs of that are accepted, both on the safe side:
-    an attribute quoted whole in a string, a comment or a doc comment is
-    reported; and a walk from an opener quoted without its closing
-    parenthesis reads what follows as arguments, out of step with the file's
-    literals, and may report an ``ignore`` far from it, at the quoted
-    opener's line. A hit shows at most ``SHOWN_WIDTH`` characters for that.
-
-    The work is linear in the file. ``finditer`` reads it once: a try fails
-    at its first character unless that is a ``#``, and after one reads only
-    whitespace runs, one ``!``, one ``[`` and ``cfg_attr``, never another
-    ``#``, so no character is read by two tries. A walk reads each token of
-    its arguments once, but walks overlap: an attribute left open reads to
-    the end of the file, and so may every opener after it. So all the walks
-    share one budget of characters, ``WALK_BUDGET`` times the file's length
-    plus ``WALK_ALLOWANCE``. A walk starts no token beyond what is left of
-    it, and the last token it reads ends at the end of the file at most, so
-    the walks read at most the budget and the file once more. Once the
-    budget is spent the walk that ran out is reported, and no later opener
-    is walked: a file that cannot be read in that time fails the scan rather
-    than passing unread. Real code stays far below it: a walk overlaps
-    another only when its opener lies inside the other's arguments, quoted
-    or nested, or after one left open.
-
     Args:
         text: The whole file.
 
@@ -291,6 +248,8 @@ def faults(path: str) -> list[str]:
                 )
         if (opener := COMMENT.search(line)) is not None:
             for hit in COMMENT_TASK.finditer(line, opener.end()):
+                if hit.group(0).isupper():
+                    continue
                 found.append(
                     f"{path}:{number}:{hit.start() + 1}: "
                     f"a task marker in a comment: {hit.group(0)}"

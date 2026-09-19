@@ -284,9 +284,7 @@ left unset: an explicit value always wins. A value from the environment is trimm
 Python's `str.strip()` rules), a blank one counts as unset, and one that is not UTF-8 is a
 `Config` error naming the variable. An explicit key or default model that is blank is refused
 instead of sent. Trailing slashes come off the base URL, and a path prefix is kept
-(`https://example.test/prefix///` sends to `https://example.test/prefix/v1/systemone`). An
-`http://` base URL is accepted but sends the API key unencrypted: use one only for a local proxy
-or a test server. The
+(`https://example.test/prefix///` sends to `https://example.test/prefix/v1/systemone`). The
 per-attempt deadline runs from the first byte sent to the last byte received: a multi-megabyte
 `state` on a slow link can exceed 10 s and be retried, so raise the deadline for large states.
 
@@ -394,10 +392,6 @@ A header value is printed as `***` when its name is `authorization`, `proxy-auth
 when the value is flagged sensitive (the SDK flags `Authorization`). A `state` may carry personal
 data, so bodies appear only at `TRACE`.
 
-`TYPESAFE_LOG_LEVEL`, which sets the Python SDK's logger level, is **not honoured**: a library
-must not install or configure a subscriber for the application, so the level is set by the
-application's own filter on the `typesafe_sdk` target.
-
 ## Security notes
 
 - **The API key** is held as a `secrecy::SecretString` until it becomes the `Authorization`
@@ -432,7 +426,7 @@ application's own filter on the `typesafe_sdk` target.
   base URL, and on an `https` one only when the server picks HTTP/1.1 through ALPN; the default
   transport cannot insist on HTTP/1.1 over TLS.
 - **Responses are bounded.** A body is read under a 16 MiB cap, and a JSON document nested deeper
-  than 16 levels is refused before it reaches the parser (see below).
+  than 16 levels is refused before it reaches the parser.
 
 ## Performance notes
 
@@ -448,7 +442,6 @@ second identical call, 64-bit targets.
   between calls. A scratch that grew past **8 MiB** is dropped after its call, so a `state` whose
   encoding needs more (a string of about 1.33 MiB or more) pays a first call's allocations on
   every call.
-- **Response cap.** 16 MiB unless `max_response_bytes` says otherwise; a body over it is not read.
 - **Debug builds and the default transport.** Tokio boxes a future larger than 2,048 bytes when
   it is spawned or blocked on in a debug build (16,384 in release). A System One call over the
   default transport is a 2,344-byte future, so a debug build that spawns calls pays one more
@@ -470,13 +463,6 @@ second identical call, 64-bit targets.
   `RUSTFLAGS="-C target-cpu=x86-64-v3"` (AVX2) or `-C target-cpu=native`; the binary then does not
   run on CPUs without those features. Every number in the ledger was taken **without** such a
   flag, which is what a default build gets.
-- **Non-finite floats encode as `null`**, as `serde_json` writes them (the Python SDK writes the
-  non-JSON literals `NaN` and `Infinity`). A `state` that is itself a non-finite float therefore
-  encodes as `null` and is refused as an `InvalidRequest`.
-- **Nesting depth.** A response nested deeper than 16 levels is a `ResponseValidation` error; an
-  error body nested deeper than 16 is not parsed and becomes the raw-text message. The parser has
-  no recursion limit of its own and aborts the process on very deep input, so the depth is
-  checked on the raw bytes first.
 
 ## Testing
 
@@ -490,7 +476,7 @@ key's account when both `TYPESAFE_LIVE_TESTS=1` and `TYPESAFE_API_KEY` are set a
 reaches them: `cargo test --workspace`, `cargo nextest run --workspace`, or anything naming
 `-p typesafe-sdk-rust-live-tests`. Without either variable they fail, never skip, before any
 request is made, so a key exported for other work does not make `--workspace` bill anyone; it
-makes those four tests fail instead. Run them only on purpose:
+makes those tests fail instead. Run them only on purpose:
 
 ```sh
 TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rust-live-tests
@@ -512,7 +498,7 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | Python SDK | This crate | Why |
 | --- | --- | --- |
 | Synchronous `TypeSafeClient` | No blocking client; async only | Scope: one client, on Tokio. Upstream runs most client tests against both its clients; this crate ports the async half. |
-| Timeout per httpx phase; `httpx.Timeout` objects | One total deadline per attempt (default 10 s), an optional `connect_timeout`, and `no_timeout()` | One timer per attempt. A multi-megabyte upload on a slow link can exceed 10 s and be retried: raise the deadline for a large `state`. |
+| Timeout per httpx phase; `httpx.Timeout` objects | One total deadline per attempt (default 10 s), an optional `connect_timeout`, and `no_timeout()` | One timer per attempt. |
 | `http_client.timeout` takes precedence | A custom transport owns its own timeouts; the SDK deadline still wraps each attempt | The transport is the caller's service, configured by the caller. |
 | `http_client=` or `transport=`, mutually exclusive | One builder with two terminal methods: `build()` gives the default transport, `build_with_service(s)` a custom one; `add_root_certificate`, `http_version` and `connect_timeout` are a `Config` error with a custom one | A client needs a key and a base URL whatever sends the bytes; a setting that cannot apply is refused, never ignored. |
 | `.nouls` / `.choices` / `.scores` as cached dict copies | Iterators that filter without copying | Nothing to cache and nothing to leave out of serialization. |
@@ -524,6 +510,7 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | Frozen pydantic models | Private fields with getters | Immutable by construction. |
 | Unknown fields rejected on typed questions; `RetryPolicy` field types checked at run time | Not representable: builders, `u32`, `Duration`; the jitter range and its finiteness are still checked | The type system does the check. |
 | `str` subclasses and abstract `Mapping` / `Sequence` inputs | `impl Serialize`, `impl AsRef<str>`, `impl Into<Cow<str>>` and iterators | Generics. |
+| Non-finite floats are written as `NaN` and `Infinity` | Written as `null`, as `serde_json` writes them; a `state` that is itself a non-finite float is refused as an `InvalidRequest` | `NaN` and `Infinity` are not JSON. |
 | `TYPESAFE_LOG_LEVEL` sets the logger level | Not read | A library must not configure the application's subscriber; filter the `typesafe_sdk` target instead. |
 | DEBUG logs full bodies | `DEBUG` logs the body length; `TRACE` logs the body | A `state` may carry personal data. |
 | `X-TypeSafe-SDK: typesafe-sdk/<version>` | `typesafe-sdk-rust/<version>`, and `X-TypeSafe-Runtime: rust (<os>; <arch>)` | A port must not be counted as the official SDK. |

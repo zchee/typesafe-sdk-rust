@@ -14,14 +14,17 @@ A panic, an abort (a stack overflow included), an input that runs past
 ## Running
 
 This directory is a cargo workspace of its own and is excluded from the
-repository's. CI compiles it (`cargo check`, the "Fuzz targets compile" step)
-and checks its dependency policy against the repository's `deny.toml`
-(`cargo deny --manifest-path fuzz/Cargo.toml check`, the "Dependency policy
-of the fuzz targets" step). That policy carries one crate-scoped license
-exception: `libfuzzer-sys` may carry NCSA, the license of the libFuzzer C++
-runtime it bundles; no other crate may. CI never runs a target: that needs the
-nightly toolchain (for the sanitizer flags cargo-fuzz passes) and
-`cargo install cargo-fuzz --locked`:
+repository's. `cargo check --manifest-path fuzz/Cargo.toml` works on the
+stable toolchain (it builds libFuzzer's C++ runtime, so a C++ compiler is
+needed). CI runs it on Linux (the "Fuzz targets compile" step), so that a
+change to the SDK's hidden `__internals` seam cannot break the targets
+unnoticed, and checks the directory's dependency policy against the
+repository's `deny.toml` (`cargo deny --manifest-path fuzz/Cargo.toml check`,
+the "Dependency policy of the fuzz targets" step). That policy carries one
+crate-scoped license exception: `libfuzzer-sys` may carry NCSA, the license of
+the libFuzzer C++ runtime it bundles; no other crate may. CI never runs a
+target: that needs the nightly toolchain (for the sanitizer flags cargo-fuzz
+passes) and `cargo install cargo-fuzz --locked`:
 
 ```sh
 cd fuzz
@@ -34,11 +37,6 @@ The first corpus directory is where libFuzzer writes the inputs it finds, so
 it is a scratch directory; `corpus/<target>` holds the committed seeds and is
 only read. A crash reproducer lands in `artifacts/<target>/`, which is
 ignored by git: keep it and report it rather than committing it.
-
-`cargo check --manifest-path fuzz/Cargo.toml` works on the stable toolchain
-too (it builds libFuzzer's C++ runtime, so a C++ compiler is needed); CI runs
-it on Linux so that a change to the SDK's hidden `__internals` seam cannot
-break the targets unnoticed.
 
 ## Seeds
 

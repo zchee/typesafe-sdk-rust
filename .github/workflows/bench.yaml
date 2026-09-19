@@ -3,8 +3,6 @@ name: Benchmarks
 # CodSpeed compares a pull request's instruction counts with those of the
 # branch it targets, so it needs both: runs on `main` are the baseline of
 # its regression reports, and runs on pull requests are what it reports on.
-# The `push` trigger could only be added once the CodSpeed app was installed
-# and a pull request run had uploaded; run 35429672326 did both.
 on:
   push:
     branches: [main]
@@ -33,12 +31,9 @@ jobs:
   # scheduler rather than the SDK (see `benches/loopback.rs`).
   codspeed:
     name: codspeed
-    # This job alone is not on ubuntu-26.04. CodSpeed's runner (the one
-    # CodSpeedHQ/action@v5 installs, 5.2.1) aborts there with "Unsupported
-    # system" (run 35428694878): its valgrind setup accepts Ubuntu 22.04 and
-    # 24.04 and Debian 12, on x86_64 and aarch64, and nothing else
-    # (CodSpeedHQ/runner, src/executor/valgrind/setup.rs; the same in runner
-    # 5.3.1). So the job uses the newest GitHub-hosted image the runner
+    # This job alone is not on ubuntu-26.04: CodSpeed's runner aborts there
+    # with "Unsupported system", as it supports only Ubuntu 22.04 and 24.04
+    # and Debian 12, so the job uses the newest GitHub-hosted image it
     # supports. Go back to ubuntu-26.04 once CodSpeed's runner supports it.
     runs-on: ubuntu-24.04
     permissions:
@@ -46,17 +41,7 @@ jobs:
       # CodSpeed authenticates the upload through GitHub's OpenID Connect
       # token, so no upload token is stored in the repository.
       id-token: write
-    # This is the one job that can mint an OIDC token, and it runs two
-    # third-party actions pinned at a major tag (taiki-e/install-action@v2,
-    # CodSpeedHQ/action@v5), as every workflow here does: fixes within the
-    # major arrive without an edit, but a re-pointed or compromised tag runs
-    # here unreviewed, with the token's audience (CodSpeed, able to forge a
-    # benchmark upload) and read access to the repository. A commit-SHA pin
-    # would close that and turn every upstream fix into a manual bump.
     steps:
-      # No later step fetches or pushes through git with the job's token, so
-      # it is not left in `.git/config`, where every build script and proc
-      # macro the job compiles could read it.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false

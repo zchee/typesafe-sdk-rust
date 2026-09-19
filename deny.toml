@@ -1,10 +1,7 @@
-# cargo-deny policy for the workspace, the fuzz targets under fuzz/ and the
-# spike crates under spikes/.
+# cargo-deny policy for the workspace and for the fuzz targets under fuzz/.
 #
-# Run at the workspace root for the SDK graph, with
-# `--manifest-path fuzz/Cargo.toml` for the fuzz targets' graph, and with
-# `--manifest-path spikes/deps-probe/Cargo.toml` for the full runtime graph
-# before the SDK's own dependency list catches up with it.
+# CI runs it at the workspace root for the SDK graph and with
+# `--manifest-path fuzz/Cargo.toml` for the fuzz targets' graph.
 
 [graph]
 # Restricting the graph to the supported triples keeps platform-only crates
@@ -45,9 +42,7 @@ allow = [
 confidence-threshold = 0.8
 # One crate, one license, the owner's decision of 2026-09-19; the allow list
 # above stays as it is. libfuzzer-sys bundles the libFuzzer C++ runtime, which
-# is under NCSA. The exception is crate-scoped, so it does not by itself keep
-# libfuzzer-sys out of a published crate's graph; the `[bans] deny` entry for
-# libfuzzer-sys below does.
+# is under NCSA.
 exceptions = [
     { allow = ["NCSA"], crate = "libfuzzer-sys" },
 ]
