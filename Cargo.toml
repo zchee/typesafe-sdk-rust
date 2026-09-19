@@ -61,9 +61,7 @@ hyper-util = { version = "0.1.20", features = [
     "http2",
     "tokio",
 ] }
-# The derive's parser and code generator. syn 3 is the major the rest of the
-# graph (serde_derive, thiserror-impl) already builds, so the derive adds no
-# second copy; only the features it uses are named.
+# The derive's parser and code generator.
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 # rustls' defaults are exactly the wanted set: aws_lc_rs, logging,
@@ -73,6 +71,9 @@ rustls-platform-verifier = "0.7.0"
 secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 sonic-rs = "0.5.10"
+# syn 3 is the major the rest of the graph (serde_derive, thiserror-impl)
+# already builds, so the derive adds no second copy; only the features it
+# uses are named.
 syn = { version = "3.0.6", default-features = false, features = [
     "derive",
     "parsing",
