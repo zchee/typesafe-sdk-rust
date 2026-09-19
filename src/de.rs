@@ -421,13 +421,14 @@ impl Target for Option<Answer> {
             Some(Seen::Known(Kind::Choice)) => members.choice().map(|answer| Some(answer.into())),
             Some(Seen::Known(Kind::Score)) => members.score().map(|answer| Some(answer.into())),
             Some(Seen::Unknown(kind)) => {
-                // The question name and the type name are the caller's and the
-                // server's vocabulary, not data, so they are safe to log; the
-                // answer's members are not logged.
+                // Both names are the server's text - the answer's key and its
+                // `type` - so both are escaped and cut before they reach a log
+                // line; the answer's members are not logged at all.
                 #[cfg(feature = "tracing")]
                 tracing::warn!(
-                    question = name,
-                    answer_type = %kind,
+                    target: crate::telemetry::TARGET,
+                    question = %crate::telemetry::ServerName(name),
+                    answer_type = %crate::telemetry::ServerName(&kind),
                     "ignoring an answer of a type this version does not model; \
                      the raw body still carries it"
                 );

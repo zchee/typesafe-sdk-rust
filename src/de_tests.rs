@@ -1337,8 +1337,9 @@ mod warning {
 
     use super::*;
 
-    /// One recorded event: its level and its fields rendered as text.
-    type Recorded = (Level, Vec<(String, String)>);
+    /// One recorded event: its level, its target and its fields rendered as
+    /// text.
+    type Recorded = (Level, String, Vec<(String, String)>);
 
     /// Every event recorded while it is the default subscriber.
     #[derive(Clone, Default)]
@@ -1372,10 +1373,11 @@ mod warning {
         fn event(&self, event: &Event<'_>) {
             let mut fields = Fields(Vec::new());
             event.record(&mut fields);
-            self.0
-                .lock()
-                .expect("the recorder is not poisoned")
-                .push((*event.metadata().level(), fields.0));
+            self.0.lock().expect("the recorder is not poisoned").push((
+                *event.metadata().level(),
+                event.metadata().target().to_owned(),
+                fields.0,
+            ));
         }
 
         fn enter(&self, _: &span::Id) {}
@@ -1404,8 +1406,9 @@ mod warning {
         assert_eq!(response.answers().names().collect::<Vec<_>>(), ["spam"]);
         let events = recorder.0.lock().expect("the recorder is not poisoned").clone();
         assert_eq!(events.len(), 1, "{events:?}");
-        let (level, fields) = &events[0];
+        let (level, target, fields) = &events[0];
         assert_eq!(*level, Level::WARN);
+        assert_eq!(target, "typesafe_sdk", "the one target every event of the crate has");
         assert_eq!(
             fields,
             &[
@@ -1419,5 +1422,85 @@ mod warning {
             ]
         );
         assert!(!format!("{events:?}").contains("secret-value"), "{events:?}");
+    }
+
+    /// The line a plain-text subscriber writes for `event`: the level, the
+    /// target and every field's text as it was recorded, which for a `%`
+    /// field is its `Display`, unescaped - what `tracing-subscriber`'s `fmt`
+    /// layer does with ANSI colours off.
+    fn plain_line((level, target, fields): &Recorded) -> String {
+        let mut line = format!("{level} {target}:");
+        for (name, value) in fields {
+            if name == "message" {
+                line.push_str(&format!(" {value}"));
+            } else {
+                line.push_str(&format!(" {name}={value}"));
+            }
+        }
+        line
+    }
+
+    #[test]
+    fn a_skipped_answer_cannot_forge_or_disfigure_the_log_line_it_is_warned_on() {
+        let recorder = Recorder::default();
+        // Each name holds a newline that would start a forged line, an ESC
+        // that would clear the screen, a right-to-left override that would
+        // reverse what follows, a backslash spelling an escape, and far more
+        // than 128 characters.
+        let question = format!(
+            "q\n2026-09-19T00:00:00Z ERROR typesafe_sdk: FORGED\u{1b}[2J\u{202e}\\u{{1b}}{}",
+            "Q".repeat(5_000)
+        );
+        let kind = format!("zz\n\u{1b}[31m\u{202e}{}", "A".repeat(5_000));
+        let body = format!(
+            r#"{{"model":"m","usage":{{}},"answers":{{{question}:{{"type":{kind},"value":"secret-value"}},"spam":{{"type":"noul","noul":1}}}}}}"#,
+            question = serde_json::to_string(&question).expect("a string serializes"),
+            kind = serde_json::to_string(&kind).expect("a string serializes"),
+        );
+
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let response =
+            tracing::subscriber::with_default(recorder.clone(), || decode(body.as_bytes()));
+
+        assert_eq!(response.answers().names().collect::<Vec<_>>(), ["spam"]);
+        let events = recorder.0.lock().expect("the recorder is not poisoned").clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        let (level, target, fields) = &events[0];
+        assert_eq!(*level, Level::WARN);
+        assert_eq!(target, "typesafe_sdk");
+
+        // The escaped start of each name, then as many of its filler
+        // characters as fit in 128, then the ellipsis that marks the cut.
+        let question_start =
+            r"q\n2026-09-19T00:00:00Z ERROR typesafe_sdk: FORGED\u{1b}[2J\u{202e}\\u{1b}";
+        let kind_start = r"zz\n\u{1b}[31m\u{202e}";
+        let question_shown =
+            format!("{question_start}{}\u{2026}", "Q".repeat(128 - question_start.chars().count()));
+        let kind_shown =
+            format!("{kind_start}{}\u{2026}", "A".repeat(128 - kind_start.chars().count()));
+        let field = |name: &str| {
+            fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("no `{name}` field in {fields:?}"))
+        };
+        assert_eq!(field("question"), question_shown);
+        assert_eq!(field("answer_type"), kind_shown);
+        for name in ["question", "answer_type"] {
+            let value = field(name);
+            assert_eq!(
+                value.chars().count(),
+                129,
+                "{name} is cut at 128 plus the ellipsis: {value}"
+            );
+        }
+
+        let line = plain_line(&events[0]);
+        assert_eq!(line.lines().count(), 1, "one event, one line: {line:?}");
+        for forbidden in ['\n', '\r', '\u{1b}', '\u{202e}'] {
+            assert!(!line.contains(forbidden), "{forbidden:?} reached the line: {line:?}");
+        }
+        assert!(!line.contains("secret-value"), "{line:?}");
     }
 }

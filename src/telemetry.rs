@@ -46,9 +46,10 @@ use crate::{
     text::{Backslash, MAX_NAME_CHARS, SafeText},
 };
 
-/// The target every event of this crate is emitted under.
+/// The target every event of this crate is emitted under, those raised
+/// outside this module included.
 #[cfg(feature = "tracing")]
-const TARGET: &str = "typesafe_sdk";
+pub(crate) const TARGET: &str = "typesafe_sdk";
 
 /// One request, as the events about it name it.
 #[derive(Clone, Copy)]
@@ -281,6 +282,25 @@ impl fmt::Display for RequestId<'_> {
             }
             None => formatter.write_str("-"),
         }
+    }
+}
+
+/// A name the server chose - an answer's key, an answer's `type` - as an
+/// event field: escaped as a field path is, a backslash doubled so that a
+/// name spelling `\u{1b}` cannot pass for one holding the character, and cut
+/// at 128 characters. JSON lets a server put a newline, an ESC or a bidi
+/// override into any string, and a plain-text subscriber writes a field's
+/// `Display` as it is, so a raw name could start a forged log line or
+/// recolour a terminal. Nothing is built unless an event is recorded.
+#[cfg(feature = "tracing")]
+pub(crate) struct ServerName<'a>(pub(crate) &'a str);
+
+#[cfg(feature = "tracing")]
+impl fmt::Display for ServerName<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut shown = SafeText::new(MAX_NAME_CHARS, Backslash::Double);
+        shown.untrusted(self.0, MAX_NAME_CHARS);
+        formatter.write_str(&shown.into_string())
     }
 }
 

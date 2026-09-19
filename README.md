@@ -363,8 +363,8 @@ pings every 30 s.
 
 With the `tracing` feature (on by default) the SDK emits [`tracing`](https://docs.rs/tracing)
 events and never installs a subscriber: where the events go is the application's choice. Every
-event's target starts with `typesafe_sdk`, so one filter directive selects them all, for
-example with `tracing-subscriber`'s `EnvFilter`:
+event has the target `typesafe_sdk`, so one filter directive selects them all, for example with
+`tracing-subscriber`'s `EnvFilter`:
 
 ```text
 RUST_LOG=typesafe_sdk=info
@@ -373,7 +373,7 @@ RUST_LOG=typesafe_sdk=info
 | Level | What is logged |
 | --- | --- |
 | `INFO` | One line per attempt: `GET https://api.typesafe.ai/v1/models <- 200 in 12ms (request req_1)` for a response of any status, or `... <- timeout` (a fixed word per failure kind, never the error's text) for an attempt that got none; `POST ... retry 1` before a retry. |
-| `WARN` | An answer of a type this version does not model was skipped (question name and type only; target `typesafe_sdk::de`). |
+| `WARN` | An answer of a type this version does not model was skipped (question name and type only, each escaped and cut at 128). |
 | `DEBUG` | Each request as it leaves and each response as it arrives: method, endpoint, retry count, status, request id, elapsed time, the headers with secrets redacted, and the **body length**. |
 | `TRACE` | The request and response **bodies**, with control and format characters escaped, uncut. |
 
@@ -394,10 +394,11 @@ application's own filter on the `typesafe_sdk` target.
 - **Server text is escaped and cut.** Every message read from a response body (whichever member
   it came from, or the body itself when no member holds one) has its control characters and
   text-hiding format characters written as Rust escapes (`\n`, `\u{1b}`, `\u{202e}`) and is cut
-  at **200** characters plus U+2026. The request id and the error type are shown escaped and cut
-  at **128**; a field path's names at 128 each and the whole path at **320**; a connection
-  error's chain (at most 8 links) at 200. The raw data stays reachable through `body()`,
-  `body_text()`, `body_json()`, `request_id()` and `error_type()`.
+  at **200** characters plus U+2026. The request id, the error type, and the question name and
+  answer type of the skipped-answer `WARN` are shown escaped and cut at **128**; a field path's
+  names at 128 each and the whole path at **320**; a connection error's chain (at most 8 links) at
+  200. The raw data stays reachable through `body()`, `body_text()`, `body_json()`,
+  `request_id()` and `error_type()`.
 - **An API error can echo your `state`.** A 422 may repeat part of the request in its message,
   so the `Display` of an API error can carry up to 200 escaped characters of `state`. A caller
   whose `state` is sensitive should log `error.kind()` or the status rather than the whole error.
