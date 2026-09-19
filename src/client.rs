@@ -396,10 +396,9 @@ impl ClientBuilder {
     /// deadline or the response limit is zero; when a default header is not a
     /// valid header; when the [`user_agent_product`](Self::user_agent_product)
     /// is not a product token; when an environment variable is not UTF-8; or
-    /// when the
-    /// certificate verifier cannot be built, for an added root that is not a
-    /// certificate among other causes. No message repeats the key, a header
-    /// value or the URL.
+    /// when the certificate verifier cannot be built, for an added root that
+    /// is not a certificate among other causes. No message repeats the key, a
+    /// header value or the URL.
     pub fn build(self) -> Result<Client<HyperTransport>, Error> {
         self.build_with_env(|name: &str| std::env::var_os(name))
     }
