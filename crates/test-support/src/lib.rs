@@ -355,18 +355,12 @@ async fn serve_connection(
         (Protocol::Http1, _) => {
             let connection = hyper::server::conn::http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), service);
-            tokio::select! {
-                _ = connection => {}
-                _ = shutdown.changed() => {}
-            }
+            until_shutdown(connection, &mut shutdown).await;
         }
         (Protocol::H2c, _) => {
             let connection = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(stream), service);
-            tokio::select! {
-                _ = connection => {}
-                _ = shutdown.changed() => {}
-            }
+            until_shutdown(connection, &mut shutdown).await;
         }
         (Protocol::Http2Tls, Some(acceptor)) => {
             // A rejected handshake is the expected outcome of the
@@ -376,12 +370,17 @@ async fn serve_connection(
             };
             let connection = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
                 .serve_connection(TokioIo::new(stream), service);
-            tokio::select! {
-                _ = connection => {}
-                _ = shutdown.changed() => {}
-            }
+            until_shutdown(connection, &mut shutdown).await;
         }
         (Protocol::Http2Tls, None) => {}
+    }
+}
+
+/// Drives `connection` until it ends or the server shuts down.
+async fn until_shutdown(connection: impl Future, shutdown: &mut watch::Receiver<bool>) {
+    tokio::select! {
+        _ = connection => {}
+        _ = shutdown.changed() => {}
     }
 }
 
