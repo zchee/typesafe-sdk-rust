@@ -106,9 +106,10 @@ jobs:
       # only compiles because another one happens to be on is a break for the
       # caller who enables it alone. `--no-dev-deps` is what exposes it -
       # a feature a dev-dependency enables hides a missing one in the real
-      # dependencies.
+      # dependencies. Clippy rather than check, with warnings denied, so that
+      # code dead in one of the combinations between none and all fails too.
       - name: Feature combinations
-        run: cargo hack check --workspace --feature-powerset --no-dev-deps
+        run: cargo hack clippy --workspace --feature-powerset --no-dev-deps -- -D warnings
 
       - name: Dependency policy
         run: cargo deny check
