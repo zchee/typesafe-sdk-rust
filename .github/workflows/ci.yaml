@@ -126,6 +126,13 @@ jobs:
       - name: Dependency policy
         run: cargo deny check
 
+      # The fuzz targets are a workspace of their own with a lock file of
+      # their own, which the step above never reads. The same deny.toml
+      # judges it; its one crate-scoped license exception (NCSA, for
+      # libfuzzer-sys) is used only by this graph.
+      - name: Dependency policy of the fuzz targets
+        run: cargo deny --manifest-path fuzz/Cargo.toml check
+
       # A link to an item that is private, renamed or gone still renders; it
       # just renders as text that goes nowhere, which nobody notices in a
       # review. Denying rustdoc's warnings is what turns that into a failure.

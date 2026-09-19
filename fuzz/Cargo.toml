@@ -1,8 +1,9 @@
 # libFuzzer targets for the two parsers that read bytes a server chose: the
 # response decoders and the `Retry-After` parser. The crate has a workspace of
-# its own and is excluded from the root one, so the repository's gates never
-# build it: running a target needs the nightly toolchain and a sanitizer,
-# which none of them use. It is never published.
+# its own and is excluded from the root one. CI only compiles it and checks
+# its dependency policy (`cargo deny --manifest-path fuzz/Cargo.toml check`);
+# running a target needs the nightly toolchain and a sanitizer. It is never
+# published.
 [package]
 name = "typesafe-sdk-rust-fuzz"
 version = "0.0.0"

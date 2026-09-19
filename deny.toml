@@ -1,6 +1,8 @@
-# cargo-deny policy for the workspace and for the spike crates under spikes/.
+# cargo-deny policy for the workspace, the fuzz targets under fuzz/ and the
+# spike crates under spikes/.
 #
-# Run at the workspace root for the SDK graph, and with
+# Run at the workspace root for the SDK graph, with
+# `--manifest-path fuzz/Cargo.toml` for the fuzz targets' graph, and with
 # `--manifest-path spikes/deps-probe/Cargo.toml` for the full runtime graph
 # before the SDK's own dependency list catches up with it.
 
@@ -41,11 +43,22 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.8
-exceptions = []
+# One crate, one license, the owner's decision of 2026-09-19; the allow list
+# above stays as it is. libfuzzer-sys bundles the libFuzzer C++ runtime, which
+# is under NCSA. It is reachable only from the unpublished fuzz/ workspace
+# (checked with `--manifest-path fuzz/Cargo.toml`), never from the graph of a
+# published crate.
+exceptions = [
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
 # The allow list is a policy statement, not an inventory of what the current
 # lock file happens to contain, so a listed license nothing uses today is not
 # a finding.
 unused-allowed-license = "allow"
+# The same config checks the root workspace, whose graph has no libfuzzer-sys,
+# and fuzz/, whose graph has it, so the exception above is unused in one of
+# the two runs by design.
+unused-license-exception = "allow"
 
 [licenses.private]
 # The workspace's own unpublished members (test-support, spikes) carry the
