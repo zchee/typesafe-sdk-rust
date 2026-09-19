@@ -303,13 +303,6 @@ fn a_chain_longer_than_eight_links_is_cut() {
     assert_eq!(rendered, format!("Connection error: {}", ["link"; 8].join(": ")));
 }
 
-#[test]
-fn a_body_over_the_limit_reads_the_same_for_either_status() {
-    // A failure response carries the sentence as its message; a success
-    // response is its own kind, which renders the same sentence.
-    assert_eq!(too_large_message(1024), Error::response_too_large(1024).to_string());
-}
-
 /// An error with a message of its own and a cause under it.
 #[derive(Debug)]
 struct Wrapper<E> {

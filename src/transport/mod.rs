@@ -402,7 +402,7 @@ where
                 Bytes::new(),
                 headers,
                 Some(endpoint(exchange)),
-                too_large_message(exchange.max_response_bytes),
+                Error::response_too_large(exchange.max_response_bytes).to_string(),
             )
             .into());
         }
@@ -510,13 +510,6 @@ fn connection_message(error: &(dyn StdError + 'static)) -> String {
         link = current.source();
     }
     message.into_string()
-}
-
-/// The sentence for a failure response whose body was over the limit; a
-/// success response over it is [`Error::response_too_large`], which renders
-/// the same sentence.
-fn too_large_message(limit: usize) -> String {
-    format!("The response body exceeded the limit of {limit} bytes and was not read.")
 }
 
 /// The endpoint of `exchange` as an error names it.
