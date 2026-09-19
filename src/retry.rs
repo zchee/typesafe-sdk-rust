@@ -186,6 +186,13 @@ impl RetryPolicy {
 
     /// The statuses whose API errors are retried; [`StatusSet::DEFAULT`]
     /// unless set.
+    ///
+    /// A status counts only for a response the SDK reports as
+    /// [`ErrorKind::Api`]. A success status in the set has no effect: a
+    /// success response whose body does not decode is an
+    /// [`ErrorKind::ResponseValidation`] error and is not retried for its
+    /// status, since the same body would come back; a
+    /// [`predicate`](Self::predicate) can still ask for it.
     #[must_use]
     pub fn http_statuses(mut self, statuses: StatusSet) -> Self {
         self.http_statuses = statuses;
@@ -393,6 +400,10 @@ const STATUS_LIMIT: u16 = 640;
 /// It holds 0 to 639, which covers every status HTTP defines (100 to 599).
 /// A status of 640 or more is never contained, and inserting one does
 /// nothing and returns `false`.
+///
+/// In a [`RetryPolicy`] the set is asked only about responses reported as
+/// [`ErrorKind::Api`], so a success status in it has no effect; see
+/// [`RetryPolicy::http_statuses`].
 ///
 /// ```
 /// use typesafe_sdk::StatusSet;

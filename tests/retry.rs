@@ -330,6 +330,32 @@ async fn a_response_that_does_not_decode_is_retried_only_when_the_predicate_asks
     assert_eq!(server.request_count(), 1 + 3, "retried because the predicate asked");
 }
 
+/// A success status in the policy's set does not make a response that did
+/// not decode retryable: the set is asked about API errors only. The
+/// predicate still can ask for it.
+#[tokio::test]
+async fn a_success_status_in_the_set_does_not_retry_a_response_that_does_not_decode() {
+    let server = serve(|_, _| respond(200, b"[]", false)).await;
+    let client = builder(&server).build().expect("the client builds");
+    let mut statuses = StatusSet::DEFAULT;
+    statuses.insert(200);
+    let with_200 = || at_once().http_statuses(statuses);
+
+    let error =
+        client.models().list().retry(with_200()).send().await.expect_err("not a model list");
+    let ErrorKind::ResponseValidation(invalid) = error.kind() else {
+        panic!("a response-validation error was expected: {error:?}");
+    };
+    assert_eq!(invalid.status(), StatusCode::OK);
+    assert_eq!(server.request_count(), 1, "a 2xx in the set is not a reason to retry");
+
+    let asking =
+        with_200().predicate(|error| matches!(error.kind(), ErrorKind::ResponseValidation(_)));
+    let error = client.models().list().retry(asking).send().await.expect_err("never decodes");
+    assert!(matches!(error.kind(), ErrorKind::ResponseValidation(_)), "{error:?}");
+    assert_eq!(server.request_count(), 1 + 3, "retried because the predicate asked");
+}
+
 /// A deadline that passes is retried on the real clock: 50 ms against a
 /// handler held on a channel, twice, then answered.
 #[tokio::test]
