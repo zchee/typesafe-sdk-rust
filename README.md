@@ -463,9 +463,6 @@ second identical call, 64-bit targets.
   `RUSTFLAGS="-C target-cpu=x86-64-v3"` (AVX2) or `-C target-cpu=native`; the binary then does not
   run on CPUs without those features. Every number in the ledger was taken **without** such a
   flag, which is what a default build gets.
-- **Non-finite floats encode as `null`**, as `serde_json` writes them (the Python SDK writes the
-  non-JSON literals `NaN` and `Infinity`). A `state` that is itself a non-finite float therefore
-  encodes as `null` and is refused as an `InvalidRequest`.
 
 ## Testing
 
@@ -513,6 +510,7 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | Frozen pydantic models | Private fields with getters | Immutable by construction. |
 | Unknown fields rejected on typed questions; `RetryPolicy` field types checked at run time | Not representable: builders, `u32`, `Duration`; the jitter range and its finiteness are still checked | The type system does the check. |
 | `str` subclasses and abstract `Mapping` / `Sequence` inputs | `impl Serialize`, `impl AsRef<str>`, `impl Into<Cow<str>>` and iterators | Generics. |
+| Non-finite floats are written as `NaN` and `Infinity` | Written as `null`, as `serde_json` writes them; a `state` that is itself a non-finite float is refused as an `InvalidRequest` | `NaN` and `Infinity` are not JSON. |
 | `TYPESAFE_LOG_LEVEL` sets the logger level | Not read | A library must not configure the application's subscriber; filter the `typesafe_sdk` target instead. |
 | DEBUG logs full bodies | `DEBUG` logs the body length; `TRACE` logs the body | A `state` may carry personal data. |
 | `X-TypeSafe-SDK: typesafe-sdk/<version>` | `typesafe-sdk-rust/<version>`, and `X-TypeSafe-Runtime: rust (<os>; <arch>)` | A port must not be counted as the official SDK. |
