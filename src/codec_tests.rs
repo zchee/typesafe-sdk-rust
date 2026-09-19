@@ -851,6 +851,34 @@ fn a_raw_value_round_trips_through_another_codec_with_the_same_data() {
 }
 
 #[test]
+fn debug_escapes_text_hiding_characters_that_display_keeps() {
+    // (the character, its escape) - each allowed raw inside a JSON string.
+    let rows = [
+        ('\u{202e}', r"\u{202e}"),
+        ('\u{2028}', r"\u{2028}"),
+        ('\u{2029}', r"\u{2029}"),
+        ('\u{0085}', r"\u{85}"),
+    ];
+    for (character, escape) in rows {
+        let text = format!(r#"{{"x":"a{character}b\n\\c"}}"#);
+        let raw = RawJson::from_text(text.clone());
+
+        let debugged = format!("{raw:?}");
+
+        assert_eq!(
+            debugged,
+            format!(r#"{{"x":"a{escape}b\n\\c"}}"#),
+            "U+{:04X}: the character is escaped, the JSON's own escapes are kept",
+            u32::from(character)
+        );
+        assert!(!debugged.contains(character), "U+{:04X} raw in {debugged}", u32::from(character));
+        assert_eq!(raw.to_string(), text, "Display is byte-exact");
+        assert_eq!(raw.as_str(), text, "as_str is byte-exact");
+        assert_eq!(sdk_encoded(&raw), text, "serialization is byte-exact");
+    }
+}
+
+#[test]
 fn numbers_keep_their_value_across_the_transcode() {
     let raw = RawJson::from_text(NUMBERS.to_owned());
     let expected = Numbers { tiny: 1e-7, tenth: 0.1, largest: u64::MAX, smallest: i64::MIN };

@@ -1316,10 +1316,18 @@ impl RawJson {
 }
 
 impl fmt::Debug for RawJson {
-    /// Prints the JSON text itself; the default derive would wrap it in a
-    /// struct with one field and quote it a second time.
+    /// Prints the JSON text itself, with control characters and the format
+    /// characters that reorder or hide text written as Rust escapes: JSON
+    /// allows those raw inside a string, the text usually came from a server,
+    /// and a `{:?}` usually ends up in a log line. Backslashes are kept as
+    /// they are, since they are the JSON's own escapes. `Display`,
+    /// [`as_str`](RawJson::as_str) and serialization give the text byte for
+    /// byte. The default derive would wrap the text in a struct with one
+    /// field and quote it a second time.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.text)
+        let mut shown = SafeText::new(usize::MAX, Backslash::Keep);
+        shown.untrusted(&self.text, usize::MAX);
+        formatter.write_str(&shown.into_string())
     }
 }
 
