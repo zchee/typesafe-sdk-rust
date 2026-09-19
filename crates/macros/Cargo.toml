@@ -1,0 +1,33 @@
+# The derive for `typesafe-sdk-rust`. Callers never name this package: the
+# main crate re-exports the derive behind its `macros` feature and depends on
+# this package with an exact version, so the two are always released and
+# resolved together.
+[package]
+name = "typesafe-sdk-rust-macros"
+version = "0.1.0"
+description = "#[derive(QuestionSet)] for typesafe-sdk-rust: TypeSafe AI questions serialized at compile time"
+readme = "README.md"
+keywords = ["typesafe", "ai", "derive", "sdk"]
+categories = ["api-bindings", "development-tools::procedural-macro-helpers"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# The reference the escaper is compared with. It is the main crate's codec,
+# taken directly: depending on the main crate would make a cycle through this
+# package.
+sonic-rs = { workspace = true }
+
+[lints]
+workspace = true

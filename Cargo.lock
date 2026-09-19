@@ -1619,7 +1619,19 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
+ "typesafe-sdk-rust-macros",
  "typesafe-sdk-rust-test-support",
+]
+
+[[package]]
+name = "typesafe-sdk-rust-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "proptest",
+ "quote",
+ "sonic-rs",
+ "syn 3.0.6",
 ]
 
 [[package]]
