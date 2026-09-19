@@ -68,6 +68,24 @@ jobs:
       - name: Doctests
         run: cargo test --doc --all-features
 
+      # trybuild runs a cargo of its own, which never sees the `--config`
+      # flags of the cargo that started the test, so a contributor who moves
+      # the target directory with `--config` gets the derive test's other
+      # path: it runs itself again with CARGO_TARGET_DIR set to where it was
+      # built. The steps above never take that path (trybuild finds the
+      # default directory too), so this one does, on each platform, and
+      # checks that it did: a re-run prints libtest's header twice. bash on
+      # every runner, so the quoting is the same on Windows; the directory is
+      # a TOML literal string, whose backslashes stay backslashes.
+      - name: The derive's compile-fail cases under a target dir set by --config
+        shell: bash
+        run: |
+          unset CARGO_TARGET_DIR
+          log="${RUNNER_TEMP}/trybuild-rerun.log"
+          cargo --config "build.target-dir='${RUNNER_TEMP}/target-by-config'" \
+            test --all-features --test derive -- misuse --nocapture | tee "${log}"
+          test "$(grep -c '^running 1 test' "${log}")" -eq 2
+
       # Every combination of features, not just none and all: a feature that
       # only compiles because another one happens to be on is a break for the
       # caller who enables it alone. `--no-dev-deps` is what exposes it -
@@ -106,11 +124,17 @@ jobs:
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
-      # The threshold covers the published crate only: the test-support server
-      # is exercised by the tests that use it, and counting it would let its
-      # lines pay for lines of the SDK that nothing reaches.
+      # The threshold covers the published crates only, each on its own: the
+      # test-support server is exercised by the tests that use it, and
+      # counting it, or one crate with the other, would let its lines pay for
+      # lines that nothing reaches.
       - name: Line coverage
         run: cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85
+
+      # The derive's entry point runs only inside rustc, never under a test
+      # harness, so it counts as unreached; everything it calls is measured.
+      - name: Line coverage of the derive
+        run: cargo llvm-cov nextest -p typesafe-sdk-rust-macros --all-features --fail-under-lines 85
 
   hygiene:
     name: text hygiene

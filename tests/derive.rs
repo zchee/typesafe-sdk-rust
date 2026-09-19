@@ -660,12 +660,12 @@ async fn the_expansion_works_wherever_it_lands() {
 /// starts, so that the re-run never starts another.
 const RERUN_MARKER: &str = "TYPESAFE_SDK_TRYBUILD_RERUN";
 
-/// The target directory this test binary was built in. Cargo gives every
-/// integration test `CARGO_TARGET_TMPDIR`, `<target>/tmp`, at compile time,
-/// wherever `--config`, the environment or a config file put `<target>`.
-fn target_dir_of_this_binary() -> PathBuf {
-    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    canonical(tmp.parent().expect("CARGO_TARGET_TMPDIR is <target>/tmp"))
+/// The target directory this test binary was built in, as cargo wrote it.
+/// Cargo gives every integration test `CARGO_TARGET_TMPDIR`, `<target>/tmp`,
+/// at compile time, wherever `--config`, the environment or a config file put
+/// `<target>`.
+fn target_dir_of_this_binary() -> &'static Path {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).parent().expect("CARGO_TARGET_TMPDIR is <target>/tmp")
 }
 
 /// The target directory trybuild will build in: it runs `cargo metadata` from
@@ -680,9 +680,12 @@ fn target_dir_of_trybuild() -> PathBuf {
     let metadata: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("cargo metadata prints JSON");
     let target = metadata["target_directory"].as_str().expect("metadata names the target dir");
-    canonical(Path::new(target))
+    PathBuf::from(target)
 }
 
+/// A path in the one spelling two paths are compared in. Only for comparing:
+/// on Windows it is a verbatim `\\?\C:\...` path, which is not the directory as
+/// cargo wrote it and not what a child process should be handed.
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -705,7 +708,7 @@ fn canonical(path: &Path) -> PathBuf {
 fn misuse_is_refused_at_compile_time() {
     let built_in = target_dir_of_this_binary();
     let trybuild_in = target_dir_of_trybuild();
-    if trybuild_in != built_in {
+    if canonical(&trybuild_in) != canonical(built_in) {
         assert!(
             env::var_os(RERUN_MARKER).is_none(),
             "trybuild would build in {}, not in {} where this test was built, although this is \
@@ -715,7 +718,7 @@ fn misuse_is_refused_at_compile_time() {
         );
         let output = Command::new(env::current_exe().expect("the test binary has a path"))
             .args(["--exact", "misuse_is_refused_at_compile_time", "--nocapture"])
-            .env("CARGO_TARGET_DIR", &built_in)
+            .env("CARGO_TARGET_DIR", built_in)
             .env(RERUN_MARKER, "1")
             .output()
             .expect("the test binary runs again");
