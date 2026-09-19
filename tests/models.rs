@@ -2,28 +2,20 @@
 //! cases of the upstream `tests/test_clients.py` (upstream has no
 //! `test_models.py`), and `warm_up`, which is a models call.
 
+use bytes::Bytes;
 use http::StatusCode;
 use test_support::{Protocol, TestServer, json_response};
-use typesafe_sdk::{ApiErrorKind, Client, ErrorKind, HttpVersion};
+use typesafe_sdk::{ApiErrorKind, Client, ClientBuilder, ErrorKind, HttpVersion};
 
 const MODELS: &[u8] = include_bytes!("fixtures/models.json");
 const MODELS_EXTRA_FIELDS: &[u8] = include_bytes!("fixtures/models-extra-fields.json");
 
-async fn answering(protocol: Protocol, status: StatusCode, body: &'static [u8]) -> TestServer {
-    TestServer::start(protocol, move |_| async move { json_response(status, body) })
-        .await
-        .expect("the test server starts")
-}
+include!("support/answering.rs");
+
+include!("support/loopback_builder.rs");
 
 fn client_for(server: &TestServer, protocol: Protocol) -> Client {
-    let mut builder = Client::builder().api_key("test-key").base_url(server.base_url());
-    if let Some(certificate) = server.certificate_der() {
-        builder = builder.add_root_certificate(certificate.to_vec());
-    }
-    if protocol == Protocol::H2c {
-        builder = builder.http_version(HttpVersion::Http2Only);
-    }
-    builder.build().expect("the client builds")
+    loopback_builder(server, protocol).build().expect("the client builds")
 }
 
 /// Upstream `test_models_shape`: a `GET` of `/v1/models` with no body, and

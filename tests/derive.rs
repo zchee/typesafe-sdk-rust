@@ -156,15 +156,7 @@ fn a_question_set_is_a_bound_like_any_other() {
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
-async fn answering(body: impl AsRef<[u8]>) -> TestServer {
-    let body = Bytes::copy_from_slice(body.as_ref());
-    TestServer::start(Protocol::Http1, move |_| {
-        let body = body.clone();
-        async move { json_response(StatusCode::OK, body) }
-    })
-    .await
-    .expect("the test server starts")
-}
+include!("support/answering.rs");
 
 fn client_for(server: &TestServer) -> Client {
     Client::builder()
@@ -177,7 +169,7 @@ fn client_for(server: &TestServer) -> Client {
 
 /// Asks `Q` of a server that answers `body`.
 async fn ask<Q: QuestionSet>(body: impl AsRef<[u8]>) -> Result<SystemOneResponse<Q>, Error> {
-    let server = answering(body).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, body).await;
     client_for(&server).ask::<Q>("I was charged twice.").send().await
 }
 
@@ -194,7 +186,7 @@ fn validation(error: &Error) -> (&str, &str, String) {
 /// and decodes into the struct exactly what the lookup finds by name.
 #[tokio::test]
 async fn ask_sends_the_compiled_questions_and_decodes_into_the_struct() {
-    let server = answering(RESULT).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, RESULT).await;
     let client = client_for(&server);
 
     let typed = client

@@ -13,7 +13,8 @@ use std::time::Duration;
 use http::{StatusCode, header::RETRY_AFTER};
 use test_support::{Protocol, TestServer, json_response};
 use typesafe_sdk::{
-    ApiErrorKind, Client, DecodeErrorKind, ErrorKind, HttpVersion, Questions, RetryPolicy, Score,
+    ApiErrorKind, Client, ClientBuilder, DecodeErrorKind, ErrorKind, HttpVersion, Questions,
+    RetryPolicy, Score,
 };
 
 /// An error body whose one member holds a byte that is not UTF-8: the error
@@ -43,19 +44,14 @@ async fn answering(protocol: Protocol, status: StatusCode, body: &'static [u8]) 
     .expect("the test server starts")
 }
 
+include!("support/loopback_builder.rs");
+
 /// A client of `server` that makes one attempt per call.
 fn client_for(server: &TestServer, protocol: Protocol) -> Client {
-    let mut builder = Client::builder()
-        .api_key("test-key")
-        .base_url(server.base_url())
-        .retry(RetryPolicy::default().max_retries(0));
-    if let Some(certificate) = server.certificate_der() {
-        builder = builder.add_root_certificate(certificate.to_vec());
-    }
-    if protocol == Protocol::H2c {
-        builder = builder.http_version(HttpVersion::Http2Only);
-    }
-    builder.build().expect("the client builds")
+    loopback_builder(server, protocol)
+        .retry(RetryPolicy::default().max_retries(0))
+        .build()
+        .expect("the client builds")
 }
 
 fn questions() -> typesafe_sdk::PreparedQuestions {

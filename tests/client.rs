@@ -39,34 +39,17 @@ include!("../src/printable_tests.rs");
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
-/// A server answering every request with `200` and `body`.
-async fn answering(protocol: Protocol, body: impl AsRef<[u8]>) -> TestServer {
-    let body = Bytes::copy_from_slice(body.as_ref());
-    TestServer::start(protocol, move |_| {
-        let body = body.clone();
-        async move { json_response(StatusCode::OK, body) }
-    })
-    .await
-    .expect("the test server starts")
-}
+include!("support/answering.rs");
 
-/// A builder for a client of `server`: trusting its certificate when it has
-/// one, and speaking prior-knowledge HTTP/2 to an h2c server.
+include!("support/loopback_builder.rs");
+
+/// A builder for a client of `server`, with a default model.
 fn builder_for(server: &TestServer, protocol: Protocol) -> ClientBuilder {
-    let mut builder = Client::builder()
-        .api_key("test-key")
-        .base_url(server.base_url())
+    loopback_builder(server, protocol)
         .default_model("jev-latest")
         // One attempt per call, as upstream's `clients` fixture builds them
         // (`tests/conftest.py:34-35`); retries are tested in `tests/retry.rs`.
-        .retry(RetryPolicy::default().max_retries(0));
-    if let Some(certificate) = server.certificate_der() {
-        builder = builder.add_root_certificate(certificate.to_vec());
-    }
-    if protocol == Protocol::H2c {
-        builder = builder.http_version(HttpVersion::Http2Only);
-    }
-    builder
+        .retry(RetryPolicy::default().max_retries(0))
 }
 
 fn client_for(server: &TestServer, protocol: Protocol) -> Client {
@@ -193,7 +176,7 @@ async fn round_trip_sends_the_body_and_decodes_every_answer_kind() {
 /// replaced where it stands, `null` is sent. Member order is the wire order.
 #[tokio::test]
 async fn extra_body_shallow_override() {
-    let server = answering(Protocol::Http1, RESULT).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, RESULT).await;
     let questions = one_raw_question();
     client_for(&server, Protocol::Http1)
         .system_one("hi", &questions)
@@ -223,7 +206,7 @@ impl serde::Serialize for Unserializable {
 /// Upstream `test_unserializable_request_body_raises`.
 #[tokio::test]
 async fn unserializable_request_body_raises_before_the_network() {
-    let server = answering(Protocol::Http1, RESULT).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, RESULT).await;
     let questions = one_raw_question();
     let error = client_for(&server, Protocol::Http1)
         .system_one("x", &questions)
@@ -244,7 +227,7 @@ async fn unserializable_request_body_raises_before_the_network() {
 /// travel as written.
 #[tokio::test]
 async fn raw_question_passthrough() {
-    let server = answering(Protocol::Http1, RESULT).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, RESULT).await;
     let questions = Questions::new()
         .raw(
             "q",
@@ -316,7 +299,7 @@ async fn question_schema_validation_is_left_to_api() {
 #[tokio::test]
 async fn rich_descriptions() {
     const ANSWER: &[u8] = br#"{"model":"custom","usage":{"input_tokens":1,"output_tokens":1},"answers":{"risk":{"type":"score","score":0,"confidence":1,"legend":{"0":{"summary":"duplicated","examples":["charged twice"]}},"probabilities":{"0":1}}}}"#;
-    let server = answering(Protocol::Http1, ANSWER).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, ANSWER).await;
     let criteria = json!({"summary": "duplicated", "examples": ["charged twice"]});
     let structured = || Content::json(&criteria).expect("an object is content");
     let questions = Questions::new()
@@ -673,7 +656,7 @@ async fn a_transport_error_of_any_text_is_escaped_and_cut_in_the_message() {
 /// A TLS server whose certificate the client was not told to trust.
 #[tokio::test]
 async fn an_untrusted_certificate_is_a_connection_error_naming_the_certificate() {
-    let server = answering(Protocol::Http2Tls, br#"{"models":[]}"#).await;
+    let server = answering(Protocol::Http2Tls, StatusCode::OK, br#"{"models":[]}"#).await;
     let client =
         Client::builder().api_key("test-key").base_url(server.base_url()).build().expect("builds");
 
@@ -802,7 +785,7 @@ async fn a_response_over_the_limit_is_refused() {
     for protocol in [Protocol::Http1, Protocol::H2c] {
         // A success response whose declared length is over the limit: its
         // own kind, naming the limit, with no cause.
-        let server = answering(protocol, big.clone()).await;
+        let server = answering(protocol, StatusCode::OK, big.clone()).await;
         let client =
             builder_for(&server, protocol).max_response_bytes(1024).build().expect("builds");
         let error = client.models().list().send().await.expect_err("over the limit");
@@ -839,7 +822,7 @@ async fn a_response_over_the_limit_is_refused() {
 
     // A body at the limit is read.
     let at_limit: &'static [u8] = br#"{"models":[]}"#;
-    let server = answering(Protocol::Http1, at_limit).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, at_limit).await;
     let client = builder_for(&server, Protocol::Http1)
         .max_response_bytes(at_limit.len())
         .build()
@@ -1272,7 +1255,7 @@ impl Service<Request<Body>> for Counted {
 /// and after failure alike.
 #[tokio::test]
 async fn the_last_clone_of_a_client_drops_its_transport() {
-    let server = answering(Protocol::Http1, br#"{"models":[]}"#).await;
+    let server = answering(Protocol::Http1, StatusCode::OK, br#"{"models":[]}"#).await;
     let alive = Arc::new(AtomicUsize::new(0));
     let client = Client::builder()
         .api_key("test-key")
@@ -1449,7 +1432,7 @@ mod logging {
         // No response: a timeout, a refused connection, a body over the limit.
         let held = held(Protocol::Http1, br#"{"models":[]}"#).await;
         let refused = closed_port().await;
-        let big = answering(Protocol::Http1, vec![b' '; 4096]).await;
+        let big = answering(Protocol::Http1, StatusCode::OK, vec![b' '; 4096]).await;
         let cases: [(ClientBuilder, &str); 3] = [
             (
                 builder_for(&held.server, Protocol::Http1).timeout(Duration::from_millis(50)),
