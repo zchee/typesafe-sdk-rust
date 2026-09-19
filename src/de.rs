@@ -509,11 +509,7 @@ impl<'de> Deserialize<'de> for NoulAnswer {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(AnswerSeed::<Self> {
-            name: "",
-            levels: 0,
-            target: PhantomData,
-        })
+        deserializer.deserialize_any(AnswerSeed::<Self>::DETACHED)
     }
 }
 
@@ -526,11 +522,7 @@ impl<'de> Deserialize<'de> for ChoiceAnswer {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(AnswerSeed::<Self> {
-            name: "",
-            levels: 0,
-            target: PhantomData,
-        })
+        deserializer.deserialize_any(AnswerSeed::<Self>::DETACHED)
     }
 }
 
@@ -545,11 +537,7 @@ impl<'de> Deserialize<'de> for ScoreAnswer {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(AnswerSeed::<Self> {
-            name: "",
-            levels: 0,
-            target: PhantomData,
-        })
+        deserializer.deserialize_any(AnswerSeed::<Self>::DETACHED)
     }
 }
 
@@ -567,11 +555,7 @@ impl<'de> Deserialize<'de> for Answer {
         D: Deserializer<'de>,
     {
         deserializer
-            .deserialize_any(AnswerSeed::<Option<Answer>> {
-                name: "",
-                levels: 0,
-                target: PhantomData,
-            })?
+            .deserialize_any(AnswerSeed::<Option<Answer>>::DETACHED)?
             .ok_or_else(|| de::Error::custom("an answer of a type this version does not model"))
     }
 }
@@ -586,6 +570,12 @@ struct AnswerSeed<'n, T> {
     /// See [`AnswerContext`]'s field of the same name.
     levels: usize,
     target: PhantomData<T>,
+}
+
+impl<T> AnswerSeed<'static, T> {
+    /// A seed for an answer read on its own, outside a response: no question
+    /// name to warn with and no level hint.
+    const DETACHED: Self = Self { name: "", levels: 0, target: PhantomData };
 }
 
 impl<'de, T> DeserializeSeed<'de> for AnswerSeed<'_, T>
