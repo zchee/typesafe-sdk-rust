@@ -20,7 +20,7 @@ pub use core::{
 };
 
 pub use serde::{
-    self, Deserialize, Deserializer,
+    Deserialize, Deserializer,
     de::{Error, IgnoredAny, MapAccess, Visitor},
 };
 
