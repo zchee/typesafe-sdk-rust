@@ -31,12 +31,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{
-    HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, header::CONTENT_TYPE,
-};
-use http_body_util::{BodyExt as _, Full};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
+use http_body_util::BodyExt as _;
 use serde::Serialize;
-use test_support::{Protocol, RecordedRequest, TestResponse, TestServer};
+use test_support::{Protocol, RecordedRequest, TestResponse, TestServer, json_response};
 use tokio::sync::{Notify, watch};
 use tower_service::Service;
 
@@ -445,9 +443,8 @@ const SHORT: Duration = Duration::from_millis(50);
 
 /// A JSON response with `status`, `body` and the extra headers.
 fn respond(status: u16, body: &str, headers: &[(&str, &str)]) -> TestResponse {
-    let mut response = Response::new(Full::new(Bytes::copy_from_slice(body.as_bytes())));
-    *response.status_mut() = StatusCode::from_u16(status).expect("a test status is valid");
-    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let status = StatusCode::from_u16(status).expect("a test status is valid");
+    let mut response = json_response(status, Bytes::copy_from_slice(body.as_bytes()));
     for (name, value) in headers {
         response.headers_mut().insert(
             HeaderName::from_bytes(name.as_bytes()).expect("a test header name is valid"),
@@ -462,13 +459,7 @@ async fn serve<F>(answer: F) -> TestServer
 where
     F: Fn(usize, &RecordedRequest) -> TestResponse + Send + Sync + 'static,
 {
-    let served = AtomicUsize::new(0);
-    TestServer::start(Protocol::Http1, move |request| {
-        let response = answer(served.fetch_add(1, Ordering::SeqCst) + 1, &request);
-        async move { response }
-    })
-    .await
-    .expect("the test server starts")
+    TestServer::start_nth(Protocol::Http1, answer).await.expect("the test server starts")
 }
 
 /// A client of `server` with `policy`, reading nothing from the environment.
@@ -540,10 +531,7 @@ fn retry_counts(requests: &[RecordedRequest]) -> Vec<Option<String>> {
     requests
         .iter()
         .map(|request| {
-            request
-                .headers
-                .get("x-typesafe-retry-count")
-                .map(|value| value.to_str().expect("the count is text").to_owned())
+            request.header_values("x-typesafe-retry-count").first().map(|count| (*count).to_owned())
         })
         .collect()
 }

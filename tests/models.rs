@@ -2,23 +2,12 @@
 //! cases of the upstream `tests/test_clients.py` (upstream has no
 //! `test_models.py`), and `warm_up`, which is a models call.
 
-use bytes::Bytes;
-use http::{Response, StatusCode};
-use http_body_util::Full;
-use test_support::{Protocol, TestResponse, TestServer};
+use http::StatusCode;
+use test_support::{Protocol, TestServer, json_response};
 use typesafe_sdk::{ApiErrorKind, Client, ErrorKind, HttpVersion};
 
 const MODELS: &[u8] = include_bytes!("fixtures/models.json");
 const MODELS_EXTRA_FIELDS: &[u8] = include_bytes!("fixtures/models-extra-fields.json");
-
-const PROTOCOLS: [Protocol; 3] = [Protocol::Http1, Protocol::H2c, Protocol::Http2Tls];
-
-fn json_response(status: StatusCode, body: &'static [u8]) -> TestResponse {
-    let mut response = Response::new(Full::new(Bytes::from_static(body)));
-    *response.status_mut() = status;
-    response.headers_mut().insert("content-type", "application/json".parse().expect("valid"));
-    response
-}
 
 async fn answering(protocol: Protocol, status: StatusCode, body: &'static [u8]) -> TestServer {
     TestServer::start(protocol, move |_| async move { json_response(status, body) })
@@ -41,7 +30,7 @@ fn client_for(server: &TestServer, protocol: Protocol) -> Client {
 /// the cards it answers with.
 #[tokio::test]
 async fn models_shape() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let server = answering(protocol, StatusCode::OK, MODELS).await;
         let response = client_for(&server, protocol).models().list().send().await.expect("listed");
 

@@ -269,3 +269,58 @@ async fn dropping_the_server_releases_the_port() {
     }
     assert!(rebound.is_some(), "the port {addr} was still held after the server was dropped",);
 }
+
+#[tokio::test]
+async fn every_protocol_starts_a_server_of_its_scheme() {
+    for protocol in Protocol::ALL {
+        let server =
+            TestServer::start(protocol, |_request| async { text_response(StatusCode::OK, "ok") })
+                .await
+                .expect("a server binds on loopback");
+        let tls = protocol == Protocol::Http2Tls;
+        let scheme = if tls { "https://" } else { "http://" };
+        assert!(server.base_url().starts_with(scheme), "{protocol:?}: {server:?}");
+        assert_eq!(server.certificate_der().is_some(), tls, "{protocol:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_counted_handler_is_told_which_request_it_answers() {
+    let server = TestServer::start_nth(Protocol::Http1, |n, request| {
+        json_response(StatusCode::OK, format!("{n} {:?}", request.header_values("x-team")))
+    })
+    .await
+    .expect("an HTTP/1.1 server binds on loopback");
+
+    let client = cleartext_client(false);
+    for expected in [r#"1 ["a", "b"]"#, r#"2 ["a", "b"]"#] {
+        let request = Request::get(format!("{}/v1/models", server.base_url()))
+            .header("x-team", "a")
+            .header("x-team", "b")
+            .body(Full::new(Bytes::new()))
+            .expect("the request parts are valid");
+        let response = client.request(request).await.expect("the request reaches the test server");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).map(HeaderValue::as_bytes),
+            Some(b"application/json".as_slice()),
+        );
+        assert_eq!(read_body(response).await, expected.as_bytes());
+    }
+    assert_eq!(server.requests()[1].header_values("x-team"), ["a", "b"]);
+    assert_eq!(server.requests()[1].header_values("x-absent"), Vec::<&str>::new());
+}
+
+#[tokio::test]
+async fn a_raw_server_answers_every_connection_with_its_bytes() {
+    let reply = b"SSH-2.0-OpenSSH_9.9\r\n\r\n";
+    let addr = raw_server(reply).await.expect("a raw server binds on loopback");
+    assert!(addr.ip().is_loopback(), "{addr}");
+    for connection in 1..=2 {
+        let mut stream = TcpStream::connect(addr).await.expect("the raw server accepts");
+        stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.expect("the request is written");
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).await.expect("the raw server closes after its reply");
+        assert_eq!(answer, reply, "connection {connection}");
+    }
+}

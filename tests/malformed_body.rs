@@ -10,15 +10,11 @@
 
 use std::time::Duration;
 
-use bytes::Bytes;
-use http::{Response, StatusCode, header::RETRY_AFTER};
-use http_body_util::Full;
-use test_support::{Protocol, TestResponse, TestServer};
+use http::{StatusCode, header::RETRY_AFTER};
+use test_support::{Protocol, TestServer, json_response};
 use typesafe_sdk::{
     ApiErrorKind, Client, DecodeErrorKind, ErrorKind, HttpVersion, Questions, RetryPolicy, Score,
 };
-
-const PROTOCOLS: [Protocol; 3] = [Protocol::Http1, Protocol::H2c, Protocol::Http2Tls];
 
 /// An error body whose one member holds a byte that is not UTF-8: the error
 /// reader keeps each member as raw text, which is where the codec took the
@@ -39,11 +35,8 @@ const MODELS_BODY: &[u8] = b"{\"models\":[{\"name\":\"jev-\xC9\",\"description\"
 /// `Retry-After` of three seconds.
 async fn answering(protocol: Protocol, status: StatusCode, body: &'static [u8]) -> TestServer {
     TestServer::start(protocol, move |_| async move {
-        let mut response: TestResponse = Response::new(Full::new(Bytes::from_static(body)));
-        *response.status_mut() = status;
-        let headers = response.headers_mut();
-        headers.insert("content-type", "application/json".parse().expect("valid"));
-        headers.insert(RETRY_AFTER, "3".parse().expect("valid"));
+        let mut response = json_response(status, body);
+        response.headers_mut().insert(RETRY_AFTER, "3".parse().expect("valid"));
         response
     })
     .await
@@ -74,7 +67,7 @@ fn questions() -> typesafe_sdk::PreparedQuestions {
 
 #[tokio::test]
 async fn a_failure_status_with_a_body_that_is_not_utf8_is_an_api_error() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let server = answering(protocol, StatusCode::UNPROCESSABLE_ENTITY, ERROR_BODY).await;
         let client = client_for(&server, protocol);
         let questions = questions();
@@ -102,7 +95,7 @@ async fn a_failure_status_with_a_body_that_is_not_utf8_is_an_api_error() {
 
 #[tokio::test]
 async fn a_success_status_with_a_body_that_is_not_utf8_is_a_validation_error() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let server = answering(protocol, StatusCode::OK, SUCCESS_BODY).await;
         let client = client_for(&server, protocol);
         let questions = questions();
@@ -135,7 +128,7 @@ async fn a_success_status_with_a_body_that_is_not_utf8_is_a_validation_error() {
 
 #[tokio::test]
 async fn a_models_list_that_is_not_utf8_is_a_validation_error() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let server = answering(protocol, StatusCode::OK, MODELS_BODY).await;
         let client = client_for(&server, protocol);
 

@@ -12,9 +12,8 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{HeaderValue, Response, StatusCode};
-use http_body_util::Full;
-use test_support::{Protocol, RecordedRequest, TestResponse, TestServer};
+use http::{HeaderValue, StatusCode};
+use test_support::{Protocol, RecordedRequest, TestServer, json_response};
 use typesafe_sdk::{
     Answers, ApiErrorKind, Choice, ChoiceAnswer, Client, Error, ErrorKind, Noul, NoulAnswer,
     PreparedQuestions, QuestionSet, Questions, RetryPolicy, Score, ScoreAnswer, SystemOneResponse,
@@ -157,13 +156,6 @@ fn a_question_set_is_a_bound_like_any_other() {
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 
-fn json_response(status: StatusCode, body: impl Into<Bytes>) -> TestResponse {
-    let mut response = Response::new(Full::new(body.into()));
-    *response.status_mut() = status;
-    response.headers_mut().insert("content-type", "application/json".parse().expect("valid"));
-    response
-}
-
 async fn answering(body: impl AsRef<[u8]>) -> TestServer {
     let body = Bytes::copy_from_slice(body.as_ref());
     TestServer::start(Protocol::Http1, move |_| {
@@ -253,17 +245,7 @@ fn an_asked_request_can_be_sent_from_any_task() {
 
 /// The `X-TypeSafe-Retry-Count` values of each request.
 fn retry_counts(requests: &[RecordedRequest]) -> Vec<Vec<&str>> {
-    requests
-        .iter()
-        .map(|request| {
-            request
-                .headers
-                .get_all("x-typesafe-retry-count")
-                .iter()
-                .map(|value| value.to_str().expect("text"))
-                .collect()
-        })
-        .collect()
+    requests.iter().map(|request| request.header_values("x-typesafe-retry-count")).collect()
 }
 
 /// The error of a call whose last attempt the server answered with 503

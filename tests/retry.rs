@@ -19,10 +19,9 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{HeaderValue, Response, StatusCode, header::CONTENT_TYPE};
-use http_body_util::Full;
+use http::{HeaderValue, StatusCode};
 use serde::{Serialize, Serializer};
-use test_support::{Protocol, RecordedRequest, TestResponse, TestServer};
+use test_support::{Protocol, RecordedRequest, TestResponse, TestServer, json_response};
 use tokio::sync::watch;
 use typesafe_sdk::{
     Client, ClientBuilder, Error, ErrorKind, Noul, PreparedQuestions, Questions, RetryPolicy,
@@ -35,9 +34,8 @@ const RESULT: &[u8] = include_bytes!("fixtures/result.json");
 /// A JSON response with `status`, `body`, and `retry-after-ms: 0` when
 /// `now` is set.
 fn respond(status: u16, body: &[u8], now: bool) -> TestResponse {
-    let mut response = Response::new(Full::new(Bytes::copy_from_slice(body)));
-    *response.status_mut() = StatusCode::from_u16(status).expect("a test status is valid");
-    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let status = StatusCode::from_u16(status).expect("a test status is valid");
+    let mut response = json_response(status, Bytes::copy_from_slice(body));
     if now {
         response.headers_mut().insert("retry-after-ms", HeaderValue::from_static("0"));
     }
@@ -49,13 +47,7 @@ async fn serve<F>(answer: F) -> TestServer
 where
     F: Fn(usize, &RecordedRequest) -> TestResponse + Send + Sync + 'static,
 {
-    let served = AtomicUsize::new(0);
-    TestServer::start(Protocol::Http1, move |request| {
-        let response = answer(served.fetch_add(1, Ordering::SeqCst) + 1, &request);
-        async move { response }
-    })
-    .await
-    .expect("the test server starts")
+    TestServer::start_nth(Protocol::Http1, answer).await.expect("the test server starts")
 }
 
 /// A builder for a client of `server`, with every setting the environment
@@ -74,18 +66,8 @@ fn at_once() -> RetryPolicy {
 }
 
 /// The `X-TypeSafe-Retry-Count` values of each request, every one of them.
-fn retry_counts(requests: &[RecordedRequest]) -> Vec<Vec<String>> {
-    requests
-        .iter()
-        .map(|request| {
-            request
-                .headers
-                .get_all("x-typesafe-retry-count")
-                .iter()
-                .map(|value| value.to_str().expect("text").to_owned())
-                .collect()
-        })
-        .collect()
+fn retry_counts(requests: &[RecordedRequest]) -> Vec<Vec<&str>> {
+    requests.iter().map(|request| request.header_values("x-typesafe-retry-count")).collect()
 }
 
 /// What `retry_counts` reads for `attempts` attempts: nothing, then 1, 2, ...

@@ -18,19 +18,14 @@ use std::{
 
 use bytes::Bytes;
 use http::{Request, Response, StatusCode, Uri, header::HOST};
-use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper_util::{
     client::legacy::{self, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use serde_json::json;
-use test_support::{Protocol, RecordedRequest, TestResponse, TestServer};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-    sync::Notify,
-};
+use test_support::{Protocol, RecordedRequest, TestServer, json_response, raw_server};
+use tokio::{net::TcpListener, sync::Notify};
 use tower_service::Service;
 use typesafe_sdk::{
     ApiError, ApiErrorKind, Body, Choice, Client, ClientBuilder, Content, Error, ErrorKind,
@@ -43,16 +38,6 @@ include!("../src/printable_tests.rs");
 
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("fixtures/result.json");
-
-const PROTOCOLS: [Protocol; 3] = [Protocol::Http1, Protocol::H2c, Protocol::Http2Tls];
-
-/// A JSON response with `status`.
-fn json_response(status: StatusCode, body: impl Into<Bytes>) -> TestResponse {
-    let mut response = Response::new(Full::new(body.into()));
-    *response.status_mut() = status;
-    response.headers_mut().insert("content-type", "application/json".parse().expect("valid"));
-    response
-}
 
 /// A server answering every request with `200` and `body`.
 async fn answering(protocol: Protocol, body: impl AsRef<[u8]>) -> TestServer {
@@ -98,16 +83,6 @@ fn one_raw_question() -> PreparedQuestions {
 
 fn body_text(request: &RecordedRequest) -> &str {
     std::str::from_utf8(&request.body).expect("the SDK sends UTF-8")
-}
-
-/// Every value of `name` a request carried.
-fn header<'a>(request: &'a RecordedRequest, name: &str) -> Vec<&'a str> {
-    request
-        .headers
-        .get_all(name)
-        .iter()
-        .map(|value| value.to_str().expect("a header value the test reads is text"))
-        .collect()
 }
 
 /// The API error `error` must be.
@@ -162,7 +137,7 @@ async fn round_trip_sends_the_body_and_decodes_every_answer_kind() {
     );
     let state = json!({"document": "Hello \u{1f30d}"});
 
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         for (form, questions) in &forms {
             let server = TestServer::start(protocol, |_| async {
                 let mut response = json_response(StatusCode::OK, RESULT);
@@ -185,7 +160,7 @@ async fn round_trip_sends_the_body_and_decodes_every_answer_kind() {
             assert_eq!(request.method, "POST");
             assert_eq!(request.uri.path(), "/v1/systemone", "{protocol:?} {form}");
             assert_eq!(body_text(request), expected_body, "{protocol:?} {form}");
-            assert_eq!(header(request, "content-type"), ["application/json"]);
+            assert_eq!(request.header_values("content-type"), ["application/json"]);
 
             assert_eq!(result.model(), "jev-latest");
             assert_eq!(result.usage().input_tokens(), Some(12));
@@ -417,7 +392,7 @@ async fn error_mapping() {
         (302, ApiErrorKind::Other),
     ];
     let body = r#"{"detail":{"message":"Server explanation"}}"#;
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         for (status, kind) in rows {
             let server = TestServer::start(protocol, move |_| async move {
                 let mut response =
@@ -519,7 +494,7 @@ async fn server_text_in_an_api_error_is_escaped_and_cut() {
             r"a\nb: m\u{1b}n (request_id=req-list)".to_owned(),
         ),
     ];
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         for (body, id, shown) in &rows {
             let (answer, header) = (Bytes::from(body.clone()), id.to_string());
             let server = TestServer::start(protocol, move |_| {
@@ -574,25 +549,6 @@ async fn closed_port() -> String {
     format!("http://{address}")
 }
 
-/// A server that reads one request and answers every connection with
-/// `reply`, then closes it.
-async fn raw_server(reply: impl AsRef<[u8]>) -> String {
-    let reply = Bytes::copy_from_slice(reply.as_ref());
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
-    let address = listener.local_addr().expect("its address");
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = listener.accept().await {
-            let mut buffer = [0; 4096];
-            // The reply goes out once the request has arrived; how much of it
-            // one read returns does not matter to the client.
-            let _ = stream.read(&mut buffer).await;
-            let _ = stream.write_all(&reply).await;
-            let _ = stream.shutdown().await;
-        }
-    });
-    format!("http://{address}")
-}
-
 /// Asserts that `error` is a connection error whose message is its cause's
 /// chain of messages, and returns that message.
 fn connection_message(error: &Error) -> String {
@@ -631,14 +587,22 @@ async fn transport_errors_are_connection_errors_with_their_cause() {
     assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
 
     // The response ends before its body does.
-    let url = raw_server(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"models\"").await;
+    let url = format!(
+        "http://{}",
+        raw_server(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\n{\"models\"")
+            .await
+            .expect("a loopback port")
+    );
     let error = client(&url).models().list().send().await.expect_err("a truncated body");
     let message = connection_message(&error);
     assert!(message.starts_with("Connection error: "), "{message}");
     assert!(cause::<hyper::Error>(&error).is_some(), "{error:?}");
 
     // Not HTTP at all.
-    let url = raw_server(b"SSH-2.0-OpenSSH_9.9\r\n\r\n").await;
+    let url = format!(
+        "http://{}",
+        raw_server(b"SSH-2.0-OpenSSH_9.9\r\n\r\n").await.expect("a loopback port")
+    );
     let error = client(&url).models().list().send().await.expect_err("not HTTP");
     let message = connection_message(&error);
     assert!(message.starts_with("Connection error: client error (SendRequest): "), "{message}");
@@ -760,7 +724,7 @@ async fn held(protocol: Protocol, body: &'static [u8]) -> Held {
 /// httpx phase.)
 #[tokio::test]
 async fn an_attempt_past_its_deadline_is_a_timeout_with_that_deadline() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let held = held(protocol, br#"{"models":[]}"#).await;
         let error = client_for(&held.server, protocol)
             .models()
@@ -901,7 +865,12 @@ fn assert_too_large(error: &Error, limit: usize) {
 /// read - even when the server then sends far less than it declared.
 #[tokio::test]
 async fn a_declared_length_over_the_limit_is_refused_whatever_follows_it() {
-    let url = raw_server(b"HTTP/1.1 200 OK\r\ncontent-length: 5000\r\n\r\n{\"models\":[]}").await;
+    let url = format!(
+        "http://{}",
+        raw_server(b"HTTP/1.1 200 OK\r\ncontent-length: 5000\r\n\r\n{\"models\":[]}")
+            .await
+            .expect("a loopback port")
+    );
     let client = Client::builder()
         .api_key("test-key")
         .base_url(url)
@@ -920,7 +889,7 @@ async fn a_streamed_response_over_the_limit_is_refused_as_it_arrives() {
         "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n400\r\n{}\r\n0\r\n\r\n",
         " ".repeat(1024)
     );
-    let url = raw_server(reply).await;
+    let url = format!("http://{}", raw_server(reply).await.expect("a loopback port"));
     let client = Client::builder()
         .api_key("test-key")
         .base_url(url)
@@ -1036,18 +1005,18 @@ async fn send_upstream_headers(builder: ClientBuilder) {
 fn assert_upstream_headers(request: &RecordedRequest, context: &str) {
     let sdk = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
     let runtime = format!("rust ({}; {})", std::env::consts::OS, std::env::consts::ARCH);
-    assert_eq!(header(request, "authorization"), ["Bearer test-key"], "{context}");
-    assert_eq!(header(request, "accept"), ["application/json"], "{context}");
-    assert_eq!(header(request, "user-agent"), [sdk.as_str()], "{context}");
-    assert_eq!(header(request, "x-typesafe-sdk"), [sdk.as_str()], "{context}");
-    assert_eq!(header(request, "x-typesafe-runtime"), [runtime.as_str()], "{context}");
+    assert_eq!(request.header_values("authorization"), ["Bearer test-key"], "{context}");
+    assert_eq!(request.header_values("accept"), ["application/json"], "{context}");
+    assert_eq!(request.header_values("user-agent"), [sdk.as_str()], "{context}");
+    assert_eq!(request.header_values("x-typesafe-sdk"), [sdk.as_str()], "{context}");
+    assert_eq!(request.header_values("x-typesafe-runtime"), [runtime.as_str()], "{context}");
     assert!(request.headers.get("x-typesafe-retry-count").is_none(), "{context}");
-    assert_eq!(header(request, "x-team"), ["call"], "{context}");
-    assert_eq!(header(request, "x-default"), ["kept"], "{context}");
-    assert_eq!(header(request, "content-type"), ["application/json"], "{context}");
+    assert_eq!(request.header_values("x-team"), ["call"], "{context}");
+    assert_eq!(request.header_values("x-default"), ["kept"], "{context}");
+    assert_eq!(request.header_values("content-type"), ["application/json"], "{context}");
     // A secret default is sent; it is kept out of logs, not off the wire.
-    assert_eq!(header(request, "x-api-key"), ["key-secret"], "{context}");
-    assert_eq!(header(request, "cookie"), ["cookie-secret"], "{context}");
+    assert_eq!(request.header_values("x-api-key"), ["key-secret"], "{context}");
+    assert_eq!(request.header_values("cookie"), ["cookie-secret"], "{context}");
 }
 
 /// Upstream `test_headers_timeout_and_logging` - the headers half, AC-F5:
@@ -1057,7 +1026,7 @@ fn assert_upstream_headers(request: &RecordedRequest, context: &str) {
 /// the server recorded, over each protocol.
 #[tokio::test]
 async fn headers_timeout_and_logging() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let server = logging_server(protocol).await;
         let builder =
             builder_for(&server, protocol).base_url(format!("{}/prefix///", server.base_url()));
@@ -1111,7 +1080,7 @@ async fn the_upstream_base_url_with_a_prefix_and_trailing_slashes() {
     );
     let [request] = &server.requests()[..] else { panic!("one request") };
     assert_eq!(request.uri.path(), "/prefix/v1/systemone");
-    assert_eq!(header(request, "host"), ["example.test"]);
+    assert_eq!(request.header_values("host"), ["example.test"]);
     assert_upstream_headers(request, "example.test");
 }
 
@@ -1137,7 +1106,7 @@ fn assert_transport_owned_dropped(request: &RecordedRequest, context: &str) {
     for (name, _) in TRANSPORT_OWNED {
         if name == "content-length" {
             let length = request.body.len().to_string();
-            let sent = header(request, name);
+            let sent = request.header_values(name);
             assert!(
                 sent.iter().all(|value| *value == length),
                 "{context}: content-length {sent:?} is not the body's length {length}"
@@ -1146,10 +1115,10 @@ fn assert_transport_owned_dropped(request: &RecordedRequest, context: &str) {
                 assert!(sent.is_empty() || length == "0", "{context}: content-length {sent:?}");
             }
         } else {
-            assert_eq!(header(request, name), Vec::<&str>::new(), "{context}: {name}");
+            assert_eq!(request.header_values(name), Vec::<&str>::new(), "{context}: {name}");
         }
     }
-    assert_eq!(header(request, "host"), ["routed.example"], "{context}");
+    assert_eq!(request.header_values("host"), ["routed.example"], "{context}");
 }
 
 /// The framing and connection headers belong to the transport: set as a
@@ -1160,7 +1129,7 @@ fn assert_transport_owned_dropped(request: &RecordedRequest, context: &str) {
 /// sent as given; over HTTP/2 the `:authority` is still the base URL's.
 #[tokio::test]
 async fn framing_and_connection_headers_are_dropped_and_host_is_sent() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let server = TestServer::start(protocol, |request: RecordedRequest| async move {
             let body: &'static [u8] =
                 if request.method == http::Method::POST { RESULT } else { br#"{"models":[]}"# };
@@ -1246,13 +1215,13 @@ async fn a_custom_transport_carries_every_request_with_the_sdk_headers() {
         ["GET https://api.typesafe.ai/v1/models", "POST https://api.typesafe.ai/v1/systemone"]
     );
     for request in server.requests() {
-        assert_eq!(header(&request, "authorization"), ["Bearer test-key"]);
-        assert_eq!(header(&request, "accept"), ["application/json"]);
-        assert_eq!(header(&request, "x-sdk-default"), ["sdk"]);
-        assert_eq!(header(&request, "x-call"), ["call"]);
+        assert_eq!(request.header_values("authorization"), ["Bearer test-key"]);
+        assert_eq!(request.header_values("accept"), ["application/json"]);
+        assert_eq!(request.header_values("x-sdk-default"), ["sdk"]);
+        assert_eq!(request.header_values("x-call"), ["call"]);
         let content_type =
             if request.method == http::Method::POST { vec!["application/json"] } else { vec![] };
-        assert_eq!(header(&request, "content-type"), content_type, "{}", request.method);
+        assert_eq!(request.header_values("content-type"), content_type, "{}", request.method);
     }
 }
 
@@ -1330,7 +1299,7 @@ async fn the_last_clone_of_a_client_drops_its_transport() {
 /// the client goes on working.
 #[tokio::test]
 async fn dropping_a_call_in_flight_cancels_it() {
-    for protocol in PROTOCOLS {
+    for protocol in Protocol::ALL {
         let held = held(protocol, br#"{"models":[]}"#).await;
         let client = client_for(&held.server, protocol);
         {

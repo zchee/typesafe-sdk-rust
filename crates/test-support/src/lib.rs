@@ -30,17 +30,21 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
 use bytes::Bytes;
-use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, Version};
+use http::{
+    HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, Version,
+    header::CONTENT_TYPE,
+};
 use http_body_util::{BodyExt as _, Full};
 use hyper::{body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::pki_types::CertificateDer;
 use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
     sync::watch,
     task::JoinHandle,
@@ -49,6 +53,15 @@ use tokio_rustls::TlsAcceptor;
 
 /// The response type a handler returns.
 pub type TestResponse = Response<Full<Bytes>>;
+
+/// A response with `status`, `body` and `content-type: application/json`.
+#[must_use]
+pub fn json_response(status: StatusCode, body: impl Into<Bytes>) -> TestResponse {
+    let mut response = Response::new(Full::new(body.into()));
+    *response.status_mut() = status;
+    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
 
 /// A handler future, boxed so that handlers of different concrete types can be
 /// stored behind one pointer.
@@ -70,6 +83,11 @@ pub enum Protocol {
     Http2Tls,
 }
 
+impl Protocol {
+    /// Every protocol, for a test that runs over each of them.
+    pub const ALL: [Self; 3] = [Self::Http1, Self::H2c, Self::Http2Tls];
+}
+
 /// Everything the server observed about one request it served.
 #[derive(Debug, Clone)]
 pub struct RecordedRequest {
@@ -83,6 +101,23 @@ pub struct RecordedRequest {
     pub body: Bytes,
     /// The HTTP version the request arrived on.
     pub version: Version,
+}
+
+impl RecordedRequest {
+    /// Every value of the header `name`, as text, in the order received.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a value is not visible ASCII, which no header a test reads
+    /// carries.
+    #[must_use]
+    pub fn header_values(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().expect("a header value the test reads is text"))
+            .collect()
+    }
 }
 
 /// Why a [`TestServer`] could not be started.
@@ -187,6 +222,24 @@ impl TestServer {
             shutdown,
             accept_task,
         })
+    }
+
+    /// Starts serving `protocol` as [`start`](Self::start) does, answering the
+    /// `n`th request, counted from 1, with `answer(n, request)`.
+    ///
+    /// # Errors
+    ///
+    /// As [`start`](Self::start).
+    pub async fn start_nth<F>(protocol: Protocol, answer: F) -> Result<Self, Error>
+    where
+        F: Fn(usize, &RecordedRequest) -> TestResponse + Send + Sync + 'static,
+    {
+        let served = AtomicUsize::new(0);
+        Self::start(protocol, move |request| {
+            let response = answer(served.fetch_add(1, Ordering::SeqCst) + 1, &request);
+            async move { response }
+        })
+        .await
     }
 
     /// The address the server is listening on, always an IPv4 loopback address.
@@ -360,6 +413,31 @@ async fn dispatch(
     state.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(recorded.clone());
 
     Ok((state.handler)(recorded).await)
+}
+
+/// Binds a loopback listener that answers every connection with `reply`, as
+/// raw bytes, once the request has arrived, then closes it: a server that
+/// does not speak HTTP, or speaks it wrongly.
+///
+/// # Errors
+///
+/// Returns [`Error::Bind`] or [`Error::LocalAddr`] when the socket cannot be
+/// set up.
+pub async fn raw_server(reply: impl AsRef<[u8]>) -> Result<SocketAddr, Error> {
+    let reply = Bytes::copy_from_slice(reply.as_ref());
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.map_err(Error::Bind)?;
+    let addr = listener.local_addr().map_err(Error::LocalAddr)?;
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut buffer = [0; 4096];
+            // How much of the request one read returns does not matter to
+            // the client.
+            let _ = stream.read(&mut buffer).await;
+            let _ = stream.write_all(&reply).await;
+            let _ = stream.shutdown().await;
+        }
+    });
+    Ok(addr)
 }
 
 #[cfg(test)]

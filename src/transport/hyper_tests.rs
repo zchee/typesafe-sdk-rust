@@ -5,10 +5,7 @@ use std::io;
 
 use http_body::Body as _;
 use http_body_util::BodyExt as _;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use test_support::raw_server;
 
 use super::*;
 use crate::ErrorKind;
@@ -17,27 +14,13 @@ fn settings(version: HttpVersion) -> TransportSettings {
     TransportSettings { version, extra_roots: Vec::new(), connect_timeout: None }
 }
 
-/// A loopback server that reads one request and answers it with `reply`, as
-/// raw bytes, then closes the connection.
-async fn raw_server(reply: &'static [u8]) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port");
-    let address = listener.local_addr().expect("its address");
-    tokio::spawn(async move {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            let mut buffer = [0; 4096];
-            let _ = stream.read(&mut buffer).await;
-            let _ = stream.write_all(reply).await;
-            let _ = stream.shutdown().await;
-        }
-    });
-    format!("http://{address}/")
-}
-
 /// Sends one `GET` through the transport itself, with no SDK around it, and
 /// returns the body of the answer.
 async fn body_from(reply: &'static [u8]) -> ResponseBody {
     let mut transport = HyperTransport::new(settings(HttpVersion::Auto)).expect("it builds");
-    let request = Request::get(raw_server(reply).await).body(Body::empty()).expect("a request");
+    let address = raw_server(reply).await.expect("a loopback port");
+    let request =
+        Request::get(format!("http://{address}/")).body(Body::empty()).expect("a request");
     let response = transport.call(request).await.expect("the server answers");
     assert_eq!(response.status(), http::StatusCode::OK);
     response.into_body()
