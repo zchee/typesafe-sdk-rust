@@ -1139,31 +1139,11 @@ impl<'de> Visitor<'de> for LevelsSeed {
         formatter.write_str("an object of score level to probability")
     }
 
-    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
     where
         M: MapAccess<'de>,
     {
-        // The hinted capacity is reserved only once a first entry exists, so
-        // an empty `{}` allocates nothing whatever the hint. The first key is
-        // read ahead of the loop rather than tested for inside it, which
-        // keeps the loop itself as it was without a hint.
-        let Some(mut level) = map.next_key_seed(LevelSeed)? else {
-            return Ok(Vec::new());
-        };
-        let mut entries = Vec::with_capacity(self.capacity);
-        let mut in_order = true;
-        loop {
-            let probability = map.next_value()?;
-            push_by_level(&mut entries, &mut in_order, level, probability);
-            match map.next_key_seed(LevelSeed)? {
-                Some(next) => level = next,
-                None => break,
-            }
-        }
-        if !in_order {
-            sort_by_level(&mut entries);
-        }
-        Ok(entries)
+        by_level(map, self.capacity, |map| map.next_value())
     }
 }
 
@@ -1190,31 +1170,50 @@ impl<'de> Visitor<'de> for LegendSeed {
         formatter.write_str("an object of score level to description")
     }
 
-    fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+    fn visit_map<M>(self, map: M) -> Result<Self::Value, M::Error>
     where
         M: MapAccess<'de>,
     {
-        // Reserved at the first entry, as `LevelsSeed` does.
-        let Some(mut level) = map.next_key_seed(LevelSeed)? else {
-            return Ok(Vec::new());
-        };
-        let mut entries = Vec::with_capacity(self.capacity);
-        let mut in_order = true;
-        loop {
-            // The description borrows the body while it is read and is copied
-            // once, here, because a response outlives nothing it could borrow.
-            let description: Content<'de> = map.next_value()?;
-            push_by_level(&mut entries, &mut in_order, level, description.into_owned());
-            match map.next_key_seed(LevelSeed)? {
-                Some(next) => level = next,
-                None => break,
-            }
-        }
-        if !in_order {
-            sort_by_level(&mut entries);
-        }
-        Ok(entries)
+        // The description borrows the body while it is read and is copied
+        // once, here, because a response outlives nothing it could borrow.
+        by_level(map, self.capacity, |map| {
+            map.next_value::<Content<'de>>().map(Content::into_owned)
+        })
     }
+}
+
+/// Reads an object keyed by score level into its entries, sorted by level,
+/// each value read by `value`.
+///
+/// `capacity` is reserved only once a first entry exists, so an empty `{}`
+/// allocates nothing whatever the hint. The first key is read ahead of the
+/// loop rather than tested for inside it, which keeps the loop itself as it
+/// is without a hint.
+fn by_level<'de, M, V>(
+    mut map: M,
+    capacity: usize,
+    mut value: impl FnMut(&mut M) -> Result<V, M::Error>,
+) -> Result<Vec<(u32, V)>, M::Error>
+where
+    M: MapAccess<'de>,
+{
+    let Some(mut level) = map.next_key_seed(LevelSeed)? else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::with_capacity(capacity);
+    let mut in_order = true;
+    loop {
+        let read = value(&mut map)?;
+        push_by_level(&mut entries, &mut in_order, level, read);
+        match map.next_key_seed(LevelSeed)? {
+            Some(next) => level = next,
+            None => break,
+        }
+    }
+    if !in_order {
+        sort_by_level(&mut entries);
+    }
+    Ok(entries)
 }
 
 /// The owned forms of the three containers, for a member that was held as raw
