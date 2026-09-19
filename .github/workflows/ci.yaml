@@ -129,6 +129,14 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # A task marker, a macro that panics where code should be, or a test
+      # switched off with an attribute compiles, passes every lint above and
+      # reads as finished in a review. One platform is enough for a scan of
+      # the tracked text.
+      - name: No placeholders
+        if: matrix.os == 'ubuntu-26.04'
+        run: python3 .github/scripts/no-placeholders.py
+
       # The fuzz targets are a workspace of their own, excluded from the one
       # every step above builds, and running them needs nightly. Checking
       # them needs neither: stable compiles them, together with libFuzzer's
