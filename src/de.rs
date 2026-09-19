@@ -336,10 +336,8 @@ impl<'de> Deserialize<'de> for Answers {
     /// Reads answers with no expectation about their number. Answers of a type
     /// this version does not model are skipped, as they are in a response.
     ///
-    /// Reloading is supported through a JSON codec (sonic-rs, `serde_json`).
-    /// Through a non-JSON serde format, a score whose legend holds text fails
-    /// to read back: a level's description is read as JSON text, and a plain
-    /// description such as `low` is not JSON text.
+    /// Reloading is supported through a JSON codec (sonic-rs, `serde_json`);
+    /// see [`ScoreAnswer`] for what a non-JSON serde format cannot read back.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -529,10 +527,8 @@ impl<'de> Deserialize<'de> for ChoiceAnswer {
 impl<'de> Deserialize<'de> for ScoreAnswer {
     /// Reads a score answer object. Its `type` must be `score`.
     ///
-    /// Reloading is supported through a JSON codec (sonic-rs, `serde_json`).
-    /// Through a non-JSON serde format, a score whose legend holds text fails
-    /// to read back: a level's description is read as JSON text, and a plain
-    /// description such as `low` is not JSON text.
+    /// Reloading is supported through a JSON codec (sonic-rs, `serde_json`);
+    /// see [`ScoreAnswer`] for what a non-JSON serde format cannot read back.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -546,10 +542,8 @@ impl<'de> Deserialize<'de> for Answer {
     /// type is an error here: unlike a set of answers, a single answer has
     /// nothing to fall back to.
     ///
-    /// Reloading is supported through a JSON codec (sonic-rs, `serde_json`).
-    /// Through a non-JSON serde format, a score whose legend holds text fails
-    /// to read back: a level's description is read as JSON text, and a plain
-    /// description such as `low` is not JSON text.
+    /// Reloading is supported through a JSON codec (sonic-rs, `serde_json`);
+    /// see [`ScoreAnswer`] for what a non-JSON serde format cannot read back.
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
