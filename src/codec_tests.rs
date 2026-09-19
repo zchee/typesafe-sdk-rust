@@ -169,37 +169,6 @@ fn an_unterminated_string_cannot_hide_a_bracket_run() {
 // ------------------------------------------------------------ field paths
 
 #[test]
-fn a_missing_field_is_reported_at_its_own_path() {
-    let document = br#"{"answers":{"spam":{},"tone":{"confidence":0.9}}}"#;
-
-    let error = decode::<Envelope>(document).expect_err("`noul` is missing");
-
-    assert_eq!(error.kind(), DecodeErrorKind::Data, "kind of {error}");
-    assert_eq!(error.path(), "answers.spam.noul");
-    assert!(error.line() > 0, "the position is kept: {error:?}");
-}
-
-#[test]
-fn a_wrongly_typed_field_is_reported_at_its_own_path() {
-    let document = br#"{"answers":{"spam":{"noul":0.98},"tone":{"confidence":"high"}}}"#;
-
-    let error = decode::<Envelope>(document).expect_err("`confidence` is not a number");
-
-    assert_eq!(error.kind(), DecodeErrorKind::Data, "kind of {error}");
-    assert_eq!(error.path(), "answers.tone.confidence");
-}
-
-#[test]
-fn a_sequence_element_is_reported_with_its_index() {
-    let document = br#"{"models":[{"name":"jev-latest"},{"name":123}]}"#;
-
-    let error = decode::<ModelList>(document).expect_err("the second name is a number");
-
-    assert_eq!(error.kind(), DecodeErrorKind::Data, "kind of {error}");
-    assert_eq!(error.path(), "models[1].name");
-}
-
-#[test]
 fn a_decode_error_never_carries_the_input() {
     // A value the caller would not want in a log line. The `state` of a real
     // call is application data, and both the codec's own error text and
@@ -377,11 +346,14 @@ fn an_ordinary_path_renders_exactly_as_serde_path_to_error_prints_it() {
     ];
     for (document, expected) in rows {
         let error = decode::<Envelope>(document).expect_err("the document does not fit");
+        assert_eq!(error.kind(), DecodeErrorKind::Data, "kind of {error}");
         assert_eq!(error.path(), expected, "{}", String::from_utf8_lossy(document));
+        assert!(error.line() > 0, "the position is kept: {error:?}");
     }
 
     let models = decode::<ModelList>(br#"{"models":[{"name":"jev-latest"},{"name":123}]}"#)
         .expect_err("the second name is a number");
+    assert_eq!(models.kind(), DecodeErrorKind::Data, "kind of {models}");
     assert_eq!(models.path(), "models[1].name");
     let top_level = decode::<Vec<Model>>(br#"[{"name":"a"},{}]"#).expect_err("no name");
     assert_eq!(top_level.path(), "[1].name");
