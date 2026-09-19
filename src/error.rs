@@ -39,7 +39,7 @@ use serde::{Deserialize, de::IgnoredAny};
 
 use crate::{
     codec::{self, DecodeError, DecodeErrorKind, RawJson},
-    constants::{REQUEST_ID_HEADER, RETRY_AFTER_MS_HEADER},
+    constants::{RETRY_AFTER_MS_HEADER, request_id},
     text,
 };
 
@@ -335,7 +335,7 @@ impl ApiError {
     /// text exactly as it arrived; `Display` and `Debug` show it escaped and
     /// cut at 128 characters instead.
     pub fn request_id(&self) -> Option<&str> {
-        self.headers.get(REQUEST_ID_HEADER).and_then(|value| value.to_str().ok())
+        request_id(&self.headers)
     }
 
     /// The method and URL the request went to, without credentials, query or
@@ -502,7 +502,7 @@ impl ResponseValidationError {
     /// The header's text exactly as it arrived; `Display` and `Debug` show it
     /// escaped and cut at 128 characters instead.
     pub fn request_id(&self) -> Option<&str> {
-        self.headers.get(REQUEST_ID_HEADER).and_then(|value| value.to_str().ok())
+        request_id(&self.headers)
     }
 
     /// The method and URL the request went to, without credentials, query or

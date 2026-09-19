@@ -41,7 +41,7 @@ use tracing::Level;
 use crate::error::Error;
 #[cfg(feature = "tracing")]
 use crate::{
-    constants::{REQUEST_ID_HEADER, SECRET_HEADERS},
+    constants::{SECRET_HEADERS, request_id},
     error::{ErrorKind, format_endpoint},
     text::{Backslash, MAX_NAME_CHARS, SafeText},
 };
@@ -274,7 +274,7 @@ struct RequestId<'a>(&'a HeaderMap);
 #[cfg(feature = "tracing")]
 impl fmt::Display for RequestId<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.0.get(REQUEST_ID_HEADER).and_then(|id| id.to_str().ok()) {
+        match request_id(self.0) {
             Some(id) => {
                 let mut shown = SafeText::new(MAX_NAME_CHARS, Backslash::Keep);
                 shown.untrusted(id, MAX_NAME_CHARS);

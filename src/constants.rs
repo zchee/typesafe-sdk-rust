@@ -10,10 +10,15 @@
 
 use std::{sync::LazyLock, time::Duration};
 
-use http::{HeaderName, HeaderValue, header};
+use http::{HeaderMap, HeaderName, HeaderValue, header};
 
 /// The response header carrying the server's identifier for a request.
 pub(crate) const REQUEST_ID_HEADER: &str = "x-typesafe-request-id";
+
+/// The server's identifier for a request, when `headers` carry one as text.
+pub(crate) fn request_id(headers: &HeaderMap) -> Option<&str> {
+    headers.get(REQUEST_ID_HEADER).and_then(|value| value.to_str().ok())
+}
 
 /// The non-standard millisecond-precision companion to `Retry-After`.
 pub(crate) const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";

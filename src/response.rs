@@ -25,7 +25,7 @@ use serde::{
     ser::{SerializeMap, SerializeStruct},
 };
 
-use crate::{constants::REQUEST_ID_HEADER, content::Content, name::Name};
+use crate::{constants::request_id, content::Content, name::Name};
 
 // ---------------------------------------------------------------- response
 
@@ -144,7 +144,7 @@ impl ResponseMeta {
     /// text.
     #[must_use]
     pub fn request_id(&self) -> Option<&str> {
-        self.headers.get(REQUEST_ID_HEADER).and_then(|value| value.to_str().ok())
+        request_id(&self.headers)
     }
 
     /// The body exactly as it was received.
