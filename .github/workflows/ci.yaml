@@ -59,6 +59,12 @@ jobs:
       - name: Lints
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+      # The same lints with no features at all. Code reachable only through a
+      # feature, or only from tests, is dead in this build, and the run above
+      # cannot see that: every feature is on there.
+      - name: Lints without default features
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
       # No `--workspace`: this one runs code. A crate whose tests need a live
       # API key is a workspace member and not a default member, so the default
       # selection is the one that can never reach it.
