@@ -1328,12 +1328,35 @@ mod logging {
         fn exit(&self, _: &span::Id) {}
     }
 
+    /// `recorder` installed as this thread's subscriber, until dropped.
+    ///
+    /// tracing-core caches a callsite's interest when the callsite is first
+    /// reached. While a single dispatcher is registered in the process, that
+    /// cache asks only the default of the thread that reached the callsite
+    /// (`Rebuilder::JustOne` in tracing-core 0.1.36 `callsite.rs`). libtest
+    /// runs the tests of a binary as threads of one process, so a callsite
+    /// first reached by another test's thread, which has no subscriber, was
+    /// cached as `never`, and this recorder saw none of its events. A second
+    /// registered dispatcher, held here, makes the cache ask every live
+    /// dispatcher instead: this recorder wants the event and the other does
+    /// not, which caches `sometimes`, and each event then goes to whichever
+    /// subscriber its own thread has.
+    struct Installed {
+        _default: tracing::subscriber::DefaultGuard,
+        _second: tracing::Dispatch,
+    }
+
+    fn install(recorder: &Recorder) -> Installed {
+        let second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        Installed { _default: tracing::subscriber::set_default(recorder.clone()), _second: second }
+    }
+
     /// Every event is recorded, hyper's included, so the secrets are checked
     /// against everything a subscriber would see.
     #[tokio::test]
     async fn no_credential_reaches_an_event_and_the_body_waits_for_trace() {
         let recorder = Recorder::default();
-        let _default = tracing::subscriber::set_default(recorder.clone());
+        let _installed = install(&recorder);
 
         let server = logging_server(Protocol::Http1).await;
         send_upstream_headers(builder_for(&server, Protocol::Http1)).await;
@@ -1396,7 +1419,7 @@ mod logging {
     async fn every_attempt_gets_one_info_line_and_no_body_reaches_info_or_debug() {
         // A success.
         let recorder = Recorder::default();
-        let default = tracing::subscriber::set_default(recorder.clone());
+        let installed = install(&recorder);
         let server = logging_server(Protocol::Http1).await;
         let questions = one_raw_question();
         client_for(&server, Protocol::Http1)
@@ -1412,11 +1435,11 @@ mod logging {
         );
         let quiet = [recorder.at(Level::INFO), recorder.at(Level::DEBUG)].concat();
         assert!(quiet.iter().all(|line| !line.contains("secret-state")), "{quiet:#?}");
-        drop(default);
+        drop(installed);
 
         // A failure status, with a body that says something private.
         let recorder = Recorder::default();
-        let default = tracing::subscriber::set_default(recorder.clone());
+        let installed = install(&recorder);
         let server = TestServer::start(Protocol::Http1, |_| async {
             json_response(StatusCode::SERVICE_UNAVAILABLE, r#"{"message":"secret-body"}"#)
         })
@@ -1432,7 +1455,7 @@ mod logging {
         );
         let quiet = [recorder.at(Level::INFO), recorder.at(Level::DEBUG)].concat();
         assert!(quiet.iter().all(|line| !line.contains("secret-body")), "{quiet:#?}");
-        drop(default);
+        drop(installed);
 
         // No response: a timeout, a refused connection, a body over the limit.
         let held = held(Protocol::Http1, br#"{"models":[]}"#).await;
@@ -1454,7 +1477,7 @@ mod logging {
         ];
         for (builder, word) in cases {
             let recorder = Recorder::default();
-            let _default = tracing::subscriber::set_default(recorder.clone());
+            let _installed = install(&recorder);
             let client = builder.build().expect("the client builds");
             let error = client.models().list().send().await.expect_err(word);
             let endpoint = format!("GET {}/v1/models", client_base(&client));
@@ -1498,7 +1521,7 @@ mod logging {
         for status in [StatusCode::OK, StatusCode::BAD_REQUEST] {
             for name in names {
                 let recorder = Recorder::default();
-                let _default = tracing::subscriber::set_default(recorder.clone());
+                let _installed = install(&recorder);
                 let server = TestServer::start(Protocol::Http1, move |_| async move {
                     let body: &'static [u8] = if status.is_success() {
                         br#"{"models":[]}"#

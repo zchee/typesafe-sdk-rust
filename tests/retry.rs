@@ -576,6 +576,29 @@ mod logging {
         fn exit(&self, _: &span::Id) {}
     }
 
+    /// `recorder` installed as this thread's subscriber, until dropped.
+    ///
+    /// tracing-core caches a callsite's interest when the callsite is first
+    /// reached. While a single dispatcher is registered in the process, that
+    /// cache asks only the default of the thread that reached the callsite
+    /// (`Rebuilder::JustOne` in tracing-core 0.1.36 `callsite.rs`). libtest
+    /// runs the tests of a binary as threads of one process, so a callsite
+    /// first reached by another test's thread, which has no subscriber, was
+    /// cached as `never`, and this recorder saw none of its events. A second
+    /// registered dispatcher, held here, makes the cache ask every live
+    /// dispatcher instead: this recorder wants the event and the other does
+    /// not, which caches `sometimes`, and each event then goes to whichever
+    /// subscriber its own thread has.
+    struct Installed {
+        _default: tracing::subscriber::DefaultGuard,
+        _second: tracing::Dispatch,
+    }
+
+    fn install(recorder: &Recorder) -> Installed {
+        let second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        Installed { _default: tracing::subscriber::set_default(recorder.clone()), _second: second }
+    }
+
     /// `<prefix><digits>ms<suffix>` and nothing else.
     #[track_caller]
     fn assert_timed(line: &str, prefix: &str, suffix: &str) {
@@ -590,7 +613,7 @@ mod logging {
     #[tokio::test]
     async fn a_retry_is_announced_at_info_before_it_is_sent() {
         let recorder = Recorder::default();
-        let _default = tracing::subscriber::set_default(recorder.clone());
+        let _installed = install(&recorder);
         let server = serve(|attempt, _| match attempt {
             1 => respond(503, br#"{"message": "secret-body"}"#, true),
             _ => respond(200, br#"{"models": []}"#, false),
