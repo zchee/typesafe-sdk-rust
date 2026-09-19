@@ -45,9 +45,9 @@ allow = [
 confidence-threshold = 0.8
 # One crate, one license, the owner's decision of 2026-09-19; the allow list
 # above stays as it is. libfuzzer-sys bundles the libFuzzer C++ runtime, which
-# is under NCSA. It is reachable only from the unpublished fuzz/ workspace
-# (checked with `--manifest-path fuzz/Cargo.toml`), never from the graph of a
-# published crate.
+# is under NCSA. The exception is crate-scoped, so it does not by itself keep
+# libfuzzer-sys out of a published crate's graph; the `[bans] deny` entry for
+# libfuzzer-sys below does.
 exceptions = [
     { allow = ["NCSA"], crate = "libfuzzer-sys" },
 ]
@@ -78,7 +78,15 @@ wildcards = "deny"
 allow-wildcard-paths = true
 highlight = "all"
 allow = []
-deny = []
+# The owner allowed NCSA for libfuzzer-sys on the condition that it is
+# reachable only from the unpublished fuzz/ workspace. This entry is that
+# condition: the fuzz crate may depend on libfuzzer-sys directly, and a
+# direct dependency from any other crate fails the check, so libfuzzer-sys
+# enters a graph only through the fuzz crate. In the root graph, which has no
+# libfuzzer-sys, cargo-deny warns `unused-wrapper`; that warning is expected.
+deny = [
+    { crate = "libfuzzer-sys", wrappers = ["typesafe-sdk-rust-fuzz"] },
+]
 skip = []
 skip-tree = []
 
