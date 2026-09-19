@@ -27,10 +27,6 @@ fn debug(map: &HeaderMap) -> String {
     format!("{:?}", redact(map))
 }
 
-fn display(map: &HeaderMap) -> String {
-    redact(map).to_string()
-}
-
 // ------------------------------------------------------------ the rules
 
 /// Upstream's nine header spellings: the six credential names, the `token`
@@ -56,11 +52,6 @@ fn every_upstream_secret_header_is_redacted_and_its_neighbour_is_not() {
         assert_eq!(
             debug(&map),
             format!(r#"{{"{lower}": "***", "x-visible": "request-visible"}}"#),
-            "header {name}"
-        );
-        assert_eq!(
-            display(&map),
-            format!("{{{lower}: ***, x-visible: request-visible}}"),
             "header {name}"
         );
     }
@@ -95,7 +86,6 @@ fn a_value_flagged_sensitive_is_redacted_under_any_name() {
     map.insert("x-innocent", hidden);
 
     assert_eq!(debug(&map), r#"{"x-visible": "shown", "x-innocent": "***"}"#);
-    assert_eq!(display(&map), "{x-visible: shown, x-innocent: ***}");
 }
 
 /// A repeated name is rendered once per value, in order, and redaction
@@ -113,7 +103,6 @@ fn every_value_of_a_repeated_name_is_rendered_and_redacted() {
         debug(&map),
         r#"{"set-cookie": "***", "set-cookie": "***", "x-tag": "a", "x-tag": "b"}"#
     );
-    assert_eq!(display(&map), "{set-cookie: ***, set-cookie: ***, x-tag: a, x-tag: b}");
 }
 
 // ------------------------------------------------------------- rendering
@@ -122,12 +111,11 @@ fn every_value_of_a_repeated_name_is_rendered_and_redacted() {
 fn an_empty_map_renders_as_empty_braces() {
     let map = HeaderMap::new();
     assert_eq!(debug(&map), "{}");
-    assert_eq!(display(&map), "{}");
 }
 
-/// A byte above 0x7F is escaped in both renderings, so a value cannot put
-/// arbitrary bytes into a log line. A tab is the one control character `http`
-/// admits in a value; it is written as it is, which cannot break a line.
+/// A byte above 0x7F is escaped, so a value cannot put arbitrary bytes into a
+/// log line. A tab is the one control character `http` admits in a value; it
+/// is written as it is, which cannot break a line.
 #[test]
 fn a_value_with_a_byte_above_ascii_is_escaped() {
     let mut map = HeaderMap::new();
@@ -137,14 +125,13 @@ fn a_value_with_a_byte_above_ascii_is_escaped() {
     map.append("x-order", HeaderValue::from_static("tea\tpot"));
 
     assert_eq!(debug(&map), "{\"x-order\": \"caf\\xe9\tlatte\", \"x-order\": \"tea\tpot\"}");
-    assert_eq!(display(&map), "{x-order: \"caf\\xe9\tlatte\", x-order: tea\tpot}");
 }
 
 /// A rendering of a map holding a real-looking key contains no piece of that
 /// key: not the whole, not the part after `Bearer `, and no run of four of
 /// its characters.
 #[test]
-fn a_real_looking_key_leaves_no_trace_in_either_rendering() {
+fn a_real_looking_key_leaves_no_trace_in_the_rendering() {
     let key = "sk-live-9f8e7d6c5b4a3210ZYXWVUTSRQ";
     let bearer = format!("Bearer {key}");
     let map = headers(&[
@@ -153,14 +140,13 @@ fn a_real_looking_key_leaves_no_trace_in_either_rendering() {
         ("x-request-id", "req-123"),
     ]);
 
-    for rendered in [debug(&map), display(&map)] {
-        assert!(rendered.contains("req-123"), "a visible value went missing: {rendered}");
-        assert!(!rendered.contains("Bearer"), "the scheme leaked: {rendered}");
-        let characters: Vec<char> = key.chars().collect();
-        for window in characters.windows(4) {
-            let piece: String = window.iter().collect();
-            assert!(!rendered.contains(&piece), "{piece:?} of the key leaked: {rendered}");
-        }
+    let rendered = debug(&map);
+    assert!(rendered.contains("req-123"), "a visible value went missing: {rendered}");
+    assert!(!rendered.contains("Bearer"), "the scheme leaked: {rendered}");
+    let characters: Vec<char> = key.chars().collect();
+    for window in characters.windows(4) {
+        let piece: String = window.iter().collect();
+        assert!(!rendered.contains(&piece), "{piece:?} of the key leaked: {rendered}");
     }
 }
 
@@ -171,6 +157,6 @@ fn the_view_is_a_copyable_borrow() {
     let map = headers(&[("x-a", "1")]);
     let view = redact(&map);
     let copy = view;
-    assert_eq!(format!("{view} {copy:?}"), r#"{x-a: 1} {"x-a": "1"}"#);
+    assert_eq!(format!("{view:?} {copy:?}"), r#"{"x-a": "1"} {"x-a": "1"}"#);
     assert_eq!(size_of::<RedactedHeaders<'_>>(), size_of::<&HeaderMap>());
 }

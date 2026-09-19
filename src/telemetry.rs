@@ -375,32 +375,6 @@ impl fmt::Debug for RedactedHeaders<'_> {
     }
 }
 
-#[cfg(feature = "tracing")]
-impl fmt::Display for RedactedHeaders<'_> {
-    /// `{name: value, authorization: ***}`, each value as plain text when it
-    /// is UTF-8 and in its quoted, escaped `Debug` form when it is not.
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("{")?;
-        for (index, (name, value)) in self.entries().enumerate() {
-            if index > 0 {
-                formatter.write_str(", ")?;
-            }
-            write!(formatter, "{name}: ")?;
-            match value {
-                None => formatter.write_str(REDACTED)?,
-                Some(value) => match value.to_str() {
-                    Ok(text) => formatter.write_str(text)?,
-                    // Only visible ASCII passes `to_str`; a value holding any
-                    // other byte is printed escaped, so it cannot put raw
-                    // bytes into a log line.
-                    Err(_) => write!(formatter, "{value:?}")?,
-                },
-            }
-        }
-        formatter.write_str("}")
-    }
-}
-
 /// One header value in a `Debug` map: the value, or the redaction marker.
 #[cfg(feature = "tracing")]
 struct Shown<'a>(Option<&'a HeaderValue>);
