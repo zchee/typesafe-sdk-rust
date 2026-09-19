@@ -1333,6 +1333,17 @@ mod warning {
         let recorder = Recorder::default();
         let body = br#"{"model":"m","usage":{},"answers":{"mystery":{"type":"aur\u006fra","value":"secret-value"},"spam":{"type":"noul","noul":1}}}"#;
 
+        // tracing-core caches a callsite's interest when the callsite is first
+        // reached, and while a single dispatcher is registered it asks only the
+        // default of the thread that reached it (`Rebuilder::JustOne`,
+        // tracing-core 0.1.36 `callsite.rs`). This binary's other tests run on
+        // threads of the same process, with no subscriber, so the warning's
+        // callsite could be cached as `never` before this test reaches it. A
+        // second registered dispatcher, alive for the test, makes the cache ask
+        // every live dispatcher: this recorder wants the event and the other
+        // does not, which caches `sometimes`, so each thread's own default
+        // decides.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let response = tracing::subscriber::with_default(recorder.clone(), || decode(body));
 
         assert_eq!(response.answers().names().collect::<Vec<_>>(), ["spam"]);
