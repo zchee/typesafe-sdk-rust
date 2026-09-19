@@ -1361,3 +1361,41 @@ higher there (0.68x) was not measured.
 - The R17 ceiling at any value other than 1 MiB and 8 MiB, and under a musl or jemalloc allocator.
 - The name budgets on a 32-bit target (inline limit 12 bytes), and `compact_str`'s instruction counts on arm64.
 - Future sizes on targets other than macOS and Linux (the size guard keeps loose bounds there).
+
+## Phase 6 - hardening
+
+### F1: a body that is not UTF-8 is refused before the parser reads it (`ab5c4b3`)
+
+**What.** Fuzzing `decode_response` found, after 41 executions, that bytes that are not UTF-8 inside a JSON string
+reached sonic-rs 0.5.10's `as_str` (`src/parser.rs:104`), which is a `debug_assert!` followed by
+`from_utf8_unchecked`: a panic with debug assertions, an invalid `&str` handed to serde without them. `from_slice`
+records the first bad byte up front but raises the error only after deserialization has finished. The SDK reached it
+through the error-body reader (any non-2xx whose `RawJson` members hold such a string) and through the path-tracking
+second pass of `decode_seed` (a 200 whose score legend value is an object).
+
+**Where and the fix.** `src/codec.rs`: `as_text`, one `std::str::from_utf8` (no allocation) at the two places every
+body enters the codec, `decode` and `decode_seed`, before the depth pre-scan. The checked `&str` then goes to
+`sonic_rs::from_str` / `Deserializer::from_str`, which skip sonic's own UTF-8 pass, and `describe_failure` takes the
+same `&str`. So a body is validated once: a `decode_seed` body was validated twice before. A failure is a
+`DecodeErrorKind::Syntax` at the first bad byte.
+
+**Cost, as measured.**
+
+- Allocations: the five `alloc_*` tests pass unchanged; no budget or assertion moved. The check allocates nothing.
+- Wall clock, divan on macOS arm64 (`cargo bench --features internals,macros --bench sdk`), two alternating rounds
+  per tree (fix, base, fix, base), one at a time. Medians:
+
+  | Bench | fix r1 / r2 | base r1 / r2 | Delta range |
+  | --- | --- | --- | --- |
+  | `decode::answers[3]` | 1.332 / 1.291 us | 1.322 / 1.270 us | +0.8 to +1.7% |
+  | `decode::answers[20]` | 9.999 / 9.666 us | 9.729 / 9.249 us | +2.8 to +4.5% |
+  | `decode::typed` | 1.239 / 1.207 us | 1.291 / 1.239 us | -2.6 to -4.0% |
+  | `call::sdk` | 2.291 / 2.270 us | 2.291 / 2.207 us | 0 to +2.9% |
+
+  Round-to-round drift within one tree reaches 4.9% (base `answers[20]`: 9.729 to 9.249 us), so none of these moves
+  is resolved.
+
+**Not measured.** Instruction counts on the Linux host: the host was not available to this phase, so the change has
+no callgrind numbers. The expected delta is small (std's UTF-8 pass replaces sonic's for most bodies), and that
+expectation is unverified until the Linux run. Nor was any fuzzing done on x86_64, where sonic-rs picks other SIMD
+paths.
