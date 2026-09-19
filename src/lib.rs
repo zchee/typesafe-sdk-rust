@@ -132,3 +132,10 @@ pub use typesafe_sdk_rust_macros::QuestionSet;
 
 #[doc(hidden)]
 pub mod __private;
+
+/// Compiles every Rust block of `README.md` as a doctest, so the front page
+/// cannot drift from the API. The typed-answers block needs the derive, hence
+/// the feature.
+#[cfg(all(doctest, feature = "macros"))]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;

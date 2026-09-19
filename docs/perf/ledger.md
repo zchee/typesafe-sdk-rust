@@ -1203,8 +1203,17 @@ Linux host (`acd4df3` -> `ae65058`): `typed` 22,982 -> 22,974, `call::sdk` 33,90
 runs each: the clamp alone cost `typed` +154 (23,136); the clamp with an emptiness check inside the loop cost `typed`
 +194 (23,176, so the check itself +40 over the clamp alone) and `sdk_20` +0.4% (min 193,356 -> 194,150); and the
 peeled loop with the hint bounded a second time inside the decoder cost `typed` +115 (23,097), because the decoder was
-no longer inlined into its hint-0 wrapper. The committed form: `typed` -8 (22,974). The raw table is p5-fix's
-`linux/ir-table.txt` (variants `a`, `ab`, `ac`, `ad` against `base`).
+no longer inlined into its hint-0 wrapper. The committed form: `typed` -8 (22,974). The raw callgrind table these
+rows come from was not kept (it lived in a temporary session directory); the `decode::typed` rows it held are these,
+each the same in all five runs:
+
+| Variant | Form | `decode::typed` Ir | Against base |
+| --- | --- | ---: | ---: |
+| base | `acd4df3`, no clamp | 22,982 | 0 |
+| a | the clamp alone | 23,136 | +154 |
+| ab | the clamp and an emptiness check inside the loop | 23,176 | +194 |
+| ac | the peeled loop, the hint bounded again inside the decoder | 23,097 | +115 |
+| ad | the peeled loop, bounded once (committed in `ae65058`) | 22,974 | -8 |
 
 **D5: observable changes of candidate 6, accepted.** `AnswerContext` (a public type): its `Debug` output gained the
 field (`AnswerContext { expected_answers: 0, levels: 0 }`), its alignment went from 8 to 4 on 64-bit targets (the

@@ -1,3 +1,525 @@
 # TypeSafe AI Rust SDK
 
-Rust SDK for [TypeSafe AI](https://typesafe.ai).
+An async Rust client for the [TypeSafe AI](https://typesafe.ai) API: the System One endpoint
+(`POST /v1/systemone`), which answers named questions about a state, and the model listing
+(`GET /v1/models`). It is a port of the official Python SDK,
+[typesafe-sdk-python](https://github.com/typesafe-ai/typesafe-sdk-python) 0.7.0 (commit
+`2ce5c65`); the places where it behaves differently on purpose are listed under
+[Deviations from the Python SDK](#deviations-from-the-python-sdk).
+
+The package is published as **`typesafe-sdk-rust`**, because the name `typesafe-sdk` is already
+taken on crates.io. The library it builds is **`typesafe_sdk`**, so code writes
+`use typesafe_sdk::...`.
+
+## Install
+
+```toml
+[dependencies]
+typesafe-sdk-rust = "0.1.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+The minimum supported Rust version is **1.98**, and the crate uses edition 2024.
+
+| Feature | Default | What it does |
+| --- | --- | --- |
+| `macros` | on | `#[derive(QuestionSet)]`: questions declared as a struct and serialized at compile time, answers decoded straight into its fields. Pulls in the `typesafe-sdk-rust-macros` crate at the exact same version. |
+| `tracing` | on | Log events through the [`tracing`](https://docs.rs/tracing) crate (see [Logging](#logging)). Without it, every event is compiled out. |
+| `internals` | off | Exposes a hidden `typesafe_sdk::__internals` module used by this repository's allocation tests and benchmarks. It carries **no semver promise**; do not depend on it. |
+
+## Runtime requirement
+
+Every network operation is `async` and runs on the caller's [Tokio](https://tokio.rs) runtime,
+which must have its **time driver enabled**: each attempt has a deadline, retries sleep between
+attempts, and HTTP/2 keep-alive pings run on a timer. `#[tokio::main]` and
+`Builder::enable_all()` / `enable_time()` enable it; Tokio panics when a timer is created on a
+runtime without it.
+
+## Quickstart
+
+A call asks a set of named questions about a state. The set is validated and serialized once by
+`Questions::prepare`, and the resulting `PreparedQuestions` is reused by every call that asks it.
+
+```rust,no_run
+use std::time::Duration;
+
+use typesafe_sdk::{Choice, Client, Noul, Questions, Score};
+
+#[tokio::main]
+async fn main() -> Result<(), typesafe_sdk::Error> {
+    // Reads TYPESAFE_API_KEY (and optionally TYPESAFE_BASE_URL, TYPESAFE_DEFAULT_MODEL).
+    let client = Client::from_env()?;
+
+    let questions = Questions::new()
+        .noul("billing", Noul::new().instructions("Is this about billing?"))
+        .choice("tone", Choice::new(["calm", "angry"]).instructions("What is the tone?"))
+        .score("urgency", Score::new(["can wait", "this week", "today"]))
+        .prepare()?;
+
+    let state = "I was charged twice for one order.";
+    let response = client
+        .system_one(state, &questions)
+        .model("jev-latest")
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await?;
+
+    let answers = response.answers();
+    if let Some(billing) = answers.noul("billing") {
+        println!("billing: {}", billing.noul());
+    }
+    if let Some(tone) = answers.choice("tone") {
+        println!("tone: {} ({})", tone.choice(), tone.confidence());
+    }
+    if let Some(urgency) = answers.score("urgency") {
+        println!("urgency: {} ({})", urgency.score(), urgency.confidence());
+    }
+    println!("request id: {:?}", response.meta().request_id());
+    Ok(())
+}
+```
+
+`state` is anything that implements `serde::Serialize` and encodes as a JSON string, object or
+array; it is encoded straight into the request body when the request is sent. A request is
+configured with `.model()`, `.timeout()` / `.no_timeout()`, `.header()`, `.retry()` and
+`.extra_body(name, &value)` (a top-level body member the SDK does not model; a later member of
+the same name replaces an earlier one, and one named `state`, `model` or `questions` replaces
+the built-in member). Nothing is checked or encoded before `.send()`.
+
+A question that the builders do not model is written with `RawQuestion`, which sends its
+fields unread and applies only the checks the Python SDK applies to a raw dictionary (`type` is
+a non-empty string, a `choice` or `score` has `criteria`, a `score`'s `criteria` is not empty):
+
+```rust
+use typesafe_sdk::{Questions, RawQuestion};
+
+fn main() -> Result<(), typesafe_sdk::Error> {
+    let questions = Questions::new()
+        .raw("spam", RawQuestion::new("noul").field("instructions", "Is this spam?"))
+        .prepare()?;
+    assert_eq!(questions.names().collect::<Vec<_>>(), ["spam"]);
+    Ok(())
+}
+```
+
+The answers of a response are looked up by question name (`answers().noul(name)`,
+`.choice(name)`, `.score(name)`, `.get(name)`), iterated in wire order (`iter()`), or filtered
+by kind (`nouls()`, `choices()`, `scores()`, which copy nothing). An answer of a type this
+version does not know is skipped with a `WARN` event; the received bytes stay available through
+`response.meta().raw_body()`, together with the status and the headers.
+
+## Typed answers
+
+With the `macros` feature, a struct with one field per question is both the question set and
+the answer type. The questions JSON is generated at compile time, and the response decodes
+straight into the fields, without a map in between.
+
+```rust,no_run
+use typesafe_sdk::{ChoiceAnswer, Client, NoulAnswer, QuestionSet, ScoreAnswer};
+
+#[derive(QuestionSet)]
+struct Ticket {
+    #[noul(instructions = "Is this about billing?", yes = "payments or invoices")]
+    billing: NoulAnswer,
+    #[choice(instructions = "What is the tone?", options("calm" = "neutral or polite", "angry"))]
+    tone: ChoiceAnswer,
+    #[score(instructions = "How urgent?", levels("can wait", "this week", "today"))]
+    urgency: ScoreAnswer,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), typesafe_sdk::Error> {
+    let client = Client::from_env()?;
+    let response = client.ask::<Ticket>("I was charged twice for one order.").send().await?;
+    let ticket = response.answers();
+    println!("billing: {}", ticket.billing.noul());
+    println!("tone: {}", ticket.tone.choice());
+    println!("urgency: {}", ticket.urgency.score());
+    Ok(())
+}
+```
+
+`client.ask::<Ticket>(&state)` is `client.system_one(&state, Ticket::prepared()).typed::<Ticket>()`;
+the second spelling is the one to use where the builder's type has to be named. The derive
+accepts text content only; object or array content stays a feature of the runtime `Questions`
+builder. It refuses at compile time a duplicate wire name, option or level, a score without
+levels, a field whose type does not match its question kind, and an `Option<...Answer>` field.
+`#[question(name = "...")]` sends a key that is not a Rust identifier, and
+`#[question_set(crate = ...)]` points the generated code at a renamed dependency.
+
+## Models
+
+```rust,no_run
+use typesafe_sdk::{Client, Error};
+
+async fn print_models(client: &Client) -> Result<(), Error> {
+    let listed = client.models().list().send().await?;
+    for model in listed.models() {
+        println!("{} ({}): {}", model.name(), model.release_date(), model.description());
+    }
+    Ok(())
+}
+```
+
+## Errors
+
+Every fallible operation returns `typesafe_sdk::Error`, one pointer wide. `Error::kind()` says
+what failed:
+
+| `ErrorKind` | Meaning |
+| --- | --- |
+| `Config` | The client could not be built: no API key, a blank or non-ASCII key, a base URL that is not an absolute `http`/`https` URL without userinfo, query or fragment, a zero deadline or size limit, an environment variable that is not UTF-8, a default header that cannot be sent. |
+| `InvalidRequest` | The request was never sent: a header that is not a valid header, a zero deadline, a `state` that encodes as a number, a boolean or `null`, a value that cannot be encoded as JSON, an invalid question set. |
+| `Api(ApiError)` | The server answered with a status outside 2xx. |
+| `Connection` | No HTTP response was read: the connection failed, was refused, or broke. `source()` leads to the transport's error. |
+| `Timeout { timeout }` | An attempt ran past its deadline. |
+| `ResponseValidation(ResponseValidationError)` | A 2xx body did not decode into the expected response; `field_path()` names the offending field (`answers.spam.noul`), and the body is kept. |
+| `ResponseTooLarge { limit }` | A 2xx body was larger than the client's limit (16 MiB unless set) and was not read past it. |
+
+The enum is `#[non_exhaustive]`, so a `match` needs a catch-all arm.
+
+`ApiError` carries `status()`, `kind()` (an `ApiErrorKind` by status: 400 `BadRequest`, 401
+`Authentication`, 403 `PermissionDenied`, 404 `NotFound`, 422 `UnprocessableEntity`, 429
+`RateLimit`, 500 and above `InternalServer`, anything else `Other`), `headers()`, `endpoint()`,
+`message()`, `error_type()`, `body()`, `body_text()`, `body_json::<T>()`, `request_id()` (from
+`x-typesafe-request-id`) and `retry_after()` (from `retry-after-ms`, else `Retry-After` as
+seconds or an HTTP date, truncated to whole milliseconds). The live API answers a request
+without a key with **403** and `error_type() == Some("authentication_error")`, not the
+documented 401.
+
+An error's `Display` is the sentence to show a user; for an API error it reads
+`POST https://api.typesafe.ai/v1/systemone: 429 Too many requests (request_id=req_123)`.
+
+```rust,no_run
+use typesafe_sdk::{ApiErrorKind, Client, ErrorKind, PreparedQuestions};
+
+async fn ask(client: &Client, questions: &PreparedQuestions) {
+    match client.system_one("hello", questions).send().await {
+        Ok(response) => println!("{} answers", response.answers().len()),
+        Err(error) => match error.kind() {
+            ErrorKind::Api(api) if api.kind() == ApiErrorKind::RateLimit => {
+                eprintln!("rate limited, retry after {:?}: {error}", api.retry_after());
+            }
+            ErrorKind::ResponseValidation(invalid) => {
+                eprintln!("unexpected response at {}: {error}", invalid.field_path());
+            }
+            _ => eprintln!("{error}"),
+        },
+    }
+}
+```
+
+## Retries
+
+A `RetryPolicy` decides which failed attempts are repeated. The defaults are the Python SDK's:
+2 retries; a backoff starting at 500 ms, doubling up to 5 s, with up to a quarter of each delay
+randomly taken off; the statuses 408, 429 and 500-599; connection failures and timeouts
+retried; `retry-after-ms` / `Retry-After` obeyed, however long they ask for; and a **budget**
+of 30 s for the whole call.
+
+```rust,no_run
+use std::time::Duration;
+
+use typesafe_sdk::{Client, Error, PreparedQuestions, RetryPolicy, StatusSet};
+
+async fn ask_twice(questions: &PreparedQuestions) -> Result<(), Error> {
+    let client = Client::builder()
+        .retry(
+            RetryPolicy::default()
+                .max_retries(3)
+                .http_statuses([429, 502, 503, 504].into_iter().collect::<StatusSet>())
+                .timeout(Duration::from_secs(10))?,
+        )
+        .build()?;
+
+    // Retried as the client's policy says.
+    client.system_one("hello", questions).send().await?;
+    // One attempt only; the client and its other calls keep their policy.
+    client.system_one("hello", questions).retry(RetryPolicy::default().max_retries(0)).send().await?;
+    Ok(())
+}
+```
+
+- A policy given to a call with `.retry()` replaces the client's for that call only.
+- **Budget rule**: before each retry, if the time the call has already taken plus the next delay
+  reaches the budget, retrying stops and the call fails with the last attempt's error, unchanged.
+  `RetryPolicy::no_timeout()` removes the budget. The budget is separate from the per-attempt
+  deadline set with the client's or the call's `timeout`.
+- `predicate(|error| ...)` adds failures of the caller's choosing; it sees every failure,
+  including a response that did not decode or was over the size limit.
+- **A 2xx status in the status set retries nothing**: a success response whose body does not
+  decode is a `ResponseValidation` error and is never retried for its status, since the same body
+  would come back and every retry is a billed call. A `predicate` that accepts the error is the
+  way to retry it.
+- The body is encoded once; every attempt sends the same bytes. Retries carry
+  `X-TypeSafe-Retry-Count`. Dropping the call's future cancels a pending retry.
+
+## Configuration
+
+`Client::from_env()` is `Client::builder().build()`. Every builder setting is optional; the
+first three fall back to the environment, then to a default:
+
+| Setting | Environment variable | Default |
+| --- | --- | --- |
+| `api_key` | `TYPESAFE_API_KEY` | none: building fails |
+| `base_url` | `TYPESAFE_BASE_URL` | `https://api.typesafe.ai` |
+| `default_model` | `TYPESAFE_DEFAULT_MODEL` | `jev-latest` |
+| `timeout` / `no_timeout` (per attempt) | - | 10 s |
+| `max_response_bytes` | - | 16 MiB |
+| `default_header(name, value)` | - | none |
+| `retry` | - | `RetryPolicy::default()` |
+| `add_root_certificate(der)`, `http_version`, `connect_timeout` | - | none, see below |
+
+These three are the only environment variables the SDK reads, and only for a setting the caller
+left unset: an explicit value always wins. A value from the environment is trimmed (with
+Python's `str.strip()` rules), a blank one counts as unset, and one that is not UTF-8 is a
+`Config` error naming the variable. An explicit key or default model that is blank is refused
+instead of sent. Trailing slashes come off the base URL, and a path prefix is kept
+(`https://example.test/prefix///` sends to `https://example.test/prefix/v1/systemone`). The
+per-attempt deadline runs from the first byte sent to the last byte received: a multi-megabyte
+`state` on a slow link can exceed 10 s and be retried, so raise the deadline for large states.
+
+The API key is sent as `Authorization: Bearer <key>` and never printed: the `Debug` output of
+the builder, the client and a request show neither the key nor any header value. Headers are
+merged as client defaults < per-call headers < the SDK's own (`Authorization`, `Accept`,
+`User-Agent`, `X-TypeSafe-SDK`, `X-TypeSafe-Runtime`, and `Content-Type` on a request with a
+body), and a caller's `X-TypeSafe-Retry-Count` is dropped. A base URL's path appears in `Debug`
+and in error messages, so do not put a credential there.
+
+## Custom transport
+
+`ClientBuilder::build_with_service(service)` sends every request through any
+[`tower_service::Service`](https://docs.rs/tower-service) that takes an
+`http::Request<typesafe_sdk::Body>` and answers with an `http::Response` of any
+[`http_body::Body`](https://docs.rs/http-body): a proxy, a recorder, a middleware stack, or, as
+below, an in-memory answer for a test. The service owns its connections and their timeouts; the
+SDK still applies its own per-attempt deadline and response size limit. The settings only the
+default transport has (`add_root_certificate`, `http_version`, `connect_timeout`) are a `Config`
+error with `build_with_service`, never silently ignored.
+
+```rust
+use std::{
+    convert::Infallible,
+    future::{Ready, ready},
+    task::{Context, Poll},
+};
+
+use http::{Request, Response};
+use typesafe_sdk::{Body, Client, Noul, Questions};
+
+/// Answers every request with the same JSON body.
+#[derive(Clone)]
+struct Canned(&'static str);
+
+impl tower_service::Service<Request<Body>> for Canned {
+    type Response = Response<Body>;
+    type Error = Infallible;
+    type Future = Ready<Result<Response<Body>, Infallible>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Request<Body>) -> Self::Future {
+        ready(Ok(Response::new(Body::from(bytes::Bytes::from_static(self.0.as_bytes())))))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), typesafe_sdk::Error> {
+    let answer = r#"{"model":"jev-latest","usage":{},"answers":{"spam":{"type":"noul","noul":0.98}}}"#;
+    let client = Client::builder().api_key("test-key").build_with_service(Canned(answer))?;
+    let questions = Questions::new().noul("spam", Noul::new().instructions("Spam?")).prepare()?;
+    let response = client.system_one("Buy now!", &questions).send().await?;
+    assert_eq!(response.answers().noul("spam").map(|answer| answer.noul()), Some(0.98));
+    Ok(())
+}
+```
+
+When a custom service fails, its error's text becomes the `Connection` error's message (escaped
+and cut at 200 characters): a service that prints a request header into its error puts that
+header's value into the message.
+
+## Connections and concurrency
+
+A `Client` is cheap to clone (one reference count) and every clone shares one connection pool;
+a clone per task is the intended use. The default transport is hyper over rustls, with the
+operating system's trust store through `rustls-platform-verifier` (plus any
+`add_root_certificate` roots), `TCP_NODELAY`, idle connections kept 90 s and HTTP/2 keep-alive
+pings every 30 s.
+
+- For an `https` base URL the default is `HttpVersion::Http2Only`: all requests of a client share
+  one multiplexed HTTP/2 connection, including requests started together on a client that has no
+  connection yet (64 concurrent cold calls open exactly 1 connection in the test suite).
+  `HttpVersion::Auto` lets ALPN choose HTTP/1.1 or HTTP/2, for a proxy that speaks HTTP/1.1 only;
+  a cold client under `Auto` may open one connection per request started at the same time. An
+  `http` base URL uses `Auto` unless told otherwise.
+- `client.warm_up().await` lists the models once and drops the answer. It checks the API key and
+  leaves an open connection in the pool, so call it **before a fan-out**: the first requests
+  then pay no TCP or TLS handshake, and a bad key fails once instead of once per request.
+- `examples/concurrency.rs` shows a bounded fan-out over several states.
+
+## Logging
+
+With the `tracing` feature (on by default) the SDK emits [`tracing`](https://docs.rs/tracing)
+events and never installs a subscriber: where the events go is the application's choice. Every
+event's target starts with `typesafe_sdk`, so one filter directive selects them all, for
+example with `tracing-subscriber`'s `EnvFilter`:
+
+```text
+RUST_LOG=typesafe_sdk=info
+```
+
+| Level | What is logged |
+| --- | --- |
+| `INFO` | One line per attempt: `GET https://api.typesafe.ai/v1/models <- 200 in 12ms (request req_1)` for a response of any status, or `... <- timeout` (a fixed word per failure kind, never the error's text) for an attempt that got none; `POST ... retry 1` before a retry. |
+| `WARN` | An answer of a type this version does not model was skipped (question name and type only; target `typesafe_sdk::de`). |
+| `DEBUG` | Each request as it leaves and each response as it arrives: method, endpoint, retry count, status, request id, elapsed time, the headers with secrets redacted, and the **body length**. |
+| `TRACE` | The request and response **bodies**, with control and format characters escaped, uncut. |
+
+A header value is printed as `***` when its name is `authorization`, `proxy-authorization`,
+`x-api-key`, `api-key`, `cookie` or `set-cookie`, when its name contains `token` or `secret`, or
+when the value is flagged sensitive (the SDK flags `Authorization`). A `state` may carry personal
+data, so bodies appear only at `TRACE`.
+
+`TYPESAFE_LOG_LEVEL`, which sets the Python SDK's logger level, is **not honoured**: a library
+must not install or configure a subscriber for the application, so the level is set by the
+application's own filter on the `typesafe_sdk` target.
+
+## Security notes
+
+- **The API key** is held as a `secrecy::SecretString` until it becomes the `Authorization`
+  header value, which is flagged sensitive; no `Debug` or `Display` of this crate prints it, and
+  no error message repeats it.
+- **Server text is escaped and cut.** Every message read from a response body (whichever member
+  it came from, or the body itself when no member holds one) has its control characters and
+  text-hiding format characters written as Rust escapes (`\n`, `\u{1b}`, `\u{202e}`) and is cut
+  at **200** characters plus U+2026. The request id and the error type are shown escaped and cut
+  at **128**; a field path's names at 128 each and the whole path at **320**; a connection
+  error's chain (at most 8 links) at 200. The raw data stays reachable through `body()`,
+  `body_text()`, `body_json()`, `request_id()` and `error_type()`.
+- **An API error can echo your `state`.** A 422 may repeat part of the request in its message,
+  so the `Display` of an API error can carry up to 200 escaped characters of `state`. A caller
+  whose `state` is sensitive should log `error.kind()` or the status rather than the whole error.
+  `Debug` of an `ApiError` shows the headers as a count and the body as a length.
+- **`{:?}` of an `Error` and chain-walking reporters print the transport's full text.** `source()`
+  keeps the transport's error whole on purpose, and `Debug` prints it, as do reporters such as
+  `anyhow` and `eyre` that walk the chain; that text can be long (an HTTP/2 GOAWAY carries up to
+  16 KiB of debug data) and is not text this SDK wrote. Log the `Display` form when that matters.
+- **Hop-by-hop headers.** A caller may set `content-length`, `transfer-encoding`, `connection` or
+  `host` as a header; HTTP/2 refuses those as a protocol error, and the request then fails.
+- **Responses are bounded.** A body is read under a 16 MiB cap, and a JSON document nested deeper
+  than 16 levels is refused before it reaches the parser (see below).
+
+## Performance notes
+
+The numbers below are measured, not estimated; the method, the machines and every run are in
+[`docs/perf/ledger.md`](docs/perf/ledger.md). Allocation counts are dhat block counts on the
+second identical call, 64-bit targets.
+
+- **Allocations.** Encoding a request body is **1** allocation (2 when the body is kept for a
+  retry). Decoding the three-answer fixture into `Answers` is **7** blocks (578 bytes), 6 into a
+  derived struct. A whole call's own allocations, beyond what the transport allocates, are **12**
+  blocks (11 with `max_retries(0)`).
+- **Encode scratch.** The body is encoded into a per-thread scratch buffer whose capacity is kept
+  between calls. A scratch that grew past **8 MiB** is dropped after its call, so a `state` whose
+  encoding needs more (a string of about 1.33 MiB or more) pays a first call's allocations on
+  every call.
+- **Response cap.** 16 MiB unless `max_response_bytes` says otherwise; a body over it is not read.
+- **Debug builds and the default transport.** Tokio boxes a future larger than 2,048 bytes when
+  it is spawned or blocked on in a debug build (16,384 in release). A System One call over the
+  default transport is a 2,344-byte future, so a debug build that spawns calls pays one more
+  allocation per call; a release build does not, and neither does a call over a custom transport
+  (2,040 bytes).
+- **Release profile.** A library cannot set the profile it is built with, so these belong in the
+  application's `Cargo.toml`. They are the usual settings for a smaller, faster binary; this
+  repository's numbers were taken with Cargo's default profiles, so their effect on this SDK is
+  not measured here.
+
+  ```toml
+  [profile.release]
+  lto = "fat"
+  codegen-units = 1
+  ```
+- **`-C target-cpu` on x86_64.** The JSON codec, [sonic-rs](https://docs.rs/sonic-rs), selects its
+  SIMD code at compile time. Without a `target-cpu`, an x86_64 build gets the SSE2 baseline only.
+  An application that knows its hardware can build with, for example,
+  `RUSTFLAGS="-C target-cpu=x86-64-v3"` (AVX2) or `-C target-cpu=native`; the binary then does not
+  run on CPUs without those features. Every number in the ledger was taken **without** such a
+  flag, which is what a default build gets.
+- **Non-finite floats encode as `null`**, as `serde_json` writes them (the Python SDK writes the
+  non-JSON literals `NaN` and `Infinity`). A `state` that is itself a non-finite float therefore
+  encodes as `null` and is refused as an `InvalidRequest`.
+- **Nesting depth.** A response nested deeper than 16 levels is a `ResponseValidation` error; an
+  error body nested deeper than 16 is not parsed and becomes the raw-text message. The parser has
+  no recursion limit of its own and aborts the process on very deep input, so the depth is
+  checked on the raw bytes first.
+
+## Deviations from the Python SDK
+
+| Python SDK | This crate | Why |
+| --- | --- | --- |
+| Synchronous `TypeSafeClient` | No blocking client; async only | Scope: one client, on Tokio. Upstream runs most client tests against both its clients; this crate ports the async half. |
+| Timeout per httpx phase; `httpx.Timeout` objects | One total deadline per attempt (default 10 s), an optional `connect_timeout`, and `no_timeout()` | One timer per attempt. A multi-megabyte upload on a slow link can exceed 10 s and be retried: raise the deadline for a large `state`. |
+| `http_client.timeout` takes precedence | A custom transport owns its own timeouts; the SDK deadline still wraps each attempt | The transport is the caller's service, configured by the caller. |
+| `http_client=` or `transport=`, mutually exclusive | One builder with two terminal methods: `build()` gives the default transport, `build_with_service(s)` a custom one; `add_root_certificate`, `http_version` and `connect_timeout` are a `Config` error with a custom one | A client needs a key and a base URL whatever sends the bytes; a setting that cannot apply is refused, never ignored. |
+| `.nouls` / `.choices` / `.scores` as cached dict copies | Iterators that filter without copying | Nothing to cache and nothing to leave out of serialization. |
+| Covariant `Mapping` question inputs | The `Questions` builder | Generics take any string type and any iterator of options or levels. |
+| `close()`, context managers, closing a supplied client | `Drop`; a supplied service is owned by value and dropped with the last clone of the client | Ownership replaces lifecycle calls. |
+| Responses and errors are picklable and copyable | Responses are `Clone` and `Serialize`; errors are `Send + Sync + 'static` but not `Clone` | There are no process pools to cross. |
+| `request_id` raises when absent | `request_id()` returns `Option<&str>` | Absence is not an error. |
+| `raw_http_response` | `meta()`: the status, the headers and `raw_body()` | The same recovery path for data this version does not model, such as a skipped answer. |
+| Frozen pydantic models | Private fields with getters | Immutable by construction. |
+| Unknown fields rejected on typed questions; `RetryPolicy` field types checked at run time | Not representable: builders, `u32`, `Duration`; the jitter range and its finiteness are still checked | The type system does the check. |
+| `str` subclasses and abstract `Mapping` / `Sequence` inputs | `impl Serialize`, `impl AsRef<str>`, `impl Into<Cow<str>>` and iterators | Generics. |
+| `TYPESAFE_LOG_LEVEL` sets the logger level | Not read | A library must not configure the application's subscriber; filter the `typesafe_sdk` target instead. |
+| DEBUG logs full bodies | `DEBUG` logs the body length; `TRACE` logs the body | A `state` may carry personal data. |
+| `X-TypeSafe-SDK: typesafe-sdk/<version>` | `typesafe-sdk-rust/<version>`, and `X-TypeSafe-Runtime: rust (<os>; <arch>)` | A port must not be counted as the official SDK. |
+| `RetryPolicy.exceptions` | Dropped; `predicate` kept | There are no exception classes; a predicate sees the `Error`. |
+| Raw dict questions | The `RawQuestion` builder, with the same three checks | Forward compatibility with question types this version does not model. |
+| `response_model=` | `SystemOneResponse<A>` with `.typed::<A>()`, or `#[derive(QuestionSet)]` and `ask::<T>()` | Static typing. |
+| No response size limit | A 16 MiB cap, configurable with `max_response_bytes` | Bounds the memory a broken or hostile endpoint can make one call hold. |
+| No error kind for an oversized response | `ErrorKind::ResponseTooLarge { limit }` for a 2xx body over the cap; a failure status over the cap stays an `ApiError` with its status, headers and `Retry-After` and an empty body | A retry predicate must be able to see that retrying cannot help. |
+| Any nesting depth is parsed | A response nested deeper than 16 levels is a response-validation error; an error body nested deeper than 16 is not parsed and becomes the raw-text message | The JSON parser has no recursion limit and aborts the process on deep input, so the depth is checked on the raw bytes first. |
+| ALPN chooses between HTTP/2 and HTTP/1.1 | `Http2Only` for `https` base URLs, `Auto` as the option for HTTP/1.1-only proxies; `http` base URLs use `Auto` | A cold 64-way fan-out opened 64 connections under `Auto` and 1 under HTTP/2 only. |
+| Server messages are used verbatim and uncut | Every message read from a response body is escaped and cut at 200 characters plus U+2026; the request id is shown escaped and cut at 128; the raw data stays in `body()`, `body_text()`, `body_json()`, `request_id()`, `error_type()` | A server-controlled body of up to 16 MiB, with real newlines, terminal escapes or bidi overrides, must not become a log line. A long validation message is cut in `message()`; the whole text is in `body_text()`. |
+| `Retry-After` kept as float milliseconds | A `Duration` truncated to whole milliseconds (`125.7` becomes 125 ms) | The precision the header carries. |
+| An explicit empty `api_key` is sent | An explicit key or default model that is empty or whitespace-only is a `Config` error, even when the environment holds a usable value; a padded non-blank value is kept byte for byte | A critical setting fails when the client is built, not later as a 401 or 403. |
+| The base URL is not checked until the first request | Checked when the client is built: absolute `http`/`https`, a non-empty host, no userinfo, query or fragment; no message repeats the URL | Fail fast, and a URL that did not parse cannot be trusted to have had its userinfo found. |
+| Any header-legal bytes in the API key | The key must be printable ASCII, spaces or tabs; the message never repeats it | Anything else is a paste error (a curly quote, a non-breaking space) that would only fail later as an authentication error. |
+| Log redaction by header name only | A value flagged sensitive is redacted as well; the name rules are the Python SDK's | A tightening. |
+| A typed noul can send `null` outcomes and empty `criteria` | An undescribed outcome and empty `criteria` are left out; `RawQuestion` can still send all three shapes | The same meaning to the API. |
+| A body that is not an object fails at path `''` | The root is named `.` | The codec's name for the root. |
+| Token counts are `int`; a negative count is accepted | `u64`; a negative count fails at `usage.input_tokens` | A count cannot be negative. |
+| A standalone answer model defaults `type` | Deserializing a lone answer requires `type`; inside a response both SDKs require it | Response decoding is at parity. |
+| A `SystemOneResponse` can be built without its HTTP response | No public constructor: a response always has its `meta()`; the answer types and `Usage` do have constructors | There is nothing to raise on access. |
+| Several errors in one answer: the first in schema order | A type error in a member is reported where it occurs in wire order; missing members are reported in schema order | One pass over the bytes, with no second walk to reorder errors. |
+| Score level keys go through `int()` | Level keys are parsed as `u32`: `-1`, `4294967296`, `" 1"`, `"1.0"` and `"1_0"` fail the whole response at `answers.<name>.legend.<key>`; `+1`, `01` and `00` are accepted as upstream accepts them | A level is a small non-negative index, and the API writes plain decimal keys. The body of a response lost this way is still in the error's `body()`. |
+| `Usage`, a model card or the model list as a JSON array is rejected | Rejected as well, by hand-written readers | Parity on purpose, listed because serde's derive would accept an array positionally. |
+| Duplicate keys: the last one wins | A repeated answer name: the first answer is the one held (`Answers` keeps every entry in wire order and every lookup returns the first; a derived struct keeps the first). Repeated option and level keys keep both entries; lookups find the first. A repeated member inside one answer keeps the last, as Python does | Refusing duplicates would need either a quadratic scan, which a hostile server could exploit, or an allocation per response; the API does not send duplicates. |
+| An answer that names `type` twice: the last wins | Two different values are a response-validation error at `answers.<name>.type`; the same value twice is accepted | A response that contradicts itself is malformed. |
+| A misshaped member is reported at `answers.<name>.<member>` in any member order | With `type` first, the order the API writes, every path matches. `Answers` holds a member that arrives before `type` as raw text and checks it later, so that failure is reported at `answers.<name>`; a derived field reads its members as they arrive, so a misshaped member ahead of a wrong `type` is reported at the member | One pass, without buffering parsed values. |
+| Server-chosen keys appear verbatim in field paths | The key is still shown, but control characters and text-hiding format characters are escaped, each name is cut at 128 characters and the whole path at 320, marked with U+2026 | A server-chosen key must not break a log line, recolour a terminal or grow a message without bound. |
+| `Connection error: {error}` carries the transport's whole text | The chain (at most 8 links) is escaped and cut at 200 characters plus U+2026 after the prefix; `source()` keeps the whole chain | GOAWAY debug data (up to 16 KiB), certificate subjects and a custom transport's text are not text the SDK wrote. |
+| The API key is any `str` | `api_key(impl Into<String>)`, wrapped into a secret at once | No pre-1.0 type appears in a public signature. |
+| The response body type is httpx's | The default transport's body is this crate's `ResponseBody` | No `hyper` type in a public signature, so a hyper upgrade is not a breaking change here. |
+| A 2xx status in the retryable set retries a response that did not validate | A 2xx in `StatusSet` retries nothing: `ResponseValidation` is never retried for its status; a `predicate` can ask for it | A schema mismatch is not transient, and every retry is a billed model call. |
+| `RetryPolicy` fields can be read back | Setters named like the fields and no getters; `backoff_jitter` and `timeout` are the fallible setters (`Config` errors with the Python SDK's messages); `StatusSet` is a `Copy` bitset with a `const DEFAULT` | Nothing needs a policy read back; getters can be added later without breaking anyone. |
+| The state is any value and the model is named at the call | `client.ask::<Q>(&state)` returns a builder whose state type is opaque; `system_one(&state, Q::prepared()).typed::<Q>()` is the nameable form | Naming the state type would force `ask::<Ticket, _>` at every call. |
+| Questions are checked only at run time; a repeated dict key keeps the last | The derive refuses duplicate wire names, options and level keys at compile time; everything else mirrors `Questions::prepare()` (empty options and blank names are accepted); `Option<...Answer>` fields are a compile error | A well-formedness rule of a literal written in source, not an API limit; no documented prose limit is compiled in. |
+| Any class name can hold questions | A derived struct named `__QuestionSetField`, `__QuestionSetFieldVisitor`, `__QuestionSetVisitor`, `__D`, `__M` or `__private` is refused with one error | The expansion declares those names beside the struct. |
+
+## What is not measured
+
+A connect timeout mapping to `ErrorKind::Timeout`, the HTTP/2 keep-alive ping (30 s), the idle
+pool timeout (90 s) and `TCP_NODELAY` are configured but not observed by any test, and Android is
+compiled by no CI job. Neither are the derive's compile-error texts under any rustc other than
+the pinned 1.98.1, the real distribution of the retry jitter (only an injected draw is tested),
+instruction counts on arm64, nor future sizes on targets other than macOS and Linux.
+
+## License
+
+This crate is licensed under the Apache License 2.0; see [`LICENSE`](LICENSE). It is a port of
+typesafe-sdk-python, which is MIT-licensed; that license text is reproduced, as the upstream
+repository ships it, in [`LICENSE-THIRD-PARTY`](LICENSE-THIRD-PARTY) and applies to the material
+derived from it.

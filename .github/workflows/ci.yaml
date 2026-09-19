@@ -164,3 +164,9 @@ jobs:
       # survives every formatter this repository runs.
       - name: Invisible and control characters
         run: python3 .github/scripts/text-hygiene.py
+
+      # Every upstream test is mapped to a Rust test that exists or to a row
+      # of the README's deviations table. A renamed test or a reworded row
+      # still reads as a mapping, so only a check notices it stopped being one.
+      - name: Port test matrix
+        run: python3 .github/scripts/port-test-matrix.py
