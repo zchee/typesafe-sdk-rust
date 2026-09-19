@@ -27,17 +27,17 @@ use syn::DeriveInput;
 use crate::{json, parse};
 
 /// The module every generated path starts at, imported once per expansion.
-pub(crate) const PRIVATE: &str = "__private";
+const PRIVATE: &str = "__private";
 /// The enum the generated code matches an answer's key into.
-pub(crate) const FIELD: &str = "__QuestionSetField";
+const FIELD: &str = "__QuestionSetField";
 /// The visitor that reads a key into a [`FIELD`].
-pub(crate) const FIELD_VISITOR: &str = "__QuestionSetFieldVisitor";
+const FIELD_VISITOR: &str = "__QuestionSetFieldVisitor";
 /// The visitor that reads the answers into the derived struct.
-pub(crate) const VISITOR: &str = "__QuestionSetVisitor";
+const VISITOR: &str = "__QuestionSetVisitor";
 /// The deserializer's type parameter of `deserialize_answers`.
-pub(crate) const DESERIALIZER: &str = "__D";
+const DESERIALIZER: &str = "__D";
 /// The map's type parameter of the visitor's `visit_map`.
-pub(crate) const MAP: &str = "__M";
+const MAP: &str = "__M";
 
 /// The names a derived struct cannot have: each is declared by the expansion
 /// in a scope that also names the struct, where it would stand for the helper
