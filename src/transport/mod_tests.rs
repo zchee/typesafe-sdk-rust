@@ -16,6 +16,16 @@ use crate::{
 
 /// A configuration with a key, a base URL and the given default headers.
 fn config(base_url: &str, defaults: &[(&str, &str)]) -> Config {
+    config_with(base_url, defaults, None, true)
+}
+
+/// [`config`] with a `User-Agent` product and the runtime header switch.
+fn config_with(
+    base_url: &str,
+    defaults: &[(&str, &str)],
+    product: Option<&str>,
+    send_runtime_header: bool,
+) -> Config {
     let mut headers = HeaderMap::new();
     for (name, value) in defaults {
         headers.insert(
@@ -28,6 +38,8 @@ fn config(base_url: &str, defaults: &[(&str, &str)]) -> Config {
         base_url: Some(base_url.into()),
         default_model: Some("jev-latest".into()),
         default_headers: headers,
+        user_agent_product: product.map(str::to_owned),
+        omit_runtime_header: !send_runtime_header,
         ..Explicit::default()
     };
     Config::resolve(explicit, |_: &str| None::<String>)
@@ -115,6 +127,59 @@ fn the_sdk_headers_win_over_every_client_default() {
         [AUTHORIZATION, ACCEPT, USER_AGENT, SDK_HEADER, RUNTIME_HEADER],
         "the protected set is upstream's five"
     );
+}
+
+/// The caller's defaults that name the two headers these settings shape,
+/// and one that is the caller's own.
+const SHAPED_DEFAULTS: [(&str, &str); 3] =
+    [("user-agent", "wrong"), ("x-typesafe-runtime", "wrong"), ("x-team", "default")];
+
+#[test]
+fn a_user_agent_product_goes_in_front_of_the_sdk_identifier_and_leaves_x_typesafe_sdk_alone() {
+    let config = config_with("https://example.test", &SHAPED_DEFAULTS, Some("my-app/1.2.0"), true);
+    let identifier = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
+    let runtime = format!("rust ({}; {})", std::env::consts::OS, std::env::consts::ARCH);
+    for with_body in [false, true] {
+        let headers = base_headers(&config, with_body);
+        let product = format!("my-app/1.2.0 {identifier}");
+        assert_eq!(values(&headers, "user-agent"), [product.as_str()], "body {with_body}");
+        assert_eq!(values(&headers, "x-typesafe-sdk"), [identifier.as_str()], "body {with_body}");
+        assert_eq!(values(&headers, "x-typesafe-runtime"), [runtime.as_str()], "body {with_body}");
+        assert_eq!(values(&headers, "x-team"), ["default"], "body {with_body}");
+    }
+}
+
+#[test]
+fn with_the_runtime_header_off_none_is_built_and_the_other_sdk_headers_are() {
+    let identifier = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
+    for product in [None, Some("my-app/1.2.0")] {
+        let config = config_with("https://example.test", &SHAPED_DEFAULTS, product, false);
+        let user_agent =
+            product.map_or(identifier.clone(), |product| format!("{product} {identifier}"));
+        for with_body in [false, true] {
+            let context = format!("product {product:?}, body {with_body}");
+            let headers = base_headers(&config, with_body);
+            assert!(headers.get(RUNTIME_HEADER).is_none(), "{context}: {headers:?}");
+            assert_eq!(values(&headers, "authorization"), ["Bearer test-key"], "{context}");
+            assert_eq!(values(&headers, "accept"), ["application/json"], "{context}");
+            assert_eq!(values(&headers, "user-agent"), [user_agent.as_str()], "{context}");
+            assert_eq!(values(&headers, "x-typesafe-sdk"), [identifier.as_str()], "{context}");
+            assert_eq!(values(&headers, "x-team"), ["default"], "{context}");
+        }
+    }
+}
+
+/// Neither setting opens a way in: whatever they are, a per-call
+/// `User-Agent` or `X-TypeSafe-Runtime` is dropped, as a default of either
+/// name is above.
+#[test]
+fn a_call_header_never_reaches_user_agent_or_x_typesafe_runtime() {
+    let raw = [("User-Agent", "wrong"), ("X-TypeSafe-Runtime", "wrong"), ("x-team", "call")];
+    for with_body in [false, true] {
+        let parsed = call_headers(raw, with_body).expect("every header is valid");
+        let names: Vec<&str> = parsed.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["x-team"], "body {with_body}");
+    }
 }
 
 #[test]

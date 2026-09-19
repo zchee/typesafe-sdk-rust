@@ -20,7 +20,7 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::{
     constants::{
         API_KEY_ENV, BASE_URL_ENV, DEFAULT_BASE_URL, DEFAULT_MAX_RESPONSE_BYTES, DEFAULT_MODEL,
-        DEFAULT_MODEL_ENV, DEFAULT_TIMEOUT, MODELS_PATH, SYSTEM_ONE_PATH,
+        DEFAULT_MODEL_ENV, DEFAULT_TIMEOUT, MODELS_PATH, SDK_IDENTIFIER, SYSTEM_ONE_PATH,
     },
     error::{Error, format_endpoint},
 };
@@ -36,6 +36,10 @@ pub(crate) struct Explicit {
     pub(crate) timeout: Option<Option<Duration>>,
     pub(crate) default_headers: HeaderMap,
     pub(crate) max_response_bytes: Option<usize>,
+    /// The caller's product, put in front of the SDK's own in `User-Agent`.
+    pub(crate) user_agent_product: Option<String>,
+    /// Whether `X-TypeSafe-Runtime` is left out; `false`, the default, sends it.
+    pub(crate) omit_runtime_header: bool,
 }
 
 /// A client's settings once every source has been consulted and every value
@@ -51,6 +55,9 @@ pub(crate) struct Config {
     timeout: Option<Duration>,
     default_headers: HeaderMap,
     max_response_bytes: usize,
+    /// The whole `User-Agent` value, built once.
+    user_agent: HeaderValue,
+    send_runtime_header: bool,
 }
 
 impl Config {
@@ -71,8 +78,9 @@ impl Config {
     /// API key is found, when an explicit API key or default model is blank,
     /// when the key cannot be sent in an HTTP header, when the base URL is not
     /// an absolute `http` or `https` URL without credentials, query or
-    /// fragment, when the timeout or the response size limit is zero, or when
-    /// a variable `env` reads is not UTF-8.
+    /// fragment, when the timeout or the response size limit is zero, when the
+    /// `User-Agent` product is not a product token (see [`user_agent`]), or
+    /// when a variable `env` reads is not UTF-8.
     pub(crate) fn resolve<V>(
         explicit: Explicit,
         env: impl Fn(&str) -> Option<V>,
@@ -87,6 +95,8 @@ impl Config {
             timeout,
             default_headers,
             max_response_bytes,
+            user_agent_product,
+            omit_runtime_header,
         } = explicit;
 
         let api_key = match api_key {
@@ -145,6 +155,8 @@ impl Config {
             ));
         }
 
+        let user_agent = user_agent(user_agent_product.as_deref())?;
+
         Ok(Self {
             authorization,
             endpoints,
@@ -152,6 +164,8 @@ impl Config {
             timeout,
             default_headers,
             max_response_bytes,
+            user_agent,
+            send_runtime_header: !omit_runtime_header,
         })
     }
 
@@ -186,6 +200,17 @@ impl Config {
     pub(crate) fn default_headers(&self) -> &HeaderMap {
         &self.default_headers
     }
+
+    /// The `User-Agent` value: the SDK's identifier, after the caller's
+    /// product when there is one.
+    pub(crate) fn user_agent(&self) -> &HeaderValue {
+        &self.user_agent
+    }
+
+    /// Whether requests carry `X-TypeSafe-Runtime`.
+    pub(crate) fn send_runtime_header(&self) -> bool {
+        self.send_runtime_header
+    }
 }
 
 impl fmt::Debug for Config {
@@ -195,17 +220,26 @@ impl fmt::Debug for Config {
     /// caller may pass a token there under any name at all. The endpoints are
     /// printed as an error names them, which is the base URL without a default
     /// port; a base URL can carry no userinfo, query or fragment, but it keeps
-    /// its path, so a credential put into that path would show here.
+    /// its path, so a credential put into that path would show here. The
+    /// `User-Agent` value and the runtime header switch are printed only when
+    /// they differ from the default; the value is then a checked product
+    /// token followed by the SDK's identifier, so it holds nothing to escape.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Config")
+        let mut shown = formatter.debug_struct("Config");
+        shown
             .field("endpoints", &self.endpoints)
             .field("default_model", &self.default_model)
             .field("timeout", &self.timeout)
             .field("max_response_bytes", &self.max_response_bytes)
             .field("authorization", &Hidden)
-            .field("default_headers", &HeaderNames(&self.default_headers))
-            .finish()
+            .field("default_headers", &HeaderNames(&self.default_headers));
+        if self.user_agent != SDK_IDENTIFIER {
+            shown.field("user_agent", &self.user_agent);
+        }
+        if !self.send_runtime_header {
+            shown.field("send_runtime_header", &false);
+        }
+        shown.finish()
     }
 }
 
@@ -347,6 +381,91 @@ fn bearer(key: &SecretString) -> Result<HeaderValue, Error> {
         .expect("invariant: every byte was checked to be printable ASCII, a space or a tab");
     value.set_sensitive(true);
     Ok(value)
+}
+
+/// The most bytes a caller's `User-Agent` product may hold.
+pub(crate) const MAX_USER_AGENT_PRODUCT_BYTES: usize = 64;
+
+/// The `User-Agent` value: [`SDK_IDENTIFIER`] alone, or `product` in front of
+/// it, the more significant product first (RFC 9110, section 10.1.5).
+///
+/// Without a product this is the constant itself, which costs no allocation;
+/// with one the value is built once here and shared by every request.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error when
+/// `product` is not `token "/" token` (RFC 9110, section 5.6.2) of at most
+/// [`MAX_USER_AGENT_PRODUCT_BYTES`] bytes. The message names the rule and
+/// never repeats the value, which can hold anything at all.
+pub(crate) fn user_agent(product: Option<&str>) -> Result<HeaderValue, Error> {
+    let Some(product) = product else {
+        return Ok(SDK_IDENTIFIER);
+    };
+    if let Err(rule) = check_product(product) {
+        return Err(Error::config(format!(
+            "The user_agent_product must be a product token, name/version \
+             (RFC 9110, section 10.1.5): {rule}."
+        )));
+    }
+    let sdk = SDK_IDENTIFIER;
+    let mut value = Vec::with_capacity(product.len() + 1 + sdk.len());
+    value.extend_from_slice(product.as_bytes());
+    value.push(b' ');
+    value.extend_from_slice(sdk.as_bytes());
+    Ok(HeaderValue::from_maybe_shared(Bytes::from(value))
+        .expect("invariant: a checked token, a space and the SDK identifier are visible ASCII"))
+}
+
+/// Which rule `product` breaks, if any, as the end of a sentence.
+///
+/// The rules are checked from the most general to the most specific, so the
+/// first one named is the one a reader fixes first: a pasted line with a
+/// newline in it is reported as whitespace, not as a missing version.
+fn check_product(product: &str) -> Result<(), &'static str> {
+    let bytes = product.as_bytes();
+    if bytes.is_empty() {
+        return Err("it is empty");
+    }
+    if bytes.len() > MAX_USER_AGENT_PRODUCT_BYTES {
+        return Err("it is longer than 64 bytes");
+    }
+    if !product.is_ascii() {
+        return Err("it contains a character that is not ASCII");
+    }
+    if bytes.iter().any(u8::is_ascii_whitespace) {
+        return Err("it contains whitespace");
+    }
+    if bytes.iter().any(u8::is_ascii_control) {
+        return Err("it contains a control character");
+    }
+    let Some((name, version)) = product.split_once('/') else {
+        return Err("it has no '/' between the name and the version");
+    };
+    if version.contains('/') {
+        return Err("it has more than one '/'");
+    }
+    if name.is_empty() {
+        return Err("the name before the '/' is empty");
+    }
+    if version.is_empty() {
+        return Err("the version after the '/' is empty");
+    }
+    if !name.bytes().chain(version.bytes()).all(is_tchar) {
+        return Err("it contains a character a token cannot hold (RFC 9110, section 5.6.2)");
+    }
+    Ok(())
+}
+
+/// Whether `byte` is a `tchar` of RFC 9110, section 5.6.2: a letter, a digit
+/// or one of ``!#$%&'*+-.^_`|~``.
+///
+/// Written out here because no crate the SDK depends on exposes this set:
+/// `http` checks header names against a table of its own, which lowercases
+/// what it accepts and is not public, and no maintained crate on crates.io
+/// offers the predicate alone.
+fn is_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
 /// The message a zero deadline is refused with, the Python SDK's wording.

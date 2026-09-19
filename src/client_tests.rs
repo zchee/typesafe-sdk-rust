@@ -244,3 +244,101 @@ fn a_clone_shares_one_client() {
     let clone = client.clone();
     assert!(std::ptr::eq(client.shared(), clone.shared()));
 }
+
+// ---------------------------------------------- User-Agent and runtime
+
+/// `User-Agent` of a client's requests, both kinds, which must agree.
+fn user_agent<S>(client: &Client<S>) -> String {
+    let shared = client.shared();
+    assert_eq!(shared.get_headers["user-agent"], shared.post_headers["user-agent"]);
+    shared.get_headers["user-agent"].to_str().expect("ASCII").to_owned()
+}
+
+/// Whether both kinds of request of a client carry `X-TypeSafe-Runtime`.
+fn sends_runtime<S>(client: &Client<S>) -> bool {
+    let shared = client.shared();
+    let get = shared.get_headers.contains_key("x-typesafe-runtime");
+    assert_eq!(get, shared.post_headers.contains_key("x-typesafe-runtime"));
+    get
+}
+
+/// Like every other setter, a later call replaces an earlier one: a refused
+/// product followed by a good one builds, a good one followed by a refused
+/// one does not, and the last runtime switch decides.
+#[test]
+fn a_later_user_agent_product_or_runtime_switch_replaces_an_earlier_one() {
+    let sdk = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
+    let client = Client::builder()
+        .api_key("test-key")
+        .user_agent_product("not a token")
+        .user_agent_product("app/2")
+        .build_with_env(empty)
+        .expect("the last product is a token");
+    assert_eq!(user_agent(&client), format!("app/2 {sdk}"));
+
+    let rendered = config_error(
+        Client::builder().api_key("test-key").user_agent_product("app/2").user_agent_product("app"),
+    );
+    assert_eq!(
+        rendered,
+        "The user_agent_product must be a product token, name/version \
+         (RFC 9110, section 10.1.5): it has no '/' between the name and the version."
+    );
+
+    let rows = [(vec![false], false), (vec![false, true], true), (vec![true, false], false)];
+    for (switches, expected) in rows {
+        let mut builder = Client::builder().api_key("test-key");
+        for send in &switches {
+            builder = builder.send_runtime_header(*send);
+        }
+        let client = builder.build_with_env(empty).expect("it builds");
+        assert_eq!(sends_runtime(&client), expected, "switches {switches:?}");
+        assert_eq!(user_agent(&client), sdk, "switches {switches:?}");
+    }
+}
+
+/// A product that is not a token fails `build` and `build_with_service` with
+/// the same config error, and neither repeats it.
+#[test]
+fn a_user_agent_product_that_is_not_a_token_fails_either_way_of_building() {
+    let product = "app/1.0\r\nX-Injected: yes";
+    let message = "The user_agent_product must be a product token, name/version \
+                   (RFC 9110, section 10.1.5): it contains whitespace.";
+
+    let built = config_error(Client::builder().api_key("test-key").user_agent_product(product));
+    assert_eq!(built, message);
+
+    let error = Client::builder()
+        .api_key("test-key")
+        .user_agent_product(product)
+        .build_with_service(transport())
+        .expect_err("it must be refused");
+    assert!(matches!(error.kind(), ErrorKind::Config), "{error:?}");
+    assert_eq!(error.to_string(), message);
+    for rendered in [built, error.to_string(), format!("{error:?}")] {
+        crate::rendering_tests::assert_printable(&rendered);
+        assert!(!rendered.contains("X-Injected"), "{rendered}");
+    }
+}
+
+/// The product is printed quoted and escaped, since before `build` it can
+/// hold anything; a runtime header switched off is printed, one left on is
+/// not.
+#[test]
+fn a_builder_prints_its_user_agent_product_escaped_and_a_runtime_header_switched_off() {
+    let builder =
+        Client::builder().user_agent_product("app\u{1b}[31m/1").send_runtime_header(false);
+    let debug = format!("{builder:?}");
+    assert!(
+        debug.ends_with(
+            r#"connect_timeout: None, user_agent_product: "app\u{1b}[31m/1", send_runtime_header: false }"#
+        ),
+        "{debug}"
+    );
+    crate::rendering_tests::assert_printable(&debug);
+
+    assert_eq!(
+        format!("{:?}", Client::builder().send_runtime_header(true)),
+        format!("{:?}", ClientBuilder::default())
+    );
+}

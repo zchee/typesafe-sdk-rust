@@ -631,3 +631,135 @@ fn debug_prints_neither_the_key_nor_any_default_header_value() {
         assert!(!debug.contains(secret), "{secret:?} leaked into {debug}");
     }
 }
+
+// ------------------------------------------------------ User-Agent product
+
+/// The SDK's own identifier, as `User-Agent` and `X-TypeSafe-SDK` spell it.
+fn sdk_identifier() -> String {
+    format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// An explicit key and the given `User-Agent` product.
+fn with_product(product: &str) -> Explicit {
+    Explicit {
+        api_key: Some("test-key".into()),
+        user_agent_product: Some(product.to_owned()),
+        ..Explicit::default()
+    }
+}
+
+/// What every refused product's message starts with.
+const PRODUCT_RULE: &str =
+    "The user_agent_product must be a product token, name/version (RFC 9110, section 10.1.5): ";
+
+#[test]
+fn without_a_product_the_user_agent_is_the_sdk_identifier_and_the_runtime_header_is_sent() {
+    let config = with_key(no_env);
+    assert_eq!(config.user_agent().to_str().expect("ASCII"), sdk_identifier());
+    assert_eq!(*config.user_agent(), crate::constants::SDK_IDENTIFIER);
+    assert!(config.send_runtime_header(), "the runtime header is sent unless switched off");
+
+    let off = Config::resolve(
+        Explicit {
+            api_key: Some("test-key".into()),
+            omit_runtime_header: true,
+            ..Explicit::default()
+        },
+        no_env,
+    )
+    .unwrap_or_else(|error| panic!("{error:?}"));
+    assert!(!off.send_runtime_header());
+    assert_eq!(off.user_agent().to_str().expect("ASCII"), sdk_identifier());
+}
+
+/// Each shape the rules refuse, with the rule its message names. No message
+/// repeats the value, and every rendering is free of control and hidden
+/// characters, whatever the value held.
+#[test]
+fn a_user_agent_product_that_is_not_a_product_token_is_a_config_error_naming_the_rule() {
+    let too_long = format!("{}/1234", "a".repeat(60));
+    assert_eq!(too_long.len(), 65);
+    let cases: [(&str, &str); 24] = [
+        ("", "it is empty"),
+        ("   ", "it contains whitespace"),
+        ("\t", "it contains whitespace"),
+        ("my app/1.0", "it contains whitespace"),
+        ("app/1.0 ", "it contains whitespace"),
+        (" app/1.0", "it contains whitespace"),
+        ("app/1.0\r\nX-Injected: yes", "it contains whitespace"),
+        ("app/1.0\n", "it contains whitespace"),
+        ("app\u{0}/1.0", "it contains a control character"),
+        ("app/1.0\u{1b}[31m", "it contains a control character"),
+        ("app/1.0\u{7f}", "it contains a control character"),
+        ("app/1.0\u{a0}", "it contains a character that is not ASCII"),
+        ("app/1.0\u{202e}", "it contains a character that is not ASCII"),
+        ("caf\u{e9}/1.0", "it contains a character that is not ASCII"),
+        ("app", "it has no '/' between the name and the version"),
+        ("app/1.0/extra", "it has more than one '/'"),
+        ("//", "it has more than one '/'"),
+        ("/1.0", "the name before the '/' is empty"),
+        ("/", "the name before the '/' is empty"),
+        ("app/", "the version after the '/' is empty"),
+        ("app/(1.0)", "it contains a character a token cannot hold (RFC 9110, section 5.6.2)"),
+        ("app@home/1.0", "it contains a character a token cannot hold (RFC 9110, section 5.6.2)"),
+        ("\"app\"/1.0", "it contains a character a token cannot hold (RFC 9110, section 5.6.2)"),
+        (&too_long, "it is longer than 64 bytes"),
+    ];
+    for (given, rule) in cases {
+        let rendered = config_error(with_product(given), no_env);
+        assert_eq!(rendered, format!("{PRODUCT_RULE}{rule}."), "product {given:?}");
+        let debug = format!(
+            "{:?}",
+            Config::resolve(with_product(given), no_env).expect_err("refused as above")
+        );
+        assert_eq!(debug, config_debug(&rendered), "product {given:?}");
+        crate::rendering_tests::assert_printable(&rendered);
+        crate::rendering_tests::assert_printable(&debug);
+        if given.len() >= 3 {
+            assert!(!rendered.contains(given), "product {given:?} leaked into {rendered:?}");
+        }
+    }
+}
+
+/// The accepted edges: exactly 64 bytes, every `tchar` class on both sides
+/// of the `/`, and a name and a version of one character each. The value
+/// sent is the product, one space, then the SDK's identifier.
+#[test]
+fn a_product_token_goes_in_front_of_the_sdk_identifier() {
+    let longest = format!("{}/1234", "a".repeat(59));
+    assert_eq!(longest.len(), 64);
+    let every_tchar = "AZaz09!#$%&'*+-.^_`|~/AZaz09!#$%&'*+-.^_`|~";
+    for product in ["ganja-code/0.1.0", "a/1", every_tchar, longest.as_str(), "A/b"] {
+        let config = Config::resolve(with_product(product), no_env)
+            .unwrap_or_else(|error| panic!("{product:?} was refused: {error:?}"));
+        assert_eq!(
+            config.user_agent().to_str().expect("ASCII"),
+            format!("{product} {}", sdk_identifier()),
+            "product {product:?}"
+        );
+        assert!(config.send_runtime_header(), "product {product:?}");
+    }
+}
+
+/// `Debug` shows a `User-Agent` other than the default and a runtime header
+/// switched off, and nothing of either when they are the default.
+#[test]
+fn debug_prints_the_user_agent_and_the_runtime_switch_only_when_they_are_not_the_default() {
+    let explicit = Explicit {
+        base_url: Some("https://example.test".into()),
+        omit_runtime_header: true,
+        ..with_product("my-app/1.2.0")
+    };
+    let debug = format!("{:?}", Config::resolve(explicit, no_env).expect("it resolves"));
+    assert!(
+        debug.ends_with(&format!(
+            r#"default_headers: [], user_agent: "my-app/1.2.0 {}", send_runtime_header: false }}"#,
+            sdk_identifier()
+        )),
+        "{debug}"
+    );
+    crate::rendering_tests::assert_printable(&debug);
+
+    let default = format!("{:?}", with_key(no_env));
+    assert!(default.ends_with("default_headers: [] }"), "{default}");
+}

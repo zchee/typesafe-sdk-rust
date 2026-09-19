@@ -1058,6 +1058,124 @@ async fn the_upstream_base_url_with_a_prefix_and_trailing_slashes() {
     assert_upstream_headers(request, "example.test");
 }
 
+/// A server answering a listing with no models and a System One call with
+/// the fixture.
+async fn listing_and_answering(protocol: Protocol) -> TestServer {
+    TestServer::start(protocol, |request: RecordedRequest| async move {
+        let body: &'static [u8] =
+            if request.method == http::Method::POST { RESULT } else { br#"{"models":[]}"# };
+        json_response(StatusCode::OK, body)
+    })
+    .await
+    .expect("the test server starts")
+}
+
+/// Lists the models and asks one question, each call carrying `headers`,
+/// and returns what the server recorded for the two.
+async fn list_and_ask(
+    server: &TestServer,
+    client: &Client,
+    headers: &[(&str, &str)],
+) -> Vec<RecordedRequest> {
+    let questions = one_raw_question();
+    let mut list = client.models().list();
+    let mut ask = client.system_one("hello", &questions);
+    for (name, value) in headers {
+        list = list.header(*name, *value);
+        ask = ask.header(*name, *value);
+    }
+    list.send().await.expect("the listing succeeds");
+    ask.send().await.expect("the call succeeds");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2, "one listing and one call");
+    requests
+}
+
+/// Not in upstream, which always sends its own identifier alone (README
+/// deviation row "`User-Agent` names the SDK alone; `X-TypeSafe-Runtime` is
+/// always sent"): an application's product goes in front of the SDK's in
+/// `User-Agent`, and `X-TypeSafe-SDK` and `X-TypeSafe-Runtime` are as they
+/// are without it. Asserted on what the server received, over each
+/// protocol, on a request with a body and one without.
+#[tokio::test]
+async fn an_application_product_is_received_in_front_of_the_sdk_identifier() {
+    let sdk = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
+    let runtime = format!("rust ({}; {})", std::env::consts::OS, std::env::consts::ARCH);
+    let user_agent = format!("ganja-code/0.1.0 {sdk}");
+    for protocol in Protocol::ALL {
+        let server = listing_and_answering(protocol).await;
+        let client = builder_for(&server, protocol)
+            .user_agent_product("ganja-code/0.1.0")
+            .build()
+            .expect("the client builds");
+        for request in list_and_ask(&server, &client, &[]).await {
+            let context = format!("{protocol:?}, {}", request.method);
+            assert_eq!(request.header_values("user-agent"), [user_agent.as_str()], "{context}");
+            assert_eq!(request.header_values("x-typesafe-sdk"), [sdk.as_str()], "{context}");
+            assert_eq!(
+                request.header_values("x-typesafe-runtime"),
+                [runtime.as_str()],
+                "{context}"
+            );
+        }
+    }
+}
+
+/// With the runtime header switched off, no request carries
+/// `X-TypeSafe-Runtime`, and `X-TypeSafe-SDK` and `User-Agent` are still the
+/// SDK's (README deviation row "`User-Agent` names the SDK alone;
+/// `X-TypeSafe-Runtime` is always sent"). Over each protocol, both kinds of
+/// request.
+#[tokio::test]
+async fn with_the_runtime_header_off_the_server_receives_none() {
+    let sdk = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
+    for protocol in Protocol::ALL {
+        let server = listing_and_answering(protocol).await;
+        let client = builder_for(&server, protocol)
+            .send_runtime_header(false)
+            .build()
+            .expect("the client builds");
+        for request in list_and_ask(&server, &client, &[]).await {
+            let context =
+                format!("{protocol:?}, {}, headers {:?}", request.method, request.headers);
+            assert!(request.headers.get("x-typesafe-runtime").is_none(), "{context}");
+            assert_eq!(request.header_values("x-typesafe-sdk"), [sdk.as_str()], "{context}");
+            assert_eq!(request.header_values("user-agent"), [sdk.as_str()], "{context}");
+            assert_eq!(request.header_values("authorization"), ["Bearer test-key"], "{context}");
+        }
+    }
+}
+
+/// The two settings do not loosen the protection of the SDK's headers: with
+/// a product set and the runtime header off, a caller's default and per-call
+/// `User-Agent` and `X-TypeSafe-Runtime` still do not get through. The
+/// server receives the product's `User-Agent` once and no runtime header.
+#[tokio::test]
+async fn a_caller_header_cannot_stand_in_for_either_setting() {
+    let sdk = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
+    let user_agent = format!("ganja-code/0.1.0 {sdk}");
+    let caller = [("user-agent", "wrong"), ("x-typesafe-runtime", "x")];
+    for protocol in Protocol::ALL {
+        let server = listing_and_answering(protocol).await;
+        let mut builder = builder_for(&server, protocol);
+        for (name, value) in caller {
+            builder = builder.default_header(name, value);
+        }
+        let client = builder
+            .user_agent_product("ganja-code/0.1.0")
+            .send_runtime_header(false)
+            .build()
+            .expect("the client builds");
+        for request in list_and_ask(&server, &client, &caller).await {
+            let context =
+                format!("{protocol:?}, {}, headers {:?}", request.method, request.headers);
+            assert_eq!(request.header_values("user-agent"), [user_agent.as_str()], "{context}");
+            assert!(request.headers.get("x-typesafe-runtime").is_none(), "{context}");
+            assert_eq!(request.header_values("x-typesafe-sdk"), [sdk.as_str()], "{context}");
+        }
+    }
+}
+
 /// The headers that frame a message or manage its connection, each with a
 /// value that would change what the transport does if it were sent.
 const TRANSPORT_OWNED: [(&str, &str); 8] = [

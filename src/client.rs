@@ -182,6 +182,9 @@ pub struct ClientBuilder {
     http_version: Option<HttpVersion>,
     connect_timeout: Option<Duration>,
     retry: Option<RetryPolicy>,
+    user_agent_product: Option<String>,
+    /// `false`, the default, sends `X-TypeSafe-Runtime`.
+    omit_runtime_header: bool,
 }
 
 impl ClientBuilder {
@@ -248,6 +251,11 @@ impl ClientBuilder {
     /// HTTP/1.1: [`HttpVersion::Auto`] does on an `http` base URL, and on an
     /// `https` one only when the server picks HTTP/1.1 through ALPN. A later
     /// call with the same name replaces an earlier one.
+    ///
+    /// No header set here or on a call reaches `User-Agent` or
+    /// `X-TypeSafe-Runtime`: [`user_agent_product`](Self::user_agent_product)
+    /// and [`send_runtime_header`](Self::send_runtime_header) are the only
+    /// ways to change what they carry.
     #[must_use]
     pub fn default_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.default_headers.push((name.into(), value.into()));
@@ -309,6 +317,71 @@ impl ClientBuilder {
         self
     }
 
+    /// A product that names the application, sent in `User-Agent` in front
+    /// of the SDK's own: `user_agent_product("my-app/1.2.0")` sends
+    /// `User-Agent: my-app/1.2.0 typesafe-sdk-rust/<version>`, the more
+    /// significant product first as RFC 9110 (section 10.1.5) orders them.
+    /// Unset, `User-Agent` is the SDK's identifier alone. `X-TypeSafe-SDK`
+    /// always names the SDK alone. A later call replaces an earlier one.
+    ///
+    /// The product must be `name/version`, both parts tokens (RFC 9110,
+    /// section 5.6.2: letters, digits and ``!#$%&'*+-.^_`|~``), with exactly
+    /// one `/` and at most 64 bytes in all. That rules out whitespace,
+    /// control characters, anything outside ASCII, a comment in parentheses
+    /// and a product without a version.
+    ///
+    /// # Errors
+    ///
+    /// This method never fails. A product that breaks those rules makes
+    /// [`build`](Self::build) and [`build_with_service`](Self::build_with_service)
+    /// return an [`ErrorKind::Config`](crate::ErrorKind::Config) error naming
+    /// the rule, before anything is sent.
+    ///
+    /// ```
+    /// use typesafe_sdk::{Client, ErrorKind};
+    ///
+    /// // Building connects to nothing.
+    /// let client = Client::builder()
+    ///     .api_key("your-api-key")
+    ///     .user_agent_product("my-app/1.2.0")
+    ///     .build()?;
+    /// # drop(client);
+    ///
+    /// let error = Client::builder()
+    ///     .api_key("your-api-key")
+    ///     .user_agent_product("my app")
+    ///     .build()
+    ///     .expect_err("a product with a space is refused");
+    /// assert!(matches!(error.kind(), ErrorKind::Config));
+    /// # Ok::<(), typesafe_sdk::Error>(())
+    /// ```
+    #[must_use]
+    pub fn user_agent_product(mut self, product: impl Into<String>) -> Self {
+        self.user_agent_product = Some(product.into());
+        self
+    }
+
+    /// Whether requests carry `X-TypeSafe-Runtime: rust (<os>; <arch>)`,
+    /// which tells the API the operating system and architecture the SDK was
+    /// compiled for. The default is `true`; `false` leaves the header out of
+    /// every request, so an application can keep its platform to itself.
+    /// `X-TypeSafe-SDK` is sent either way. A later call replaces an earlier
+    /// one.
+    ///
+    /// ```
+    /// use typesafe_sdk::Client;
+    ///
+    /// // Building connects to nothing.
+    /// let client = Client::builder().api_key("your-api-key").send_runtime_header(false).build()?;
+    /// # drop(client);
+    /// # Ok::<(), typesafe_sdk::Error>(())
+    /// ```
+    #[must_use]
+    pub fn send_runtime_header(mut self, send: bool) -> Self {
+        self.omit_runtime_header = !send;
+        self
+    }
+
     /// Builds a client with the default transport.
     ///
     /// Settings left unset are read from the environment. Nothing connects
@@ -321,7 +394,9 @@ impl ClientBuilder {
     /// the base URL is not an absolute `http` or `https` URL without
     /// userinfo, query or fragment; when the default model is blank; when a
     /// deadline or the response limit is zero; when a default header is not a
-    /// valid header; when an environment variable is not UTF-8; or when the
+    /// valid header; when the [`user_agent_product`](Self::user_agent_product)
+    /// is not a product token; when an environment variable is not UTF-8; or
+    /// when the
     /// certificate verifier cannot be built, for an added root that is not a
     /// certificate among other causes. No message repeats the key, a header
     /// value or the URL.
@@ -416,6 +491,8 @@ impl ClientBuilder {
             http_version,
             connect_timeout,
             retry,
+            user_agent_product,
+            omit_runtime_header,
         } = self;
 
         if connect_timeout.is_some_and(|timeout| timeout.is_zero()) {
@@ -435,6 +512,8 @@ impl ClientBuilder {
             timeout,
             default_headers: headers,
             max_response_bytes,
+            user_agent_product,
+            omit_runtime_header,
         };
         Ok((
             explicit,
@@ -457,7 +536,9 @@ impl fmt::Debug for ClientBuilder {
     /// roots as a count. The base URL is shown only once it has passed the
     /// checks [`build`](ClientBuilder::build) runs, and then as its endpoints,
     /// the way an error names them: a URL that failed them may still hold
-    /// userinfo. A retry policy is shown when one was set.
+    /// userinfo. A retry policy, a `User-Agent` product and a runtime header
+    /// switched off are shown when they were set; the product is quoted and
+    /// escaped, since until it is built it may hold anything.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let base_url = self.base_url.as_deref().map(|url| {
             crate::config::endpoints(url.trim_end_matches('/'))
@@ -480,6 +561,12 @@ impl fmt::Debug for ClientBuilder {
         if let Some(retry) = &self.retry {
             shown.field("retry", retry);
         }
+        if let Some(product) = &self.user_agent_product {
+            shown.field("user_agent_product", &Shown::Quoted(crate::text::quoted(product)));
+        }
+        if self.omit_runtime_header {
+            shown.field("send_runtime_header", &false);
+        }
         shown.finish()
     }
 }
@@ -487,6 +574,8 @@ impl fmt::Debug for ClientBuilder {
 /// A value the builder's `Debug` prints in place of the one it holds.
 enum Shown {
     Text(&'static str),
+    /// Text already quoted and escaped by [`crate::text::quoted`].
+    Quoted(String),
     Endpoints(crate::config::Endpoints),
 }
 
@@ -494,6 +583,7 @@ impl fmt::Debug for Shown {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text(text) => formatter.write_str(text),
+            Self::Quoted(text) => formatter.write_str(text),
             Self::Endpoints(endpoints) => fmt::Debug::fmt(endpoints, formatter),
         }
     }

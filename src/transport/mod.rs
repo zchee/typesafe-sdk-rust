@@ -207,7 +207,9 @@ where
 /// dropped: the SDK sets that header on retries and only there. So is a
 /// default framing or connection header ([`TRANSPORT_HEADERS`]). Per-call
 /// headers are applied on top of this map for each attempt; see
-/// [`call_headers`].
+/// [`call_headers`]. `User-Agent` carries the value the configuration built
+/// once, and `X-TypeSafe-Runtime` is left out when the configuration says so;
+/// a caller's header of either name is dropped all the same.
 pub(crate) fn base_headers(config: &Config, with_body: bool) -> HeaderMap {
     let defaults = config.default_headers();
     // Room for every default, the protected five and `Content-Type`, so
@@ -221,9 +223,11 @@ pub(crate) fn base_headers(config: &Config, with_body: bool) -> HeaderMap {
     let [authorization, accept, user_agent, sdk, runtime] = PROTECTED_HEADERS;
     headers.insert(authorization, config.authorization().clone());
     headers.insert(accept, JSON_CONTENT_TYPE);
-    headers.insert(user_agent, SDK_IDENTIFIER);
+    headers.insert(user_agent, config.user_agent().clone());
     headers.insert(sdk, SDK_IDENTIFIER);
-    headers.insert(runtime, RUNTIME_IDENTIFIER.clone());
+    if config.send_runtime_header() {
+        headers.insert(runtime, RUNTIME_IDENTIFIER.clone());
+    }
     if with_body {
         headers.insert(CONTENT_TYPE, JSON_CONTENT_TYPE);
     }
