@@ -56,7 +56,7 @@ unused-allowed-license = "allow"
 unused-license-exception = "allow"
 
 [licenses.private]
-# The workspace's own unpublished members (test-support, spikes) carry the
+# The workspace's own unpublished members (test-support, live-tests) carry the
 # same license as the SDK, so there is nothing to skip.
 ignore = false
 
