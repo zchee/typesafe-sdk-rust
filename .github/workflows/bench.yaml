@@ -26,7 +26,14 @@ jobs:
   # scheduler rather than the SDK (see `benches/loopback.rs`).
   codspeed:
     name: codspeed
-    runs-on: ubuntu-26.04
+    # This job alone is not on ubuntu-26.04. CodSpeed's runner (the one
+    # CodSpeedHQ/action@v5 installs, 5.2.1) aborts there with "Unsupported
+    # system" (run 35428694878): its valgrind setup accepts x86_64 Ubuntu
+    # 22.04 and 24.04 only (CodSpeedHQ/runner,
+    # src/executor/valgrind/setup.rs; the same in runner 5.3.1). So the job
+    # uses the newest image the runner supports. Go back to ubuntu-26.04
+    # once CodSpeed's runner supports it.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       # CodSpeed authenticates the upload through GitHub's OpenID Connect
