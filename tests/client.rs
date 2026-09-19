@@ -1416,9 +1416,10 @@ mod logging {
         let held = held(Protocol::Http1, br#"{"models":[]}"#).await;
         let refused = closed_port().await;
         let big = answering(Protocol::Http1, StatusCode::OK, vec![b' '; 4096]).await;
-        let cases: [(ClientBuilder, &str); 3] = [
+        let cases: [(ClientBuilder, &str, &str); 3] = [
             (
                 builder_for(&held.server, Protocol::Http1).timeout(Duration::from_millis(50)),
+                held.server.base_url(),
                 "timeout",
             ),
             (
@@ -1426,16 +1427,21 @@ mod logging {
                     .api_key("test-key")
                     .base_url(refused.as_str())
                     .retry(RetryPolicy::default().max_retries(0)),
+                refused.as_str(),
                 "connection error",
             ),
-            (builder_for(&big, Protocol::Http1).max_response_bytes(1024), "response too large"),
+            (
+                builder_for(&big, Protocol::Http1).max_response_bytes(1024),
+                big.base_url(),
+                "response too large",
+            ),
         ];
-        for (builder, word) in cases {
+        for (builder, base, word) in cases {
             let recorder = Recorder::default();
             let _installed = install(&recorder);
             let client = builder.build().expect("the client builds");
             let error = client.models().list().send().await.expect_err(word);
-            let endpoint = format!("GET {}/v1/models", client_base(&client));
+            let endpoint = format!("GET {base}/v1/models");
             assert_eq!(only_info_line(&recorder), format!("{endpoint} <- {word}"));
             // The DEBUG failure event names the kind by the same word and
             // carries no message: a connection error's message is the
@@ -1446,15 +1452,6 @@ mod logging {
             assert!(!failure.contains(&error.to_string()), "{failure}");
         }
         held.release.notify_waiters();
-    }
-
-    /// The base URL a client sends to, read back from its `Debug`, which
-    /// prints its endpoints as an error names them.
-    fn client_base(client: &Client) -> String {
-        let debug = format!("{client:?}");
-        let start = debug.find("\"GET ").expect("the models endpoint") + "\"GET ".len();
-        let end = debug[start..].find("/v1/models").expect("the models path") + start;
-        debug[start..end].to_owned()
     }
 
     /// Upstream `test_secret_headers_redacted`, the nine spellings of a secret
