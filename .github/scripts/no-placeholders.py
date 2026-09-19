@@ -23,9 +23,11 @@ from pathlib import Path
 COMMENT = re.compile(r"//|/\*|#|<!--")
 
 #: A task marker as a whole word in any letter case, refused after a comment
-#: opener on the same line. The word is searched first and compared with the
-#: line's first opener, so a line is read a constant number of times however
-#: many openers it holds.
+#: opener on the same line. The line's first opener is found first, with one
+#: search, and the words are then searched for once, from where that opener
+#: ends: the first opener to start is also the first to end, so a word after
+#: any opener is a word after the first one, and a line is read a constant
+#: number of times however many openers it holds.
 COMMENT_TASK = re.compile(r"\b(?:" + "to" + "do|" + "fix" + r"me)\b", re.IGNORECASE)
 
 #: What is refused on any line, each with the reason printed beside a hit.
