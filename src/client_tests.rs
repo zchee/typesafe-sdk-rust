@@ -75,10 +75,18 @@ fn the_default_version_is_http2_only_for_https_and_auto_for_http_and_a_choice_wi
 #[test]
 fn a_custom_transport_refuses_the_settings_only_the_default_one_has() {
     type Configure = fn(ClientBuilder) -> ClientBuilder;
-    let rows: [(Configure, &str); 4] = [
-        (|builder| builder.add_root_certificate(vec![1, 2, 3]), "add_root_certificate"),
-        (|builder| builder.http_version(HttpVersion::Http2Only), "http_version"),
-        (|builder| builder.connect_timeout(Duration::from_secs(1)), "connect_timeout"),
+    // The verb agrees with the number of settings named: one setting
+    // `configures`, two or more `configure`.
+    let rows: [(Configure, &str); 5] = [
+        (|builder| builder.add_root_certificate(vec![1, 2, 3]), "add_root_certificate configures"),
+        (|builder| builder.http_version(HttpVersion::Http2Only), "http_version configures"),
+        (|builder| builder.connect_timeout(Duration::from_secs(1)), "connect_timeout configures"),
+        (
+            |builder| {
+                builder.connect_timeout(Duration::from_secs(1)).http_version(HttpVersion::Auto)
+            },
+            "http_version, connect_timeout configure",
+        ),
         (
             |builder| {
                 builder
@@ -86,7 +94,7 @@ fn a_custom_transport_refuses_the_settings_only_the_default_one_has() {
                     .add_root_certificate(vec![1])
                     .http_version(HttpVersion::Auto)
             },
-            "add_root_certificate, http_version, connect_timeout",
+            "add_root_certificate, http_version, connect_timeout configure",
         ),
     ];
     for (configure, named) in rows {
@@ -96,7 +104,7 @@ fn a_custom_transport_refuses_the_settings_only_the_default_one_has() {
         assert_eq!(
             error.to_string(),
             format!(
-                "{named} configure the default transport, and a client built with \
+                "{named} the default transport, and a client built with \
                  build_with_service has a transport of its own."
             )
         );

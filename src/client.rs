@@ -312,6 +312,11 @@ impl ClientBuilder {
     /// each attempt in its own deadline and reads the response under its own
     /// limit.
     ///
+    /// When the service fails, its error's text becomes the connection
+    /// error's message, escaped and cut at 200 characters; the SDK cannot know
+    /// what that text holds, so a service that prints a request header into
+    /// its error puts that header's value into the message.
+    ///
     /// # Errors
     ///
     /// Everything [`build`](Self::build) refuses except the certificate
@@ -336,8 +341,9 @@ impl ClientBuilder {
             unused.push("connect_timeout");
         }
         if !unused.is_empty() {
+            let verb = if unused.len() == 1 { "configures" } else { "configure" };
             return Err(Error::config(format!(
-                "{} configure the default transport, and a client built with \
+                "{} {verb} the default transport, and a client built with \
                  build_with_service has a transport of its own.",
                 unused.join(", ")
             )));
