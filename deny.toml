@@ -45,9 +45,7 @@ allow = [
 confidence-threshold = 0.8
 # One crate, one license, the owner's decision of 2026-09-19; the allow list
 # above stays as it is. libfuzzer-sys bundles the libFuzzer C++ runtime, which
-# is under NCSA. The exception is crate-scoped, so it does not by itself keep
-# libfuzzer-sys out of a published crate's graph; the `[bans] deny` entry for
-# libfuzzer-sys below does.
+# is under NCSA.
 exceptions = [
     { allow = ["NCSA"], crate = "libfuzzer-sys" },
 ]
