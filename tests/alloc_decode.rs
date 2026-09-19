@@ -64,10 +64,11 @@ const QUESTIONS: usize = 3;
 
 /// The decode budget: blocks, bytes, and the ratio to the comparator's blocks.
 /// The block count is exact, so one more `String` or `Vec` fails it. The byte
-/// bound is the one frozen with the first budget and has headroom: the decode
-/// measures 578 bytes against it.
+/// bound is the measured 578 bytes plus 12.5%, rounded down, close to the
+/// headroom the first budget had (700 over a measured 626, 11.8%), so a
+/// regression of 100 bytes that adds no block fails it.
 const MAX_BLOCKS: u64 = 7;
-const MAX_BYTES: u64 = 700;
+const MAX_BYTES: u64 = 650;
 const MAX_RATIO_TO_NAIVE: f64 = 0.7;
 
 /// Decodes the fixture once through `decode` to warm up and reports what each
