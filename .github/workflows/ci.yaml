@@ -52,6 +52,23 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup toolchain install --no-self-update
 
+      # The dependencies' build output is kept between runs; the crates of this
+      # repository are rebuilt every time. The key holds the toolchain and every
+      # manifest and lock file, so a changed dependency or compiler starts a
+      # cache of its own, which is why this step comes after the toolchain. The
+      # fuzz targets are a second workspace with a target directory of their
+      # own. Only a run on `main` saves: a pull request restores what `main`
+      # built and cannot replace it. `~/.cargo/bin` is left out, because the
+      # step below downloads those tools prebuilt in seconds and a restored
+      # copy would only stand in the way of a newer release.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> target
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: false
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest,cargo-hack,cargo-deny
@@ -155,6 +172,13 @@ jobs:
       # that needs it rather than by every developer's first build.
       - name: Install the coverage instrumentation
         run: rustup component add llvm-tools-preview
+
+      # As in the check job. The instrumented build lives under `target` too,
+      # and this job's key is its own, so the two never share an entry.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: false
 
       - uses: taiki-e/install-action@v2
         with:
