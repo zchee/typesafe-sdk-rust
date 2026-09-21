@@ -49,7 +49,7 @@ These six were established in T0.1-T0.3.
 | F3 | The crypto provider must be named explicitly: `builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))` | a second provider entering the graph cannot make the process default ambiguous |
 | F4 | A cold `http2_only(true)` hyper-util legacy client sent 50 concurrent h2c requests over exactly 1 accepted connection | the TLS `Auto` case was the open question S2b answers below |
 | F5 | An rcgen self-signed certificate with SAN `127.0.0.1` works directly as a rustls trust anchor; no CA/leaf pair is needed | the TestServer needs one certificate, not a chain |
-| F6 | `cargo deny check` is clean (advisories, bans, licenses, sources) for the workspace and for the full runtime set in `spikes/deps-probe`; duplicate versions are warnings only (`syn` 2.0.119 vs 3.0.6, `getrandom` 0.3.4 vs 0.4.3) | `crates/macros` takes syn 3 in Phase 4 |
+| F6 | `cargo deny check` is clean (advisories, bans, licenses, sources) for the workspace and for the full runtime set in `spikes/deps-probe` (a probe crate that is not kept: CI's `cargo deny check` covers the workspace's own graph); duplicate versions are warnings only (`syn` 2.0.119 vs 3.0.6, `getrandom` 0.3.4 vs 0.4.3) | `crates/macros` takes syn 3 in Phase 4 |
 
 ---
 
