@@ -18,6 +18,7 @@ UPPER_FIX = "FIX" + "ME"
 UPPER_X = "X" + "XX"
 LOWER_TASK = "to" + "do"
 LOWER_FIX = "fix" + "me"
+FENCE = "`" * 3
 SWITCHED_OFF = "a test switched off under a condition"
 
 
@@ -272,6 +273,12 @@ def test_cfg_attr_quoted_whole_is_flagged_in_every_kind_of_file(
 
 CFG_ATTR_CLEAN: dict[str, str] = {
     "a path": f'{CFG}windows, path = "x.rs")]',
+    "a lint name inside the arguments that starts with the word": (
+        f"{CFG}unix, allow({IGN}d_unit_patterns))]"
+    ),
+    "a lint name inside the arguments that ends with the word": (
+        f"{CFG}unix, allow(let_underscore_{IGN}))]"
+    ),
     "the word as a lifetime": (
         f"{CFG}unix, allow(dead_code))]\nfn f<'{IGN}>(v: &'{IGN} str) {{}}"
     ),
@@ -309,6 +316,10 @@ def test_cfg_attr_hidden_by_a_bracket_is_not_reported(
 
 
 CFG_ATTR_IN_A_LITERAL: dict[str, tuple[str, list[str]]] = {
+    "a doctest switched off by the condition": (
+        f'{CFG}not(feature = "std"), doc = "{FENCE}{IGN}")]',
+        [f'1:1: {SWITCHED_OFF}: {CFG}not(feature = "std"), doc = "{FENCE}{IGN}'],
+    ),
     "the word as a feature name": (
         f'{CFG}feature = "{IGN}", path = "x.rs")]',
         [f'1:1: {SWITCHED_OFF}: {CFG}feature = "{IGN}'],
@@ -336,8 +347,11 @@ CFG_ATTR_IN_A_LITERAL: dict[str, tuple[str, list[str]]] = {
 def test_cfg_attr_word_in_a_literal_is_reported(
     no_placeholders: ModuleType, tmp_path: Path, text: str, expected: list[str]
 ) -> None:
-    """A known limit: the word inside a literal is reported although it
-    switches no test off, once per attribute and shown up to the word.
+    """A known limit: the word inside a literal is reported whether or not it
+    switches anything off, once per attribute and shown up to the word. A
+    doctest fence holding the word, behind a condition, is a test switched off
+    and is reported rightly; a feature, a path or prose that merely spells the
+    word is reported wrongly.
     """
     found = scan(no_placeholders, tmp_path, text + "\n")
 

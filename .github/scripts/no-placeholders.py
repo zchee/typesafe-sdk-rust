@@ -45,9 +45,11 @@ PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
-#: The word that switches a test off, as a pattern: plain, or the raw
-#: identifier ``r#ignore``, which rustc accepts alike.
-IGNORE = r"\b(?:r#)?" + "ign" + r"ore\b"
+#: The word that switches a test off, as a pattern. The raw-identifier
+#: spelling (``r#`` before the word), which rustc accepts alike, needs nothing
+#: of its own: ``#`` is not a word character, so the boundary before the word
+#: holds there too, and the match ends at the same place either way.
+IGNORE = r"\b" + "ign" + r"ore\b"
 
 #: A ``cfg_attr`` attribute that may switch a test off, from its outer or
 #: inner opener (with the whitespace Rust allows between its tokens) through
@@ -58,14 +60,19 @@ IGNORE = r"\b(?:r#)?" + "ign" + r"ore\b"
 #: The opener alone makes the whole pattern match, so ``finditer`` resumes
 #: after what a match consumed and reads a file once however many openers it
 #: holds. A form that searches each opener for the word instead rescans the
-#: rest of the file for every opener that has none, which is quadratic.
+#: rest of the file for every opener that has none, which is quadratic. An
+#: opener inside the run another match consumed is not tried on its own, so a
+#: report can stand at an earlier opener - a quoted or an enclosing one -
+#: whose run reaches the word; no report is lost by that.
 #:
 #: Rust source is richer than this: an attribute's arguments may hold a
 #: string, a char literal or a comment, and a ``]`` or the word inside one is
 #: read here as if it were code. So a ``]`` before the word ends the
 #: arguments and hides an attribute that does switch a test off, erring
-#: towards silence; and the word inside a literal is reported although it
-#: switches nothing off, erring towards noise.
+#: towards silence; and the word inside a literal is reported whether or not
+#: it switches anything off. A doctest fence - three backticks and the word -
+#: behind a condition is a test switched off, and that report is right; a
+#: feature, a path or prose that merely spells the word is reported wrongly.
 CFG_ATTR = re.compile(
     r"#\s*+(?:!\s*+)?\[\s*+cfg_attr\s*+\("
     r"(?:(?!" + IGNORE + r")[^\]])*+"
