@@ -30,11 +30,14 @@ jobs:
     name: check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
-      # A failure on one platform is worth seeing beside the other two: whether
-      # a break is platform-specific is the first question asked about it.
+      # A failure on one platform is worth seeing beside the others: whether a
+      # break is platform-specific is the first question asked about it.
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, xcode-27, windows-2025]
+        # `windows-2025` is left out while its run takes about twice as long as
+        # the other two (12 to 15 minutes against 7 to 9) and holds every push
+        # that long; it goes back in once its run is as quick as theirs.
+        os: [ubuntu-26.04, xcode-27]
     steps:
       # No later step fetches or pushes through git with the job's token, so
       # it is not left in `.git/config`, where every build script and proc
