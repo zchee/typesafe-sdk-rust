@@ -72,7 +72,7 @@ async fn http1_round_trip_is_recorded() {
     .await
     .expect("an HTTP/1.1 server binds on loopback");
 
-    let request = Request::post(server.url("/v1/systemone"))
+    let request = Request::post(format!("{}/v1/systemone", server.base_url()))
         .header("content-type", "application/json")
         .header("x-team", "billing")
         .body(Full::new(Bytes::from_static(br#"{"ping":true}"#)))
@@ -116,7 +116,7 @@ async fn h2c_multiplexes_fifty_requests_over_one_connection() {
     let mut calls = Vec::with_capacity(REQUESTS);
     for index in 0..REQUESTS {
         let client = client.clone();
-        let url = server.url(&format!("/v1/models?call={index}"));
+        let url = format!("{}/v1/models?call={index}", server.base_url());
         calls.push(tokio::spawn(async move {
             let request = Request::get(url)
                 .body(Full::new(Bytes::new()))
@@ -154,7 +154,7 @@ async fn tls_client_that_trusts_the_certificate_negotiates_http2() {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).expect("the generated certificate is a usable trust anchor");
 
-    let request = Request::get(server.url("/v1/models"))
+    let request = Request::get(format!("{}/v1/models", server.base_url()))
         .body(Full::new(Bytes::new()))
         .expect("the request parts are valid");
     let response = tls_client(roots)
@@ -181,7 +181,7 @@ async fn tls_client_without_the_certificate_fails_the_handshake() {
     .await
     .expect("an HTTP/2-over-TLS server binds on loopback");
 
-    let request = Request::get(server.url("/v1/models"))
+    let request = Request::get(format!("{}/v1/models", server.base_url()))
         .body(Full::new(Bytes::new()))
         .expect("the request parts are valid");
     // An empty root store trusts nothing, so the self-signed certificate has no
@@ -229,7 +229,7 @@ async fn handler_can_be_stateful_and_can_delay() {
     let client = cleartext_client(false);
     let mut statuses = Vec::new();
     for _ in 0..2 {
-        let request = Request::get(server.url("/v1/models"))
+        let request = Request::get(format!("{}/v1/models", server.base_url()))
             .body(Full::new(Bytes::new()))
             .expect("the request parts are valid");
         let response = client.request(request).await.expect("the request reaches the test server");

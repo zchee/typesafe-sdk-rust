@@ -254,14 +254,6 @@ impl TestServer {
         &self.base_url
     }
 
-    /// Absolute URL for `path`, which may be given with or without its leading
-    /// slash.
-    #[must_use]
-    pub fn url(&self, path: &str) -> String {
-        let path = path.strip_prefix('/').unwrap_or(path);
-        format!("{}/{path}", self.base_url)
-    }
-
     /// Every request served so far, oldest first.
     #[must_use]
     pub fn requests(&self) -> Vec<RecordedRequest> {
