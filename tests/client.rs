@@ -1222,13 +1222,7 @@ fn assert_transport_owned_dropped(request: &RecordedRequest, context: &str) {
 #[tokio::test]
 async fn framing_and_connection_headers_are_dropped_and_host_is_sent() {
     for protocol in Protocol::ALL {
-        let server = TestServer::start(protocol, |request: RecordedRequest| async move {
-            let body: &'static [u8] =
-                if request.method == http::Method::POST { RESULT } else { br#"{"models":[]}"# };
-            json_response(StatusCode::OK, body)
-        })
-        .await
-        .expect("the test server starts");
+        let server = listing_and_answering(protocol).await;
         let questions = one_raw_question();
 
         for set_on in ["default", "call"] {
@@ -1280,13 +1274,7 @@ async fn framing_and_connection_headers_are_dropped_and_host_is_sent() {
 /// call's.
 #[tokio::test]
 async fn a_custom_transport_carries_every_request_with_the_sdk_headers() {
-    let server = TestServer::start(Protocol::Http1, |request: RecordedRequest| async move {
-        let body: &'static [u8] =
-            if request.method == http::Method::POST { RESULT } else { br#"{"models":[]}"# };
-        json_response(StatusCode::OK, body)
-    })
-    .await
-    .expect("the test server starts");
+    let server = listing_and_answering(Protocol::Http1).await;
     let forward = Forward::to(&server);
     let client = Client::builder()
         .api_key("test-key")
