@@ -23,7 +23,9 @@ Measurement rules followed: no benchmark ran in parallel with another benchmark 
 `target-cpu`; allocation numbers are taken on the **second identical call**, after one warm-up call of the same shape;
 every dhat scenario is its own process, because dhat attributes the whole process to one profiler.
 
-Reproduce everything from the repository root:
+Reproduce everything from the repository root. `spikes/sonic-probe` is kept on `main`; the other spike crates this
+ledger names (`spikes/encode-buffer`, `spikes/transport-probe`, `spikes/alloc-inventory`, `spikes/deps-probe`) are
+kept at the tag `v0.1.0`, so their commands run in a checkout of that tag (`git worktree add ../spikes-v0.1.0 v0.1.0`):
 
 ```sh
 cd spikes/sonic-probe     && env -u RUSTFLAGS cargo --config ~/.config/rust/config.dev.toml build --release
