@@ -116,6 +116,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+# A release ships the library, its examples, the README the crate docs embed
+# and the licenses; nothing else of the repository. The tests and benches stay
+# here: they build against the test-support crate, which is never published.
+include = ["/src", "/examples", "/README.md", "/LICENSE", "/LICENSE-THIRD-PARTY"]
 
 # The package is `typesafe-sdk-rust` because `typesafe-sdk` is taken on
 # crates.io, but callers write `use typesafe_sdk::...`.
