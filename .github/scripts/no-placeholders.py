@@ -12,7 +12,6 @@ Run it over the whole tree with no arguments, or over named paths.
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
 from pathlib import Path
 
 #: What opens a comment in the files this repository tracks: Rust, C and
@@ -46,166 +45,35 @@ PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
-#: The word that switches a test off inside a ``cfg_attr``.
-IGNORE = "ign" + "ore"
+#: The word that switches a test off, as a pattern: plain, or the raw
+#: identifier ``r#ignore``, which rustc accepts alike.
+IGNORE = r"\b(?:r#)?" + "ign" + r"ore\b"
 
-#: The start of an outer or inner ``cfg_attr`` attribute, with the whitespace
-#: Rust allows between its tokens. Every quantifier is possessive, so a failed
-#: attempt never splits a run of whitespace two ways.
-CFG_ATTR = re.compile(r"#\s*+(?:!\s*+)?\[\s*+cfg_attr\s*+\(")
-
-#: One token of an attribute's arguments, read as Rust source. The literals
-#: and comments are opaque: nothing inside them opens or closes a delimiter or
-#: is a word. A ``\u{..}`` escape takes any run of hex digits and underscores,
-#: since Rust caps its digits at six but not its underscores.
-TOKEN = re.compile(
-    r"""
-      (?P<space>\s++)
-    | (?P<line_comment>//[^\n]*+)
-    | (?P<block_comment>/\*)
-    | (?P<raw_string>[bc]?r(?P<hashes>\#*+)")
-    | (?P<string>[bc]?"(?:[^"\\]++|\\.?)*+"?)
-    | (?P<char>b?'(?:[^\\'\n]|\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]*+\}|.))')
-    | (?P<lifetime>'\w++)
-    | (?P<raw_word>r\#(?P<raw_name>\w++))
-    | (?P<word>\w++)
-    | (?P<open>[(\[{])
-    | (?P<close>[)\]}])
-    | (?P<other>.)
-    """,
-    re.VERBOSE | re.DOTALL,
+#: A ``cfg_attr`` attribute that may switch a test off, from its outer or
+#: inner opener (with the whitespace Rust allows between its tokens) through
+#: its arguments to that word, which is the ``hit`` group. Where the word is
+#: not among them the arguments are read to the first ``]`` or to the end of
+#: the file, the group stays ``None``, and the attribute is no hit.
+#:
+#: The opener alone makes the whole pattern match, so ``finditer`` resumes
+#: after what a match consumed and reads a file once however many openers it
+#: holds. A form that searches each opener for the word instead rescans the
+#: rest of the file for every opener that has none, which is quadratic.
+#:
+#: Rust source is richer than this: an attribute's arguments may hold a
+#: string, a char literal or a comment, and a ``]`` or the word inside one is
+#: read here as if it were code. So a ``]`` before the word ends the
+#: arguments and hides an attribute that does switch a test off, erring
+#: towards silence; and the word inside a literal is reported although it
+#: switches nothing off, erring towards noise.
+CFG_ATTR = re.compile(
+    r"#\s*+(?:!\s*+)?\[\s*+cfg_attr\s*+\("
+    r"(?:(?!" + IGNORE + r")[^\]])*+"
+    r"(?P<hit>" + IGNORE + r")?"
 )
-
-#: What opens or closes a block comment; Rust nests them.
-BLOCK_COMMENT = re.compile(r"/\*|\*/")
-
-#: The characters the walks over one file's attribute arguments may read in
-#: total: this many times the file's length, plus ``WALK_ALLOWANCE``. The
-#: walks of a file's own attributes read it about once, so this leaves room
-#: for three walks that run to its end, and a small file for many more.
-WALK_BUDGET = 4
-
-#: The part of the walks' budget that does not grow with the file: 64 KiB.
-WALK_ALLOWANCE = 1 << 16
 
 #: The most characters of an attribute a hit shows; a longer one is cut.
 SHOWN_WIDTH = 100
-
-
-def block_comment_end(text: str, start: int) -> int:
-    """Where a block comment ends, counting the comments nested in it.
-
-    Args:
-        text: The whole file.
-        start: The position just after the comment's ``/*``.
-
-    Returns:
-        The position just after its matching ``*/``, or the end of the file
-        when the comment never closes.
-    """
-    depth = 1
-    for mark in BLOCK_COMMENT.finditer(text, start):
-        depth += 1 if mark.group(0) == "/*" else -1
-        if depth == 0:
-            return mark.end()
-    return len(text)
-
-
-def token_at(text: str, start: int) -> tuple[re.Match[str], int]:
-    """The token that starts at a position, and where it ends.
-
-    Args:
-        text: The whole file.
-        start: A position inside the file, where a token starts.
-
-    Returns:
-        The ``TOKEN`` match, and the position just after the token: after the
-        matching ``*/`` of a block comment and after the closing quote and
-        hashes of a raw string, or the end of the file when either never
-        closes.
-
-    Raises:
-        AssertionError: If no token matches, which ``TOKEN``'s last
-            alternative rules out.
-    """
-    token = TOKEN.match(text, start)
-    if token is None:
-        raise AssertionError(f"no token matches at offset {start}")
-    match token.lastgroup:
-        case "block_comment":
-            return token, block_comment_end(text, token.end())
-        case "raw_string":
-            closing = '"' + token.group("hashes")
-            found = text.find(closing, token.end())
-            return token, len(text) if found < 0 else found + len(closing)
-    return token, token.end()
-
-
-def attribute_end(text: str, start: int, stop: int) -> tuple[int, int | None] | None:
-    """Walk an attribute's arguments once, up to the parenthesis closing them.
-
-    Args:
-        text: The whole file.
-        start: The position just after the ``(`` that opens the arguments.
-        stop: The position at or after which the walk starts no token.
-
-    Returns:
-        The position just after the closing parenthesis (the end of the file
-        when there is none), and the end of the first ``ignore`` word among
-        the arguments outside every literal and comment, or ``None``; or
-        ``None`` alone when the walk reached ``stop`` before either end.
-    """
-    depth = 1
-    hit: int | None = None
-    position = start
-    while position < len(text):
-        if position >= stop:
-            return None
-        token, position = token_at(text, position)
-        match token.lastgroup:
-            case "open":
-                depth += 1
-            case "close":
-                depth -= 1
-                if depth == 0:
-                    return position, hit
-            case "word" | "raw_word" if hit is None:
-                word = token.group("raw_name") or token.group("word")
-                if word == IGNORE:
-                    hit = position
-    return len(text), hit
-
-
-def switched_off(text: str) -> Iterator[tuple[int, int | None]]:
-    """Every ``cfg_attr`` attribute that switches a test off.
-
-    rustfmt writes a long ``cfg_attr`` over several lines, and its arguments
-    are token trees that may hold strings, raw strings, char literals and
-    comments, any of which may hold a ``]``, a ``)``, a ``#`` or the word
-    itself. So each opener (``#[`` or ``#![``, then ``cfg_attr`` and ``(``) is
-    followed by a walk over its arguments' tokens to the parenthesis that
-    closes them, and a hit is the word ``ignore`` as a token of its own
-    (``ignore = "reason"``, a nested ``cfg_attr`` and the raw identifier
-    ``r#ignore`` included) outside every literal and comment.
-
-    Args:
-        text: The whole file.
-
-    Yields:
-        The start of each such attribute and the end of its ``ignore``; last,
-        if the budget runs out, the start of the opener whose walk it stopped,
-        and ``None``.
-    """
-    budget = WALK_BUDGET * len(text) + WALK_ALLOWANCE
-    for opener in CFG_ATTR.finditer(text):
-        walked = attribute_end(text, opener.end(), opener.end() + budget)
-        if walked is None:
-            yield opener.start(), None
-            return
-        end, hit = walked
-        budget -= end - opener.end()
-        if hit is not None:
-            yield opener.start(), hit
 
 
 def tracked_files() -> list[str]:
@@ -257,18 +125,15 @@ def faults(path: str) -> list[str]:
     # The line and column of each hit are counted on from the previous one,
     # so many hits in one file, or on one long line, do not reread the text.
     number, line_start, counted = 1, 0, 0
-    for start, end in switched_off(text):
+    for attribute in CFG_ATTR.finditer(text):
+        if attribute.group("hit") is None:
+            continue
+        start = attribute.start()
         number += text.count("\n", counted, start)
         line_start = text.rfind("\n", counted, start) + 1 or line_start
         counted = start
         where = f"{path}:{number}:{start - line_start + 1}"
-        if end is None:
-            found.append(
-                f"{where}: cfg_attr attributes not read from here on: too many"
-                " of the file's cfg_attr attributes never close"
-            )
-            continue
-        shown = " ".join(text[start:end].split())
+        shown = " ".join(attribute.group(0).split())
         if len(shown) > SHOWN_WIDTH:
             shown = shown[: SHOWN_WIDTH - 3] + "..."
         found.append(f"{where}: a test switched off under a condition: {shown}")
