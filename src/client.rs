@@ -189,6 +189,8 @@ pub struct ClientBuilder {
     user_agent_product: Option<String>,
     /// `false`, the default, sends `X-TypeSafe-Runtime`.
     omit_runtime_header: bool,
+    /// `false`, the default, logs the full endpoint URL.
+    omit_endpoint_host: bool,
 }
 
 impl ClientBuilder {
@@ -398,6 +400,34 @@ impl ClientBuilder {
         self
     }
 
+    /// Whether log events name the full endpoint URL. The default is `true`.
+    ///
+    /// With `false`, events print only `/v1/systemone` or `/v1/models`, not
+    /// the scheme, host or the base URL's path prefix. A later call replaces
+    /// an earlier one. This setting is available without `tracing` too.
+    ///
+    /// Errors (`Display`, [`ApiError::endpoint`](crate::ApiError::endpoint),
+    /// [`ResponseValidationError`](crate::ResponseValidationError)) still name
+    /// the scheme and host, so a caller logging `%error` puts the host back.
+    /// Request and response bodies still print at `TRACE` under the target
+    /// `typesafe_sdk` whatever this flag; cap that target to keep them out.
+    /// No credential from userinfo, query or fragment can reach the default
+    /// endpoint line, because those URL components are refused at build.
+    ///
+    /// ```
+    /// use typesafe_sdk::Client;
+    ///
+    /// // Building connects to nothing.
+    /// let client = Client::builder().api_key("your-api-key").log_endpoint_host(false).build()?;
+    /// # drop(client);
+    /// # Ok::<(), typesafe_sdk::Error>(())
+    /// ```
+    #[must_use]
+    pub fn log_endpoint_host(mut self, log: bool) -> Self {
+        self.omit_endpoint_host = !log;
+        self
+    }
+
     /// Builds a client with the default transport.
     ///
     /// Settings left unset are read from the environment. Nothing connects
@@ -522,6 +552,7 @@ impl ClientBuilder {
             retry,
             user_agent_product,
             omit_runtime_header,
+            omit_endpoint_host,
         } = self;
 
         if connect_timeout.is_some_and(|timeout| timeout.is_zero()) {
@@ -543,6 +574,7 @@ impl ClientBuilder {
             max_response_bytes,
             user_agent_product,
             omit_runtime_header,
+            omit_endpoint_host,
         };
         Ok((
             explicit,
@@ -569,9 +601,10 @@ impl fmt::Debug for ClientBuilder {
     /// switched off are shown when they were set; the product is quoted and
     /// escaped, since until it is built it may hold anything.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let base_url = self.base_url.as_deref().map(|url| {
-            crate::config::endpoints(url.trim_end_matches('/'))
-                .map_or_else(|_| Shown::Text("<not a usable URL>"), Shown::Endpoints)
+        let endpoints =
+            self.base_url.as_deref().map(|url| crate::config::endpoints(url.trim_end_matches('/')));
+        let base_url = endpoints.as_ref().map(|endpoints| {
+            endpoints.as_ref().map_or_else(|_| Shown::Text("<not a usable URL>"), Shown::Endpoints)
         });
         let mut shown = formatter.debug_struct("ClientBuilder");
         shown
@@ -596,19 +629,22 @@ impl fmt::Debug for ClientBuilder {
         if self.omit_runtime_header {
             shown.field("send_runtime_header", &false);
         }
+        if self.omit_endpoint_host {
+            shown.field("log_endpoint_host", &false);
+        }
         shown.finish()
     }
 }
 
 /// A value the builder's `Debug` prints in place of the one it holds.
-enum Shown {
+enum Shown<'a> {
     Text(&'static str),
     /// Text already quoted and escaped by [`crate::text::quoted`].
     Quoted(String),
-    Endpoints(crate::config::Endpoints),
+    Endpoints(&'a crate::config::Endpoints),
 }
 
-impl fmt::Debug for Shown {
+impl fmt::Debug for Shown<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text(text) => formatter.write_str(text),

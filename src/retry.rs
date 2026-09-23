@@ -701,7 +701,7 @@ where
     let mut retry = 0_u32;
     loop {
         if retry > 0 {
-            telemetry::retrying(telemetry::Exchange::new(method, uri, retry));
+            telemetry::retrying(telemetry::Exchange::new(method, uri, retry, false));
         }
         let error = match attempt(retry).await {
             Ok(done) => return Ok(done),

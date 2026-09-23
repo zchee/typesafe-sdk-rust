@@ -6,6 +6,122 @@ use std::ffi::OsString;
 use super::*;
 use crate::ErrorKind;
 
+#[cfg(feature = "tracing")]
+#[path = "../tests/support/recorder.rs"]
+mod recorder;
+
+#[cfg(feature = "tracing")]
+#[tokio::test]
+async fn log_endpoint_host_false_prints_the_api_path_alone_over_a_custom_service() {
+    use std::{
+        future::{Ready, ready},
+        io,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Poll},
+    };
+
+    use http::{Method, Request, Response, StatusCode};
+    use tracing::Level;
+
+    use self::recorder::{Recorder, assert_timed, install};
+    use crate::Body;
+
+    #[derive(Clone)]
+    struct Answering(Arc<AtomicUsize>);
+
+    impl tower_service::Service<Request<Body>> for Answering {
+        type Response = Response<Body>;
+        type Error = io::Error;
+        type Future = Ready<Result<Self::Response, Self::Error>>;
+
+        fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: Request<Body>) -> Self::Future {
+            let attempt = self.0.fetch_add(1, Ordering::SeqCst) + 1;
+            let path = if request.method() == Method::POST { "systemone" } else { "models" };
+            assert_eq!(request.uri(), format!("http://127.0.0.1:9/prefix/v1/{path}").as_str());
+            let (status, body): (_, &'static [u8]) = match attempt {
+                1 => (StatusCode::SERVICE_UNAVAILABLE, b"{}"),
+                2 => (StatusCode::OK, br#"{"models":[]}"#),
+                3 => (StatusCode::NOT_FOUND, br#"{"message":"gone"}"#),
+                4 => (StatusCode::OK, include_bytes!("../tests/fixtures/result.json")),
+                5 => {
+                    return ready(Err(io::Error::new(io::ErrorKind::ConnectionRefused, "offline")));
+                }
+                other => panic!("unexpected attempt {other}"),
+            };
+            let mut response = Response::new(Body::from(Bytes::from_static(body)));
+            *response.status_mut() = status;
+            ready(Ok(response))
+        }
+    }
+
+    let recorder = Recorder::default();
+    let _installed = install(&recorder);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let builder = ClientBuilder::default()
+        .api_key("test-key")
+        .base_url("http://127.0.0.1:9/prefix")
+        .default_model("jev-latest")
+        .log_endpoint_host(false)
+        .retry(RetryPolicy::new().backoff_initial(Duration::ZERO));
+    assert!(format!("{builder:?}").contains("log_endpoint_host: false"));
+    let client =
+        builder.build_with_service(Answering(Arc::clone(&calls))).expect("the client builds");
+    let endpoints = client.shared().config.endpoints();
+    assert_eq!(endpoints.models_log(), "/v1/models");
+    assert_eq!(endpoints.system_one_log(), "/v1/systemone");
+    assert_eq!(
+        format!("{:?}", ClientBuilder::default().log_endpoint_host(false).log_endpoint_host(true)),
+        format!("{:?}", ClientBuilder::default()),
+        "a later setter call restores the default"
+    );
+
+    let response = client.models().list().send().await.expect("the retry succeeds");
+    assert!(response.models().is_empty());
+    let error = client.models().list().send().await.expect_err("the next call is not found");
+    assert_eq!(error.to_string(), "GET http://127.0.0.1:9/prefix/v1/models: 404 gone");
+    let ErrorKind::Api(api) = error.kind() else { panic!("expected an API error: {error:?}") };
+    assert_eq!(api.endpoint(), Some("GET http://127.0.0.1:9/prefix/v1/models"));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let info = recorder.at(Level::INFO);
+    assert_eq!(info.len(), 4, "{info:#?}");
+    assert_timed(&info[0], "message=GET /v1/models <- 503 in ", " (request -)");
+    assert_eq!(info[1], "message=GET /v1/models retry 1");
+    assert_timed(&info[2], "message=GET /v1/models <- 200 in ", " (request -)");
+    assert_timed(&info[3], "message=GET /v1/models <- 404 in ", " (request -)");
+
+    // Exercise the POST request-body event and the connection-failure field too.
+    let questions =
+        crate::Questions::new().noul("q", crate::Noul::new()).prepare().expect("prepares");
+    client.system_one("state", &questions).send().await.expect("the POST succeeds");
+    let error =
+        client.models().list().retry(RetryPolicy::none()).send().await.expect_err("offline");
+    assert!(matches!(error.kind(), ErrorKind::Connection), "{error:?}");
+    assert_eq!(error.to_string(), "Connection error: offline");
+    let info = recorder.at(Level::INFO);
+    assert_eq!(info.len(), 6, "{info:#?}");
+    assert_timed(&info[4], "message=POST /v1/systemone <- 200 in ", " (request -)");
+    assert_eq!(info[5], "message=GET /v1/models <- connection error");
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
+    for level in [Level::INFO, Level::DEBUG, Level::TRACE] {
+        let lines = recorder.at(level);
+        assert!(!lines.is_empty(), "{level}: expected captured events");
+        for line in lines {
+            for hidden in ["127.0.0.1", "http://", "prefix"] {
+                assert!(!line.contains(hidden), "{level}: {hidden} reached {line}");
+            }
+            if level != Level::INFO {
+                let path =
+                    if line.contains("method=POST") { "/v1/systemone" } else { "/v1/models" };
+                assert!(line.contains(&format!("endpoint={path}")), "{level}: {line}");
+            }
+        }
+    }
+}
+
 /// An environment with none of the SDK's variables.
 fn empty(_: &str) -> Option<String> {
     None

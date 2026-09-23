@@ -133,16 +133,21 @@ where
             base_headers: &shared.get_headers,
             call_headers: &headers,
             deadline,
-            max_response_bytes: shared.config.max_response_bytes(),
+            config: &shared.config,
         };
         let policy = self.retry.as_ref().unwrap_or(&shared.retry);
-        retry::run(policy, &Method::GET, uri, |retry| async move {
-            let (status, headers, body) =
-                transport::attempt(&shared.service, exchange, retry, None).await?;
-            // Decoding is part of the attempt, so a retry predicate sees a
-            // response that did not decode, as the Python SDK's does.
-            decode_list_models(body, status, headers, Some((&Method::GET, uri)))
-        })
+        retry::run(
+            policy,
+            &Method::GET,
+            shared.config.endpoints().models_log(),
+            |retry| async move {
+                let (status, headers, body) =
+                    transport::attempt(&shared.service, exchange, retry, None).await?;
+                // Decoding is part of the attempt, so a retry predicate sees a
+                // response that did not decode, as the Python SDK's does.
+                decode_list_models(body, status, headers, Some((&Method::GET, uri)))
+            },
+        )
         .await
     }
 }

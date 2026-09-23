@@ -315,7 +315,7 @@ pub(crate) struct Exchange<'a> {
     pub(crate) call_headers: &'a [(HeaderName, HeaderValue)],
     /// The deadline of one attempt, or `None` for no deadline.
     pub(crate) deadline: Option<Duration>,
-    pub(crate) max_response_bytes: usize,
+    pub(crate) config: &'a Config,
 }
 
 /// What a successful attempt returns: a success status, the headers and the
@@ -354,7 +354,12 @@ pub(crate) async fn attempt<S>(
 where
     S: HttpService,
 {
-    let events = telemetry::Exchange::new(exchange.method, exchange.uri, retry);
+    let events = telemetry::Exchange::new(
+        exchange.method,
+        exchange.uri,
+        retry,
+        exchange.config.omit_endpoint_host(),
+    );
     // The header map and the request are built inside a block so that their
     // storage ends before the await. An async function keeps every local of
     // a scope that is still open when it suspends, even one whose value was
@@ -380,7 +385,7 @@ where
         *request.method_mut() = exchange.method.clone();
         *request.uri_mut() = exchange.uri.clone();
         *request.headers_mut() = headers;
-        (started, exchange_once(service, request, exchange.max_response_bytes))
+        (started, exchange_once(service, request, exchange.config.max_response_bytes()))
     };
     let outcome = match exchange.deadline {
         Some(deadline) => tokio::time::timeout(deadline, exchanged)
@@ -408,11 +413,13 @@ where
                 Bytes::new(),
                 headers,
                 Some(endpoint(exchange)),
-                Error::response_too_large(exchange.max_response_bytes).to_string(),
+                Error::response_too_large(exchange.config.max_response_bytes()).to_string(),
             )
             .into());
         }
-        Err(Failure::TooLarge { .. }) => Error::response_too_large(exchange.max_response_bytes),
+        Err(Failure::TooLarge { .. }) => {
+            Error::response_too_large(exchange.config.max_response_bytes())
+        }
         Err(Failure::Error(error)) => redacted(error, exchange),
     };
     telemetry::failed(events, &failure, started);

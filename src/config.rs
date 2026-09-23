@@ -40,6 +40,8 @@ pub(crate) struct Explicit {
     pub(crate) user_agent_product: Option<String>,
     /// Whether `X-TypeSafe-Runtime` is left out; `false`, the default, sends it.
     pub(crate) omit_runtime_header: bool,
+    /// Whether events omit the scheme, host and base URL's path prefix.
+    pub(crate) omit_endpoint_host: bool,
 }
 
 /// A client's settings once every source has been consulted and every value
@@ -58,6 +60,7 @@ pub(crate) struct Config {
     /// The whole `User-Agent` value, built once.
     user_agent: HeaderValue,
     send_runtime_header: bool,
+    omit_endpoint_host: bool,
 }
 
 impl Config {
@@ -102,6 +105,7 @@ impl Config {
             max_response_bytes,
             user_agent_product,
             omit_runtime_header,
+            omit_endpoint_host,
         } = explicit;
 
         // An explicit key, even a blank one, is the key: the environment is
@@ -121,7 +125,11 @@ impl Config {
         };
         let mut base_url = base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         base_url.truncate(base_url.trim_end_matches('/').len());
-        let endpoints = endpoints(&base_url)?;
+        let mut endpoints = endpoints(&base_url)?;
+        if omit_endpoint_host {
+            endpoints.system_one_log = Uri::from_static(SYSTEM_ONE_PATH);
+            endpoints.models_log = Uri::from_static(MODELS_PATH);
+        }
 
         let default_model = match default_model {
             Some(model) if is_blank(&model) => {
@@ -161,6 +169,7 @@ impl Config {
             max_response_bytes,
             user_agent,
             send_runtime_header: !omit_runtime_header,
+            omit_endpoint_host,
         })
     }
 
@@ -206,6 +215,11 @@ impl Config {
     pub(crate) fn send_runtime_header(&self) -> bool {
         self.send_runtime_header
     }
+
+    /// Whether an event prints only the fixed API path for its endpoint.
+    pub(crate) fn omit_endpoint_host(&self) -> bool {
+        self.omit_endpoint_host
+    }
 }
 
 impl fmt::Debug for Config {
@@ -233,6 +247,9 @@ impl fmt::Debug for Config {
         }
         if !self.send_runtime_header {
             shown.field("send_runtime_header", &false);
+        }
+        if self.omit_endpoint_host {
+            shown.field("log_endpoint_host", &false);
         }
         shown.finish()
     }
@@ -262,6 +279,8 @@ impl fmt::Debug for HeaderNames<'_> {
 pub(crate) struct Endpoints {
     system_one: Uri,
     models: Uri,
+    system_one_log: Uri,
+    models_log: Uri,
 }
 
 impl fmt::Debug for Endpoints {
@@ -285,6 +304,16 @@ impl Endpoints {
     /// The model listing endpoint, `<base>/v1/models`.
     pub(crate) fn models(&self) -> &Uri {
         &self.models
+    }
+
+    /// The System One endpoint as the retry event names it.
+    pub(crate) fn system_one_log(&self) -> &Uri {
+        &self.system_one_log
+    }
+
+    /// The models endpoint as the retry event names it.
+    pub(crate) fn models_log(&self) -> &Uri {
+        &self.models_log
     }
 }
 
@@ -344,7 +373,14 @@ pub(crate) fn endpoints(base_url: &str) -> Result<Endpoints, Error> {
             "invariant: the scheme and authority were checked present, and the path is valid",
         )
     };
-    Ok(Endpoints { system_one: join(SYSTEM_ONE_PATH), models: join(MODELS_PATH) })
+    let system_one = join(SYSTEM_ONE_PATH);
+    let models = join(MODELS_PATH);
+    Ok(Endpoints {
+        system_one_log: system_one.clone(),
+        models_log: models.clone(),
+        system_one,
+        models,
+    })
 }
 
 /// Builds the `Authorization` value for `key`, flagged sensitive.

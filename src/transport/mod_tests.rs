@@ -257,7 +257,21 @@ async fn empty_object_server(protocol: Protocol) -> TestServer {
 #[tokio::test]
 async fn the_retry_count_is_sent_from_the_second_attempt_on_and_never_taken_from_a_caller() {
     let server = empty_object_server(Protocol::Http1).await;
-    let config = config(server.base_url(), &[("x-typesafe-retry-count", "7")]);
+    let config = Config::resolve(
+        Explicit {
+            api_key: Some("test-key".into()),
+            base_url: Some(server.base_url().into()),
+            default_model: Some("jev-latest".into()),
+            default_headers: HeaderMap::from_iter([(
+                RETRY_COUNT_HEADER,
+                HeaderValue::from_static("7"),
+            )]),
+            max_response_bytes: Some(1024),
+            ..Explicit::default()
+        },
+        |_: &str| None::<String>,
+    )
+    .expect("the test configuration resolves");
     let transport = HyperTransport::new(TransportSettings {
         version: HttpVersion::Auto,
         extra_roots: Vec::new(),
@@ -273,7 +287,7 @@ async fn the_retry_count_is_sent_from_the_second_attempt_on_and_never_taken_from
         base_headers: &base,
         call_headers: &call,
         deadline: Some(Duration::from_secs(5)),
-        max_response_bytes: 1024,
+        config: &config,
     };
 
     let body = Bytes::from_static(b"{\"state\":\"x\"}");

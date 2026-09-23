@@ -268,7 +268,7 @@ where
             base_headers: &shared.post_headers,
             call_headers: &headers,
             deadline,
-            max_response_bytes: shared.config.max_response_bytes(),
+            config: &shared.config,
         };
         let policy = self.retry.as_ref().unwrap_or(&shared.retry);
         // Every attempt after the first shares these bytes; the first clone
@@ -277,16 +277,27 @@ where
         let retain = policy.can_retry();
         let asked =
             de::AnswerContext::new(self.questions.len()).with_levels(self.questions.max_levels());
-        retry::run(policy, &Method::POST, uri, move |retry| {
-            let body = if retain { body.clone() } else { std::mem::take(&mut body) };
-            async move {
-                let (status, headers, body) =
-                    transport::attempt(&shared.service, exchange, retry, Some(body)).await?;
-                // Decoding is part of the attempt, so a retry predicate sees a
-                // response that did not decode, as the Python SDK's does.
-                de::decode_system_one_with(body, status, headers, asked, Some((&Method::POST, uri)))
-            }
-        })
+        retry::run(
+            policy,
+            &Method::POST,
+            shared.config.endpoints().system_one_log(),
+            move |retry| {
+                let body = if retain { body.clone() } else { std::mem::take(&mut body) };
+                async move {
+                    let (status, headers, body) =
+                        transport::attempt(&shared.service, exchange, retry, Some(body)).await?;
+                    // Decoding is part of the attempt, so a retry predicate sees a
+                    // response that did not decode, as the Python SDK's does.
+                    de::decode_system_one_with(
+                        body,
+                        status,
+                        headers,
+                        asked,
+                        Some((&Method::POST, uri)),
+                    )
+                }
+            },
+        )
         .await
     }
 

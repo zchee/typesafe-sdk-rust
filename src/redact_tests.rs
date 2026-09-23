@@ -14,6 +14,7 @@ use http::{HeaderMap, Method, Uri};
 use super::*;
 use crate::{
     Error, ErrorKind,
+    config::{Config, Explicit},
     transport::{self, BoxError, Exchange},
 };
 
@@ -46,13 +47,22 @@ fn failed(
     call: &[(HeaderName, HeaderValue)],
 ) -> Error {
     let uri = Uri::from_static("https://api.typesafe.ai/v1/models");
+    let config = Config::resolve(
+        Explicit {
+            api_key: Some("test-key".into()),
+            max_response_bytes: Some(1024),
+            ..Explicit::default()
+        },
+        |_: &str| None::<String>,
+    )
+    .expect("the test configuration resolves");
     let exchange = Exchange {
         method: &Method::GET,
         uri: &uri,
         base_headers: base,
         call_headers: call,
         deadline: None,
-        max_response_bytes: 1024,
+        config: &config,
     };
     transport::redacted(transport::connection(source), exchange)
 }

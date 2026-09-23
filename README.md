@@ -285,6 +285,7 @@ first three fall back to the environment, then to a default:
 | `retry` | - | `RetryPolicy::default()` |
 | `user_agent_product("my-app/1.2.0")` | - | none: `User-Agent` names the SDK alone |
 | `send_runtime_header` | - | `true` |
+| `log_endpoint_host(false)` | - | `true` |
 | `add_root_certificate(der)`, `http_version`, `connect_timeout` | - | none, see below |
 
 These three are the only environment variables the SDK reads, and only for a setting the caller
@@ -403,6 +404,15 @@ RUST_LOG=typesafe_sdk=info
 | `WARN` | An answer of a type this version does not model was skipped (question name and type only, each escaped and cut at 128). |
 | `DEBUG` | Each request as it leaves and each response as it arrives: method, endpoint, retry count, status, request id, elapsed time, the headers with secrets redacted, and the **body length**. |
 | `TRACE` | The request and response **bodies**, with control and format characters escaped, uncut. |
+
+`ClientBuilder::log_endpoint_host(false)` makes events print only the fixed API path,
+`/v1/systemone` or `/v1/models`, never the scheme, host or base URL's path prefix; the default
+is `true`, which keeps the full URL. Errors (`Display`, `ApiError::endpoint()`,
+`ResponseValidationError`) still name the scheme and host, so a caller logging `%error` puts
+the host back. Request and response bodies still print at `TRACE` under the target
+`typesafe_sdk` whatever this flag; cap that target to keep them out. No credential from
+userinfo, query or fragment can reach the default endpoint line, because those URL components
+are refused at build.
 
 A header value is printed as `***` when its name is `authorization`, `proxy-authorization`,
 `x-api-key`, `api-key`, `cookie` or `set-cookie`, when its name contains `token` or `secret`, or

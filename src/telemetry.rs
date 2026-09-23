@@ -41,7 +41,7 @@ use tracing::Level;
 use crate::error::Error;
 #[cfg(feature = "tracing")]
 use crate::{
-    constants::request_id,
+    constants::{MODELS_PATH, SYSTEM_ONE_PATH, request_id},
     error::format_endpoint,
     redact::is_secret,
     text::{Backslash, MAX_NAME_CHARS, SafeText},
@@ -61,6 +61,8 @@ pub(crate) struct Exchange<'a> {
     uri: &'a Uri,
     #[cfg(feature = "tracing")]
     retry: u32,
+    #[cfg(feature = "tracing")]
+    omit_endpoint_host: bool,
     /// Holds the lifetime when the fields above are compiled out.
     #[cfg(not(feature = "tracing"))]
     request: std::marker::PhantomData<&'a ()>,
@@ -69,13 +71,18 @@ pub(crate) struct Exchange<'a> {
 impl<'a> Exchange<'a> {
     /// The attempt numbered `retry` of a request to `method uri`.
     #[cfg(feature = "tracing")]
-    pub(crate) fn new(method: &'a Method, uri: &'a Uri, retry: u32) -> Self {
-        Self { method, uri, retry }
+    pub(crate) fn new(
+        method: &'a Method,
+        uri: &'a Uri,
+        retry: u32,
+        omit_endpoint_host: bool,
+    ) -> Self {
+        Self { method, uri, retry, omit_endpoint_host }
     }
 
     /// Without events there is nothing to name a request for.
     #[cfg(not(feature = "tracing"))]
-    pub(crate) fn new(_: &'a Method, _: &'a Uri, _: u32) -> Self {
+    pub(crate) fn new(_: &'a Method, _: &'a Uri, _: u32, _: bool) -> Self {
         Self { request: std::marker::PhantomData }
     }
 }
@@ -86,7 +93,7 @@ pub(crate) fn sending(exchange: Exchange<'_>, headers: &HeaderMap, body: Option<
     tracing::debug!(
         target: TARGET,
         method = %exchange.method,
-        endpoint = %exchange.uri,
+        endpoint = %EndpointUri(exchange),
         retry = exchange.retry,
         headers = ?redact(headers),
         body_len = body.map_or(0, Bytes::len),
@@ -96,7 +103,7 @@ pub(crate) fn sending(exchange: Exchange<'_>, headers: &HeaderMap, body: Option<
         tracing::trace!(
             target: TARGET,
             method = %exchange.method,
-            endpoint = %exchange.uri,
+            endpoint = %EndpointUri(exchange),
             body = %Lossy(body),
             "request body"
         );
@@ -160,7 +167,7 @@ pub(crate) fn received(
     tracing::debug!(
         target: TARGET,
         method = %exchange.method,
-        endpoint = %exchange.uri,
+        endpoint = %EndpointUri(exchange),
         status = status.as_u16(),
         request_id = %RequestId(headers),
         elapsed = %Elapsed(started),
@@ -171,7 +178,7 @@ pub(crate) fn received(
     tracing::trace!(
         target: TARGET,
         method = %exchange.method,
-        endpoint = %exchange.uri,
+        endpoint = %EndpointUri(exchange),
         body = %Lossy(body),
         "response body"
     );
@@ -200,7 +207,7 @@ pub(crate) fn failed(exchange: Exchange<'_>, error: &Error, started: Started) {
     tracing::debug!(
         target: TARGET,
         method = %exchange.method,
-        endpoint = %exchange.uri,
+        endpoint = %EndpointUri(exchange),
         elapsed = %Elapsed(started),
         failure = error.kind().words().0,
         "request failed"
@@ -224,15 +231,37 @@ pub(crate) fn retrying(exchange: Exchange<'_>) {
 #[cfg(not(feature = "tracing"))]
 pub(crate) fn retrying(_: Exchange<'_>) {}
 
-/// A request's method and URL, as an error names its endpoint. Built only
-/// when an event that prints it is recorded.
+/// An event's URI, optionally reduced to the fixed API path.
+#[cfg(feature = "tracing")]
+struct EndpointUri<'a>(Exchange<'a>);
+
+#[cfg(feature = "tracing")]
+impl fmt::Display for EndpointUri<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.omit_endpoint_host {
+            // Only these two API operations reach telemetry. The wire URI's
+            // path can include a caller's prefix, which must not be logged here.
+            let path = if *self.0.method == Method::POST { SYSTEM_ONE_PATH } else { MODELS_PATH };
+            formatter.write_str(path)
+        } else {
+            self.0.uri.fmt(formatter)
+        }
+    }
+}
+
+/// A request's method and URL, or its fixed API path when the host is omitted.
+/// Built only when an event that prints it is recorded.
 #[cfg(feature = "tracing")]
 struct Endpoint<'a>(Exchange<'a>);
 
 #[cfg(feature = "tracing")]
 impl fmt::Display for Endpoint<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&format_endpoint(self.0.method, self.0.uri))
+        if self.0.omit_endpoint_host {
+            write!(formatter, "{} {}", self.0.method, EndpointUri(self.0))
+        } else {
+            formatter.write_str(&format_endpoint(self.0.method, self.0.uri))
+        }
     }
 }
 

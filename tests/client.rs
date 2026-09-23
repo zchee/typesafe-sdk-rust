@@ -1801,6 +1801,57 @@ mod logging {
         }
     }
 
+    #[tokio::test]
+    async fn log_endpoint_host_false_prints_the_path_alone() {
+        let recorder = Recorder::default();
+        let _installed = install(&recorder);
+        let server = TestServer::start_nth(Protocol::Http1, |attempt, request| {
+            assert_eq!(request.uri.path(), "/prefix/v1/models");
+            match attempt {
+                1 => json_response(StatusCode::SERVICE_UNAVAILABLE, "{}"),
+                2 => json_response(StatusCode::OK, r#"{"models":[]}"#),
+                3 => json_response(StatusCode::NOT_FOUND, r#"{"message":"gone"}"#),
+                other => panic!("unexpected attempt {other}"),
+            }
+        })
+        .await
+        .expect("the test server starts");
+        let base = format!("{}/prefix", server.base_url());
+        let client = builder_for(&server, Protocol::Http1)
+            .base_url(&base)
+            .log_endpoint_host(false)
+            .retry(RetryPolicy::new().backoff_initial(Duration::ZERO))
+            .build()
+            .expect("the client builds");
+
+        let response = client.models().list().send().await.expect("the retry succeeds");
+        assert!(response.models().is_empty());
+        let error = client.models().list().send().await.expect_err("the next call is not found");
+        assert_eq!(error.to_string(), format!("GET {base}/v1/models: 404 gone"));
+        let ErrorKind::Api(api) = error.kind() else { panic!("expected an API error: {error:?}") };
+        assert_eq!(api.endpoint(), Some(format!("GET {base}/v1/models").as_str()));
+        assert_eq!(server.request_count(), 3, "503, retry success, then 404");
+
+        let info = recorder.at(Level::INFO);
+        assert_eq!(info.len(), 4, "{info:#?}");
+        assert_timed(&info[0], "message=GET /v1/models <- 503 in ", " (request -)");
+        assert_eq!(info[1], "message=GET /v1/models retry 1");
+        assert_timed(&info[2], "message=GET /v1/models <- 200 in ", " (request -)");
+        assert_timed(&info[3], "message=GET /v1/models <- 404 in ", " (request -)");
+        for level in [Level::INFO, Level::DEBUG, Level::TRACE] {
+            let lines = recorder.at(level);
+            assert!(!lines.is_empty(), "{level}: expected captured events");
+            for line in lines {
+                for hidden in ["127.0.0.1", "http://", "prefix"] {
+                    assert!(!line.contains(hidden), "{level}: {hidden} reached {line}");
+                }
+                if level != Level::INFO {
+                    assert!(line.contains("endpoint=/v1/models"), "{level}: {line}");
+                }
+            }
+        }
+    }
+
     /// Every event is recorded, hyper's included, so the secrets are checked
     /// against everything a subscriber would see.
     #[tokio::test]
