@@ -132,7 +132,9 @@ fn a_repeated_request_body_costs_one_block() {
     mixed_sizes_return_to_one_block();
 }
 
-/// One large body followed by sixteen small ones.
+/// One large body followed by small ones: sixteen with sonic-rs, thirty-three
+/// with serde_json. Without sonic-rs's six-fold reserve, serde_json's Vec
+/// grows by doubling: shrink at 32, steady at 33 under the same 8x rule.
 ///
 /// The scratch is retained, so the small calls start out allocating nothing
 /// while holding on to megabytes. The size hint decays a sixteenth per call
@@ -147,7 +149,10 @@ fn a_repeated_request_body_costs_one_block() {
 /// minimum across the runs. The large call's line is printed, not asserted,
 /// and it stays the first run's.
 fn mixed_sizes_return_to_one_block() {
+    #[cfg(feature = "sonic")]
     const SMALL_CALLS: usize = 16;
+    #[cfg(not(feature = "sonic"))]
+    const SMALL_CALLS: usize = 33;
 
     let large = filler(1024 * 1024);
     let small = filler(1024);

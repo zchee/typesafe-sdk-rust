@@ -559,11 +559,12 @@ fn a_raw_field_that_cannot_be_encoded_is_reported_by_prepare() {
     let unencodable = BTreeMap::from([((1_u8, 2_u8), "secret-value")]);
     let raw = RawQuestion::new("choice").field("bad", &unencodable).field("worse", &unencodable);
     let message = rejection(Questions::new().raw("raw", raw));
-    assert_eq!(
-        message,
-        "Question \"raw\" field \"bad\": the value could not be encoded as JSON: \
-         Expected the key to be string/bool/number when serializing map, now is tuple"
-    );
+    #[cfg(feature = "sonic")]
+    let expected = "Question \"raw\" field \"bad\": the value could not be encoded as JSON: \
+                    Expected the key to be string/bool/number when serializing map, now is tuple";
+    #[cfg(not(feature = "sonic"))]
+    let expected = "Question \"raw\" field \"bad\": the value could not be encoded as JSON: key must be a string";
+    assert_eq!(message, expected);
     assert!(!message.contains("secret-value"));
 }
 

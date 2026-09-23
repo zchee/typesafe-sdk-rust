@@ -404,6 +404,10 @@ async fn a_renamed_question_is_answered_under_its_wire_name() {
 async fn a_missing_or_wrong_answer_fails_at_its_field() {
     let wrong_kind = r#""quality":{"type":"noul","noul":0.5}"#;
     let no_answers = r#"{"model":"jev-latest","usage":{"input_tokens":1,"output_tokens":1}}"#;
+    #[cfg(feature = "sonic")]
+    let not_object_column = 79;
+    #[cfg(not(feature = "sonic"))]
+    let not_object_column = 77;
     let cases = [
         ("missing answer", body(&format!("{{{SPAM},{TONE}}}")), "answers.quality", 221),
         (
@@ -412,7 +416,7 @@ async fn a_missing_or_wrong_answer_fails_at_its_field() {
             "answers.quality.type",
             245,
         ),
-        ("not an object", body("[]"), "answers", 79),
+        ("not an object", body("[]"), "answers", not_object_column),
         ("no answers member", no_answers.to_owned(), "answers", 67),
     ];
     for (case, response, path, column) in cases {

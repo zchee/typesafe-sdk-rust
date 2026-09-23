@@ -20,9 +20,9 @@ syn = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-# The reference the escaper is compared with. It is the main crate's codec,
-# taken directly: depending on the main crate would make a cycle through this
-# package.
+# Compare the escaper with both supported runtime codecs. Depending on the
+# main crate would make a cycle through this package.
+serde_json = { workspace = true }
 sonic-rs = { workspace = true }
 
 [lints]

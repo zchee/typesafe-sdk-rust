@@ -12,9 +12,185 @@ use std::{
 
 use proptest::prelude::*;
 use serde::{Deserialize, de::IgnoredAny};
+#[cfg(feature = "sonic")]
+use serde_json as other_codec;
+#[cfg(not(feature = "sonic"))]
+use sonic_rs as other_codec;
 
 use super::*;
 use crate::rendering_tests::assert_printable;
+
+#[test]
+fn the_backend_is_the_one_the_sonic_feature_names() {
+    #[cfg(feature = "sonic")]
+    assert_eq!(backend::SPLICE_TOKEN, "$sonic_rs::LazyValue");
+    #[cfg(not(feature = "sonic"))]
+    assert_eq!(backend::SPLICE_TOKEN, "$serde_json::private::RawValue");
+}
+
+#[test]
+fn map_keys_the_doc_lists_encode() {
+    struct FloatKey(f64);
+    impl Serialize for FloatKey {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut map = serializer.serialize_map(Some(1))?;
+            map.serialize_entry(&self.0, &1)?;
+            map.end()
+        }
+    }
+    assert_eq!(sdk_encoded(&BTreeMap::from([(true, 1)])), r#"{"true":1}"#);
+    assert_eq!(sdk_encoded(&FloatKey(0.5)), r#"{"0.5":1}"#);
+    let error = RawJson::from_value(&FloatKey(f64::NAN)).expect_err("a NaN key is not JSON");
+    #[cfg(feature = "sonic")]
+    assert!(error.message().contains("NaN or Infinite f64"), "{error}");
+    #[cfg(not(feature = "sonic"))]
+    assert_eq!(error.message(), "float key must be finite (got NaN or +/-inf)");
+}
+
+#[test]
+fn raw_json_reads_back_through_from_reader_from_value_and_a_token_keyed_map() {
+    use serde::de::value::{Error as ValueError, MapDeserializer};
+
+    let document = r#"{"label":"ok","list":[1,2]}"#;
+    let expected: RawJson = serde_json::from_str(document).expect("a caller reads the JSON");
+    let value: serde_json::Value = serde_json::from_str(document).expect("valid JSON");
+    let from_reader: RawJson =
+        serde_json::from_reader(document.as_bytes()).expect("owned raw text");
+    let from_value: RawJson = serde_json::from_value(value.clone()).expect("owned value");
+    let borrowed_value = RawJson::deserialize(&value).expect("borrowed value");
+    for (case, raw) in [("reader", from_reader), ("value", from_value), ("&Value", borrowed_value)]
+    {
+        assert_eq!(raw, expected, "{case}");
+    }
+
+    let injected = r#"{"a":1},"x":2"#;
+    let map =
+        MapDeserializer::<_, ValueError>::new([(backend::SPLICE_TOKEN, injected)].into_iter());
+    let result = RawJson::deserialize(map);
+    #[cfg(feature = "sonic")]
+    {
+        let rendered = result.expect("an unknown raw token is an ordinary map");
+        let expected = serde_json::to_string(&BTreeMap::from([(backend::SPLICE_TOKEN, injected)]))
+            .expect("the reference writes the map as data");
+        assert_eq!(rendered.as_str(), expected);
+    }
+    #[cfg(not(feature = "sonic"))]
+    {
+        let error = result.expect_err("a raw token's text is validated").to_string();
+        assert!(error.contains("invalid JSON syntax"), "{error}");
+        assert!(!error.contains("\"x\""), "the input is not copied into {error}");
+    }
+    let empty = MapDeserializer::<_, ValueError>::new(std::iter::empty::<(&str, &str)>());
+    assert_eq!(RawJson::deserialize(empty).expect("an empty map renders").as_str(), "{}");
+}
+
+#[test]
+fn a_padded_document_is_verbatim_inside_the_sdk_and_re_rendered_through_another_codec() {
+    let arbitrary = std::env::var("TYPESAFE_SDK_TEST_ARBITRARY_PRECISION").as_deref() == Ok("1");
+    let probe = serde_json::to_string(
+        &serde_json::from_str::<serde_json::Value>("1E2").expect("the feature probe parses"),
+    )
+    .expect("the feature probe serializes");
+    assert_eq!(
+        probe,
+        if arbitrary { "1e+2" } else { "100.0" },
+        "the feature probe must match the test environment"
+    );
+    let cases = [
+        ("{ \"a\" : 1 }", r#"{"a":1}"#, r#"{"a":1}"#),
+        (r#"{"n":1E2,"h":0.50}"#, r#"{"n":100.0,"h":0.5}"#, r#"{"n":1e+2,"h":0.50}"#),
+        (r#"{"z":-0}"#, r#"{"z":-0.0}"#, r#"{"z":0}"#),
+    ];
+    for (document, ordinary, precise) in cases {
+        assert_eq!(decode::<RawJson>(document.as_bytes()).expect("SDK decode").as_str(), document);
+        assert_eq!(
+            decode_seed(document.as_bytes(), PhantomData::<RawJson>)
+                .expect("seeded SDK decode")
+                .as_str(),
+            document
+        );
+        let reloaded: RawJson = serde_json::from_str(document).expect("caller reload");
+        assert_eq!(reloaded.as_str(), if arbitrary { precise } else { ordinary }, "{document}");
+    }
+}
+
+#[test]
+fn a_number_token_map_is_read_as_its_number() {
+    use serde::de::value::{Error as ValueError, MapDeserializer};
+
+    for text in ["0.5", "12345678901234567890123"] {
+        let map = MapDeserializer::<_, ValueError>::new([(NUMBER_TOKEN, text)].into_iter());
+        assert_eq!(RawJson::deserialize(map).expect("a number token renders").as_str(), text);
+    }
+    for text in ["1,\"x\":2", "1 "] {
+        let map = MapDeserializer::<_, ValueError>::new([(NUMBER_TOKEN, text)].into_iter());
+        let error = RawJson::deserialize(map).expect_err("not one number").to_string();
+        assert!(error.contains("invalid JSON"), "{text:?}: {error}");
+    }
+    let map = MapDeserializer::<_, ValueError>::new([(NUMBER_TOKEN, "1"), ("x", "2")].into_iter());
+    assert_eq!(
+        RawJson::deserialize(map).expect_err("an extra entry is refused").to_string(),
+        "a JSON number token must be the only entry"
+    );
+    let map = MapDeserializer::<_, ValueError>::new([(NUMBER_TOKEN, 1_u64)].into_iter());
+    let error =
+        RawJson::deserialize(map).expect_err("the token value must be a string").to_string();
+    assert!(error.contains("expected a string"), "{error}");
+    let map = MapDeserializer::<_, ValueError>::new([(NUMBER_TOKEN, "0.5")].into_iter());
+    let error = crate::response::Answer::deserialize(map).expect_err("a number is not an answer");
+    assert_eq!(error.to_string(), "missing field `type`");
+
+    #[cfg(not(feature = "sonic"))]
+    for (text, expected) in [
+        ("0.5", Some("0.5")),
+        ("12345678901234567890123", Some("1.2345678901234568e+22")),
+        ("1,\"x\":2", None),
+        ("1e+400", None),
+    ] {
+        let map = MapDeserializer::<_, ValueError>::new([(NUMBER_TOKEN, text)].into_iter());
+        let mut output = Vec::new();
+        let result = Transcoder::new(map).serialize(&mut other_codec::Serializer::new(&mut output));
+        match expected {
+            Some(expected) => {
+                result.unwrap_or_else(|error| panic!("{text}: {error}"));
+                assert_eq!(output, expected.as_bytes(), "{text}");
+            }
+            None => {
+                let error = result.expect_err("the number cannot be transcoded").to_string();
+                assert!(
+                    error.contains("the stored JSON text could not be read back"),
+                    "{text}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn encode_writes_the_bytes_the_other_engine_writes() {
+    #[derive(Serialize)]
+    struct Value {
+        text: &'static str,
+        tenth: f64,
+        exponent: f64,
+        negative_zero: f64,
+        largest: u64,
+        nested: BTreeMap<&'static str, [u8; 2]>,
+    }
+    let value = Value {
+        text: "\u{1b}\u{7f}\u{2028}",
+        tenth: 0.1,
+        exponent: 1e22,
+        negative_zero: -0.0,
+        largest: u64::MAX,
+        nested: BTreeMap::from([("items", [1, 2])]),
+    };
+    let mut output = Vec::new();
+    encode_into(&mut output, &value).expect("the SDK writes JSON");
+    assert_eq!(output, other_codec::to_vec(&value).expect("the reference writes JSON"));
+    let text = std::str::from_utf8(&output).expect("JSON is UTF-8");
+    assert!(text.contains(r#""exponent":1e+22"#), "{text}");
+}
 
 // ------------------------------------------------------------- fixtures
 
@@ -206,7 +382,7 @@ struct DeeplyKeyed {
 /// `{"answers":{<key>:{}}}` with `key` written as a JSON string, escapes and
 /// all, so that no raw control character has to appear in this file.
 fn keyed_document(key: &str) -> String {
-    let key = serde_json::to_string(key).expect("a string encodes");
+    let key = other_codec::to_string(key).expect("a string encodes");
     format!(r#"{{"answers":{{{key}:{{}}}}}}"#)
 }
 
@@ -371,15 +547,15 @@ proptest! {
         index in 0_usize..3,
     ) {
         let elements = std::iter::repeat_n("{}".to_owned(), index)
-            .chain([format!(r#"{{{}:{{}}}}"#, serde_json::to_string(&inner).expect("encodes"))])
+            .chain([format!(r#"{{{}:{{}}}}"#, other_codec::to_string(&inner).expect("encodes"))])
             .collect::<Vec<_>>()
             .join(",");
         let document =
-            format!(r#"{{{}:[{elements}]}}"#, serde_json::to_string(&outer).expect("encodes"));
+            format!(r#"{{{}:[{elements}]}}"#, other_codec::to_string(&outer).expect("encodes"));
         type Target = BTreeMap<String, Vec<BTreeMap<String, Noul>>>;
 
         let error = decode::<Target>(document.as_bytes()).expect_err("no `noul`");
-        let mut deserializer = sonic_rs::Deserializer::from_slice(document.as_bytes());
+        let mut deserializer = backend::Deserializer::from_slice(document.as_bytes());
         let tracked = serde_path_to_error::deserialize::<_, Target>(&mut deserializer)
             .expect_err("no `noul`");
 
@@ -568,7 +744,8 @@ fn an_outlier_body_stops_pinning_the_scratch() {
     let large = "L".repeat(1024 * 1024);
     let small = "s".repeat(1024);
     encode_body(|buffer| encode_into(buffer, large.as_str())).expect("encodes");
-    for _ in 0..16 {
+    let calls = if cfg!(feature = "sonic") { 16 } else { 32 };
+    for _ in 0..calls {
         encode_body(|buffer| encode_into(buffer, small.as_str())).expect("encodes");
     }
 
@@ -585,9 +762,12 @@ fn an_outlier_body_stops_pinning_the_scratch() {
 fn a_scratch_past_the_ceiling_is_not_kept() {
     reset_scratch();
 
-    // The codec reserves six times a string's length, so 2 MiB of text needs
-    // about 12 MiB of scratch.
+    // sonic-rs reserves six-fold; serde_json needs the body itself to cross
+    // the ceiling. Both cases exercise dropping, not the decay-driven shrink.
+    #[cfg(feature = "sonic")]
     let state = "L".repeat(2 * 1024 * 1024);
+    #[cfg(not(feature = "sonic"))]
+    let state = "L".repeat(MAX_RETAINED_SCRATCH + 1);
     for call in 1..=3 {
         let body = encode_body(|buffer| encode_into(buffer, state.as_str())).expect("encodes");
         assert_eq!(body.len(), state.len() + 2, "call {call}");
@@ -613,10 +793,13 @@ fn a_scratch_under_the_ceiling_is_kept() {
     for call in 1..=3 {
         encode_body(|buffer| encode_into(buffer, state.as_str())).expect("encodes");
         let capacity = scratch_capacity();
+        #[cfg(feature = "sonic")]
+        let minimum = 6 * state.len() + 1;
+        #[cfg(not(feature = "sonic"))]
+        let minimum = state.len() + 2;
         assert!(
-            capacity > 6 * state.len() && capacity <= MAX_RETAINED_SCRATCH,
-            "call {call}: a {} B state keeps {capacity} B, not its six-fold reserve under the \
-             {MAX_RETAINED_SCRATCH} B ceiling",
+            capacity >= minimum && capacity <= MAX_RETAINED_SCRATCH,
+            "call {call}: a {} B state keeps {capacity} B, outside {minimum}..={MAX_RETAINED_SCRATCH}",
             state.len()
         );
     }
@@ -678,17 +861,29 @@ fn raw_json_applies_the_depth_limit_when_it_is_read_back() {
 
 // ------------------------------------------------- differential behaviour
 
+#[cfg(feature = "sonic")]
 #[test]
-fn a_negative_zero_loses_its_sign() {
+fn a_literal_negative_zero_loses_its_sign_with_sonic() {
     // An accepted divergence of this codec, asserted so that it is a recorded
     // property rather than a surprise: a literal negative zero decodes as a
     // positive one. A zero reached by underflow keeps its sign.
     let ours: f64 = decode(b"-0.0").expect("it parses");
-    let reference: f64 = serde_json::from_slice(b"-0.0").expect("it parses there too");
+    let reference: f64 = other_codec::from_slice(b"-0.0").expect("it parses there too");
 
     assert_eq!(ours.to_bits(), 0.0_f64.to_bits());
     assert_eq!(reference.to_bits(), (-0.0_f64).to_bits());
 
+    let underflow: f64 = decode(b"-1e-400").expect("it parses");
+    assert_eq!(underflow.to_bits(), (-0.0_f64).to_bits());
+}
+
+#[cfg(not(feature = "sonic"))]
+#[test]
+fn a_literal_negative_zero_keeps_its_sign() {
+    let ours: f64 = decode(b"-0.0").expect("it parses");
+    let reference: f64 = other_codec::from_slice(b"-0.0").expect("the reference parses it");
+    assert_eq!(ours.to_bits(), 0x8000_0000_0000_0000);
+    assert_eq!(reference.to_bits(), 0);
     let underflow: f64 = decode(b"-1e-400").expect("it parses");
     assert_eq!(underflow.to_bits(), (-0.0_f64).to_bits());
 }
@@ -708,7 +903,7 @@ fn awkward_characters_encode_to_text_another_codec_reads_back() {
     for sample in samples {
         let mut buffer = Vec::new();
         encode_into(&mut buffer, sample).expect("a string always encodes");
-        let reparsed: String = serde_json::from_slice(&buffer)
+        let reparsed: String = other_codec::from_slice(&buffer)
             .unwrap_or_else(|error| panic!("{error} for {buffer:?}"));
         assert_eq!(reparsed, sample, "encoded as {:?}", String::from_utf8_lossy(&buffer));
     }
@@ -723,7 +918,7 @@ proptest! {
     ) {
         let mut buffer = Vec::new();
         encode_into(&mut buffer, text.as_str()).expect("a string always encodes");
-        let reparsed: String = serde_json::from_slice(&buffer)
+        let reparsed: String = other_codec::from_slice(&buffer)
             .unwrap_or_else(|error| panic!("{error} for {buffer:?}"));
         prop_assert_eq!(reparsed, text);
     }
@@ -765,14 +960,14 @@ fn another_codec_gets_json_data_and_never_the_splice_token() {
     let document = br#"{"name":"legend","raw":{"b":[1,{"c":"caf\u00e9"}],"a":null}}"#;
     let envelope: Envelope2 = decode(document).expect("the document decodes");
 
-    let foreign = serde_json::to_string(&envelope).expect("another codec writes it as data");
+    let foreign = other_codec::to_string(&envelope).expect("another codec writes it as data");
 
     assert!(
-        !foreign.contains("$sonic_rs"),
+        !foreign.contains(backend::SPLICE_TOKEN),
         "a private protocol of this codec reached another one: {foreign}"
     );
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&foreign).expect("the output is JSON"),
+        other_codec::from_str::<serde_json::Value>(&foreign).expect("the output is JSON"),
         serde_json::json!({"name": "legend", "raw": {"b": [1, {"c": "caf\u{e9}"}], "a": null}}),
         "transcoded as {foreign}"
     );
@@ -798,14 +993,14 @@ fn a_raw_value_round_trips_through_another_codec_with_the_same_data() {
     ] {
         let original = RawJson::from_text(text.to_owned());
 
-        let written = serde_json::to_string(&original).expect("it writes as data");
-        let read_back: RawJson = serde_json::from_str(&written).expect("it reads back");
+        let written = other_codec::to_string(&original).expect("it writes as data");
+        let read_back: RawJson = other_codec::from_str(&written).expect("it reads back");
 
-        assert!(!written.contains("$sonic_rs"), "token leaked for {text}: {written}");
+        assert!(!written.contains(backend::SPLICE_TOKEN), "token leaked for {text}: {written}");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(read_back.as_str())
+            other_codec::from_str::<serde_json::Value>(read_back.as_str())
                 .expect("the text is JSON"),
-            serde_json::from_str::<serde_json::Value>(text).expect("so is the original"),
+            other_codec::from_str::<serde_json::Value>(text).expect("so is the original"),
             "{text} came back as {read_back}"
         );
     }
@@ -844,26 +1039,35 @@ fn numbers_keep_their_value_across_the_transcode() {
     let raw = RawJson::from_text(NUMBERS.to_owned());
     let expected = Numbers { tiny: 1e-7, tenth: 0.1, largest: u64::MAX, smallest: i64::MIN };
 
-    let written = serde_json::to_string(&raw).expect("it writes as data");
-    let decoded: Numbers = serde_json::from_str(&written).expect("the numbers read back");
+    let written = other_codec::to_string(&raw).expect("it writes as data");
+    let decoded: Numbers = other_codec::from_str(&written).expect("the numbers read back");
 
     assert_eq!(decoded.tiny.to_bits(), expected.tiny.to_bits(), "written as {written}");
     assert_eq!(decoded.tenth.to_bits(), expected.tenth.to_bits(), "written as {written}");
     assert_eq!(decoded.largest, u64::MAX, "written as {written}");
     assert_eq!(decoded.smallest, i64::MIN, "written as {written}");
 
+    let wide = RawJson::from_text("12345678901234567890123".to_owned());
+    assert_eq!(
+        other_codec::to_string(&wide).expect("a wide integer transcodes"),
+        "1.2345678901234568e+22",
+        "integers beyond u64/i64 take the same f64 path as number tokens"
+    );
+
     // The same value through this codec is not re-rendered at all.
     assert_eq!(sdk_encoded(&raw), NUMBERS);
 }
 
 #[test]
-fn a_negative_zero_loses_its_sign_on_the_transcode_path_only() {
-    // The recorded divergence of this codec, one step further out: the
-    // transcode reads the number with this parser, so a literal negative zero
-    // comes out positive. The splice never reads it.
+fn a_negative_zero_on_the_transcode_path_is_written_as_the_backend_reads_it() {
+    // The transcode reads with the selected parser; the splice never reads it.
     let raw = RawJson::from_text("-0.0".to_owned());
+    #[cfg(feature = "sonic")]
+    let expected = "0.0";
+    #[cfg(not(feature = "sonic"))]
+    let expected = "-0.0";
 
-    assert_eq!(serde_json::to_string(&raw).expect("it writes as data"), "0.0");
+    assert_eq!(other_codec::to_string(&raw).expect("it writes as data"), expected);
     assert_eq!(sdk_encoded(&raw), "-0.0");
 }
 
@@ -877,9 +1081,9 @@ fn a_value_too_deep_to_transcode_is_refused_rather_than_aborting() {
 
     let outcomes = on_worker_stack(move || {
         (
-            serde_json::to_string(&at_limit).expect("the limit itself transcodes"),
-            serde_json::to_string(&over_limit).map(|_| ()).map_err(|error| error.to_string()),
-            serde_json::to_string(&absurd).map(|_| ()).map_err(|error| error.to_string()),
+            other_codec::to_string(&at_limit).expect("the limit itself transcodes"),
+            other_codec::to_string(&over_limit).map(|_| ()).map_err(|error| error.to_string()),
+            other_codec::to_string(&absurd).map(|_| ()).map_err(|error| error.to_string()),
             sdk_encoded(&absurd),
         )
     });
@@ -896,14 +1100,14 @@ fn a_document_too_deep_to_render_is_refused_by_the_other_codec_path() {
     // is this crate's.
     let document = nested_array(MAX_JSON_DEPTH + 1);
 
-    let error = serde_json::from_str::<RawJson>(&document).expect_err("the document is too deep");
+    let error = other_codec::from_str::<RawJson>(&document).expect_err("the document is too deep");
 
     assert!(
         error.to_string().contains("nested deeper"),
         "the depth cap has to be the reason: {error}"
     );
     assert_eq!(
-        serde_json::from_str::<RawJson>(&nested_array(MAX_JSON_DEPTH))
+        other_codec::from_str::<RawJson>(&nested_array(MAX_JSON_DEPTH))
             .expect("the limit itself is fine")
             .as_str(),
         nested_array(MAX_JSON_DEPTH)
@@ -936,11 +1140,17 @@ fn a_failure_in_the_other_codec_is_reported_and_carries_no_input() {
     const SECRET: &str = "pentachlorophenol-42";
     let raw = RawJson::from_text(format!(r#"{{"nested":[{{"state":"{SECRET}"}}]}}"#));
 
-    let error = serde_json::to_writer(ShortWriter { remaining: 4 }, &raw)
-        .expect_err("the sink refuses the value");
+    let writer = ShortWriter { remaining: 4 };
+    #[cfg(not(feature = "sonic"))]
+    let writer = other_codec::writer::BufferedWriter::new(writer);
+    let error = other_codec::to_writer(writer, &raw).expect_err("the sink refuses the value");
 
     let rendered = error.to_string();
-    assert!(rendered.contains("the sink is full"), "the writer's reason is kept: {rendered}");
+    #[cfg(feature = "sonic")]
+    let reason = "the sink is full";
+    #[cfg(not(feature = "sonic"))]
+    let reason = "io error while serializing or deserializing";
+    assert!(rendered.contains(reason), "the writer's reason is kept: {rendered}");
     assert!(!rendered.contains(SECRET), "the failure leaked the text: {rendered}");
 }
 
@@ -956,7 +1166,7 @@ fn a_wrapper_around_this_codec_forwards_the_splice() {
     let mut buffer = Vec::new();
     {
         let _inside = EncoderMark::enter();
-        let mut codec = sonic_rs::Serializer::new(&mut buffer);
+        let mut codec = backend::Serializer::new(&mut buffer);
         raw.serialize(serde_path_to_error::Serializer::new(&mut codec, &mut track))
             .expect("the wrapper forwards the splice");
     }
@@ -969,10 +1179,14 @@ fn a_wrapper_around_this_codec_forwards_the_splice() {
     // what a caller assembling a serializer of their own sees.
     let mut track = serde_path_to_error::Track::new();
     let mut buffer = Vec::new();
-    let mut codec = sonic_rs::Serializer::new(&mut buffer);
+    let mut codec = backend::Serializer::new(&mut buffer);
     raw.serialize(serde_path_to_error::Serializer::new(&mut codec, &mut track))
         .expect("outside the encoder it transcodes");
-    assert_eq!(String::from_utf8(buffer).expect("the codec emits UTF-8"), r#"{"b":[1,2],"a":0.0}"#);
+    #[cfg(feature = "sonic")]
+    let expected = r#"{"b":[1,2],"a":0.0}"#;
+    #[cfg(not(feature = "sonic"))]
+    let expected = r#"{"b":[1,2],"a":-0.0}"#;
+    assert_eq!(String::from_utf8(buffer).expect("the codec emits UTF-8"), expected);
 }
 
 #[test]
@@ -1025,11 +1239,15 @@ fn text_that_is_not_one_json_value_never_becomes_raw_json() {
     // others would make the body unparseable. The refusal that reaches the
     // caller is a `serde` error carrying the rendered `DecodeError`, so the
     // kind is asserted through what it renders as.
+    #[cfg(feature = "sonic")]
+    let empty_error = "invalid JSON syntax at line 1 column 1";
+    #[cfg(not(feature = "sonic"))]
+    let empty_error = "invalid JSON syntax at line 1 column 0";
     for (text, expected) in [
         (r#"{"a":1}, "model": "evil""#, "invalid JSON syntax at line 1 column 8"),
         ("{not json", "invalid JSON syntax at line 1 column 2"),
         ("hello", "invalid JSON syntax at line 1 column 1"),
-        ("", "invalid JSON syntax at line 1 column 1"),
+        ("", empty_error),
         ("  ", "invalid JSON syntax at line 1 column 2"),
     ] {
         let borrowed =
@@ -1116,7 +1334,7 @@ fn a_non_finite_float_encodes_as_null_exactly_as_the_reference_codec_does() {
     {
         let ours = RawJson::from_value(&value).expect("a non-finite float encodes");
         assert_eq!(ours.as_str(), expected);
-        assert_eq!(serde_json::to_string(&value).expect("so it does there"), expected);
+        assert_eq!(other_codec::to_string(&value).expect("so it does there"), expected);
     }
 
     let scores = Scores { score: f64::NAN, ratio: f32::NEG_INFINITY };
@@ -1125,7 +1343,7 @@ fn a_non_finite_float_encodes_as_null_exactly_as_the_reference_codec_does() {
         r#"{"score":null,"ratio":null}"#
     );
     assert_eq!(
-        serde_json::to_string(&scores).expect("and there too"),
+        other_codec::to_string(&scores).expect("and there too"),
         r#"{"score":null,"ratio":null}"#
     );
 
@@ -1146,7 +1364,7 @@ fn an_encode_error_is_a_key_the_writer_cannot_spell_or_a_value_that_refuses() {
     let tuple_keys = std::collections::BTreeMap::from([((1_u8, 2_u8), 3_u8)]);
     let error = RawJson::from_value(&tuple_keys).expect_err("a tuple is not a JSON key");
     assert!(error.message().contains("key"), "{error}");
-    assert!(serde_json::to_string(&tuple_keys).is_err(), "the reference codec refuses it too");
+    assert!(other_codec::to_string(&tuple_keys).is_err(), "the reference codec refuses it too");
 
     struct Refuses;
     impl Serialize for Refuses {

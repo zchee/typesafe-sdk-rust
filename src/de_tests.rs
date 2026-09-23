@@ -1,10 +1,21 @@
 use std::fmt::Debug;
 
 use http::HeaderValue;
+#[cfg(feature = "sonic")]
+use serde_json as other_codec;
 use serde_json::json;
+#[cfg(not(feature = "sonic"))]
+use sonic_rs as other_codec;
+
+use crate::codec::backend;
 
 use super::*;
 use crate::{ErrorKind, rendering_tests::assert_printable, response::Answer};
+
+/// The SDK's visitor message and position, without the foreign codec's input excerpt.
+fn other_codec_error(error: other_codec::Error) -> String {
+    error.to_string().lines().next().expect("a codec error has a message").to_owned()
+}
 
 /// `RESULT` of `tests/test_clients.py:42-56`.
 const RESULT: &[u8] = include_bytes!("../tests/fixtures/result.json");
@@ -78,6 +89,25 @@ fn result_answers() -> &'static str {
 /// A response body around `answers`, with the other members valid.
 fn with_answers(answers: serde_json::Value) -> serde_json::Value {
     json!({"model": "test", "usage": {"input_tokens": 1, "output_tokens": 1}, "answers": answers})
+}
+
+#[test]
+fn a_float_answer_and_a_score_decode_under_arbitrary_precision() {
+    let body = br#"{"model":"m","usage":{},"answers":{"n":{"noul":0.5,"type":"noul"},"s":{"score":0.75,"confidence":0.5,"legend":{"0":"low","1":"high"},"probabilities":{"0":0.25,"1":0.75},"type":"score"}}}"#;
+    let response = decode_as::<Answers>(body, 2).expect("typed numeric fields decode");
+    assert_eq!(response.answers().len(), 2);
+    assert_eq!(
+        response.answers().noul("n").expect("noul answer").noul().to_bits(),
+        0.5_f64.to_bits()
+    );
+    let score = response.answers().score("s").expect("score answer");
+    assert_eq!(score.score().to_bits(), 0.75_f64.to_bits());
+    assert_eq!(score.confidence().to_bits(), 0.5_f64.to_bits());
+    assert_eq!(score.probabilities().collect::<Vec<_>>(), [(0, 0.25), (1, 0.75)]);
+    assert_eq!(
+        score.legend().map(|(level, text)| (level, text.as_text())).collect::<Vec<_>>(),
+        [(0, Some("low")), (1, Some("high"))]
+    );
 }
 
 // ------------------------------------------------------- the fixture
@@ -486,8 +516,8 @@ fn a_typed_answer_that_names_two_types_is_refused_and_one_named_twice_is_not() {
     assert_eq!(typed.answers().spam, NoulAnswer::new(0.5));
 
     let standalone =
-        serde_json::from_str::<NoulAnswer>(r#"{"type":"noul","noul":1,"type":"score"}"#)
-            .map_err(|error| error.to_string());
+        other_codec::from_str::<NoulAnswer>(r#"{"type":"noul","noul":1,"type":"score"}"#)
+            .map_err(other_codec_error);
     assert_eq!(standalone, Err("expected an answer of type `noul` at line 1 column 38".to_owned()));
 }
 
@@ -663,14 +693,14 @@ fn a_level_list_takes_the_hinted_capacity_only_once_it_has_an_entry() {
     ];
     for (probabilities, legend, hint, entries, capacity) in rows {
         let levels = LevelsSeed { capacity: hint }
-            .deserialize(&mut sonic_rs::Deserializer::from_slice(probabilities.as_bytes()))
+            .deserialize(&mut backend::Deserializer::from_slice(probabilities.as_bytes()))
             .unwrap_or_else(|error| panic!("{probabilities} did not decode: {error}"));
         assert_eq!(levels.len(), entries, "probabilities {probabilities} under hint {hint}");
         assert_eq!(levels.capacity(), capacity, "probabilities {probabilities} under hint {hint}");
         assert!(levels.is_sorted_by_key(|(level, _)| *level), "{probabilities}: {levels:?}");
 
         let legend_entries = LegendSeed { capacity: hint }
-            .deserialize(&mut sonic_rs::Deserializer::from_slice(legend.as_bytes()))
+            .deserialize(&mut backend::Deserializer::from_slice(legend.as_bytes()))
             .unwrap_or_else(|error| panic!("{legend} did not decode: {error}"));
         assert_eq!(legend_entries.len(), entries, "legend {legend} under hint {hint}");
         assert_eq!(legend_entries.capacity(), capacity, "legend {legend} under hint {hint}");
@@ -1078,31 +1108,36 @@ fn the_expected_answer_count_never_changes_the_result() {
 #[test]
 fn each_answer_type_reads_its_own_object_through_any_codec() {
     let noul: NoulAnswer =
-        serde_json::from_str(r#"{"noul": 0.5, "type": "noul", "unexpected": true}"#)
+        other_codec::from_str(r#"{"noul": 0.5, "type": "noul", "unexpected": true}"#)
             .expect("a noul");
     assert_eq!(noul, NoulAnswer::new(0.5));
 
-    let choice: ChoiceAnswer = serde_json::from_str(
+    let choice: ChoiceAnswer = other_codec::from_str(
         r#"{"type": "choice", "choice": "a", "confidence": 1.0, "probabilities": {"a": 1.0}}"#,
     )
     .expect("a choice");
     assert_eq!(choice, ChoiceAnswer::new("a", 1.0, [("a", 1.0)]));
 
-    let score: ScoreAnswer = serde_json::from_str(
+    let score: ScoreAnswer = other_codec::from_str(
         r#"{"type": "score", "score": 0.0, "confidence": 1.0, "legend": {"0": "bad"}, "probabilities": {"0": 1.0}}"#,
     )
     .expect("a score");
     assert_eq!(score, ScoreAnswer::new(0.0, 1.0, [(0, Content::text("bad"))], [(0, 1.0)]));
 
-    let answer: Answer = serde_json::from_str(r#"{"type": "noul", "noul": 1}"#).expect("an answer");
+    let answer: Answer =
+        other_codec::from_str(r#"{"type": "noul", "noul": 1}"#).expect("an answer");
     assert_eq!(answer, Answer::Noul(NoulAnswer::new(1.0)));
 
-    let answers: Answers = serde_json::from_str(result_answers()).expect("answers");
+    let answers: Answers = other_codec::from_str(result_answers()).expect("answers");
     assert_eq!(&answers, decode(RESULT).answers());
 }
 
 #[test]
 fn a_standalone_answer_of_the_wrong_or_an_unknown_type_is_an_error() {
+    #[cfg(feature = "sonic")]
+    let sequence_error = "missing field `type` at line 1 column 1";
+    #[cfg(not(feature = "sonic"))]
+    let sequence_error = "missing field `type` at line 1 column 2";
     let rows: [(&str, Result<(), String>); 5] = [
         (
             r#"{"type": "choice"}"#,
@@ -1113,31 +1148,30 @@ fn a_standalone_answer_of_the_wrong_or_an_unknown_type_is_an_error() {
             Err("expected an answer of type `noul` at line 1 column 17".to_owned()),
         ),
         (r#"{"noul": 1}"#, Err("missing field `type` at line 1 column 11".to_owned())),
-        (r#"[1]"#, Err("missing field `type` at line 1 column 1".to_owned())),
+        (r#"[1]"#, Err(sequence_error.to_owned())),
         (r#"{"type": "noul", "noul": 1}"#, Ok(())),
     ];
     for (text, expected) in rows {
         let result =
-            serde_json::from_str::<NoulAnswer>(text).map(|_| ()).map_err(|error| error.to_string());
+            other_codec::from_str::<NoulAnswer>(text).map(|_| ()).map_err(other_codec_error);
         assert_eq!(result, expected, "input {text}");
     }
 
-    let choice = serde_json::from_str::<ChoiceAnswer>(r#"{"type": "score"}"#)
-        .map_err(|error| error.to_string());
+    let choice =
+        other_codec::from_str::<ChoiceAnswer>(r#"{"type": "score"}"#).map_err(other_codec_error);
     assert_eq!(choice, Err("expected an answer of type `choice` at line 1 column 16".to_owned()));
-    let choice = serde_json::from_str::<ChoiceAnswer>(r#"{"choice": "a"}"#)
-        .map_err(|error| error.to_string());
+    let choice =
+        other_codec::from_str::<ChoiceAnswer>(r#"{"choice": "a"}"#).map_err(other_codec_error);
     assert_eq!(choice, Err("missing field `type` at line 1 column 15".to_owned()));
-    let score = serde_json::from_str::<ScoreAnswer>(r#"{"type": "noul"}"#)
-        .map_err(|error| error.to_string());
-    assert_eq!(score, Err("expected an answer of type `score` at line 1 column 15".to_owned()));
     let score =
-        serde_json::from_str::<ScoreAnswer>(r#"{"score": 1}"#).map_err(|error| error.to_string());
+        other_codec::from_str::<ScoreAnswer>(r#"{"type": "noul"}"#).map_err(other_codec_error);
+    assert_eq!(score, Err("expected an answer of type `score` at line 1 column 15".to_owned()));
+    let score = other_codec::from_str::<ScoreAnswer>(r#"{"score": 1}"#).map_err(other_codec_error);
     assert_eq!(score, Err("missing field `type` at line 1 column 12".to_owned()));
 
-    let unknown = serde_json::from_str::<Answer>(r#"{"type": "future"}"#)
+    let unknown = other_codec::from_str::<Answer>(r#"{"type": "future"}"#)
         .expect_err("a single answer of an unknown type has nothing to fall back to");
-    assert_eq!(unknown.to_string(), "an answer of a type this version does not model");
+    assert_eq!(other_codec_error(unknown), "an answer of a type this version does not model");
 }
 
 #[test]

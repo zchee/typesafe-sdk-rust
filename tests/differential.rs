@@ -1,4 +1,5 @@
-//! The SDK's codec against `serde_json`, on the same documents.
+//! The SDK's codec against the other JSON engine on the same documents:
+//! serde_json with the `sonic` feature, sonic-rs otherwise.
 //!
 //! Decoding: every fixture, then 10,000 generated documents whose numbers are
 //! written as decimal text - long mantissas, large and small exponents,
@@ -8,8 +9,9 @@
 //! one of the [`Divergence`]s listed below; anything else fails the test.
 //!
 //! Encoding: 10,000 generated `state` values are encoded by the SDK and parsed
-//! back by `serde_json`, and must come back as exactly the value that went in,
-//! apart from non-finite floats, which both codecs write as `null`.
+//! back by the reference engine, and must come back as exactly the value that went in,
+//! apart from non-finite floats, which both codecs write as `null`, and the
+//! reference sonic-rs parser's loss of a literal negative zero's sign.
 
 use std::{
     cell::{Cell, RefCell},
@@ -35,6 +37,16 @@ use typesafe_sdk::{
     models::ModelMetadata,
     response::{Answer, Answers, Usage},
 };
+
+#[cfg(feature = "sonic")]
+use serde_json as reference_codec;
+#[cfg(not(feature = "sonic"))]
+use sonic_rs as reference_codec;
+
+#[cfg(feature = "sonic")]
+const REFERENCE_CODEC: &str = "serde_json";
+#[cfg(not(feature = "sonic"))]
+const REFERENCE_CODEC: &str = "sonic-rs";
 
 /// Generated cases per property. Kept at the full count in every profile; the
 /// test prints how long each property took.
@@ -111,7 +123,29 @@ impl<'de> Visitor<'de> for JsonVisitor {
     }
 
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Json, A::Error> {
-        let mut members = Vec::new();
+        let Some(key) = map.next_key::<String>()? else {
+            return Ok(Json::Object(Vec::new()));
+        };
+        if key == "$serde_json::private::Number" {
+            let text: String = map.next_value()?;
+            if map.next_key::<de::IgnoredAny>()?.is_some() {
+                return Err(de::Error::custom("a number token must be the only entry"));
+            }
+            if let Ok(value) = text.parse::<u64>() {
+                return Ok(Json::U64(value));
+            }
+            if let Ok(value) = text.parse::<i64>() {
+                return Ok(Json::I64(value));
+            }
+            let value = text
+                .parse::<f64>()
+                .map_err(|_| <A::Error as de::Error>::custom("number out of range"))?;
+            if !value.is_finite() {
+                return Err(de::Error::custom("number out of range"));
+            }
+            return Ok(Json::F64(value.to_bits()));
+        }
+        let mut members = vec![(key, map.next_value()?)];
         while let Some(entry) = map.next_entry::<String, Json>()? {
             members.push(entry);
         }
@@ -129,20 +163,16 @@ impl<'de> Visitor<'de> for JsonVisitor {
 /// carrying one of these features cannot hide a refusal for another reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Divergence {
-    /// A `\u` escape of half a surrogate pair: `serde_json` refuses it as a
-    /// string, the SDK's codec may not. Accepted when `serde_json` says
-    /// `lone leading surrogate in hex escape` or `unexpected end of hex
-    /// escape`.
+    /// A `\u` escape of half a surrogate pair, when only the reference
+    /// refuses and names a surrogate error. At the pinned versions both
+    /// engines refuse the measured cases in either backend direction.
     LoneSurrogate,
-    /// A number whose magnitude is beyond the largest double, such as `1e400`:
-    /// `serde_json` refuses it, the SDK's codec may not. Accepted when
-    /// `serde_json` says `number out of range`.
+    /// A number beyond the largest double, when only the reference refuses
+    /// and names a range error. Both engines refuse 1e400 and -1e309, bare
+    /// and in an array, at the pinned versions.
     BeyondF64,
-    /// An integer written without a fraction or exponent that fits neither
-    /// `u64` nor `i64`. `serde_json` reads it as a double, and refuses it only
-    /// when the double it rounds to is out of range - which, for a literal
-    /// that parses as a finite double here, happens only at the edge of the
-    /// range. Accepted when `serde_json` says `number out of range`.
+    /// An integer beyond u64/i64, read as f64 by both engines. A one-sided
+    /// reference refusal is accepted only when its error names the range.
     IntegerAboveU64,
     /// A document nested deeper than the SDK parses at all. Accepted when the
     /// SDK's error is [`DecodeErrorKind::TooDeep`].
@@ -151,8 +181,9 @@ enum Divergence {
     /// could come from any literal, so this is the only cause accepted for a
     /// document the SDK alone refuses.
     NestingDepth,
-    /// A literal negative zero: the SDK's codec reads `-0`, `-0.0` and
-    /// `-0.0e5` as positive zero.
+    /// A literal negative zero: sonic-rs reads -0, -0.0 and -0.0e5 as
+    /// positive zero, whichever side it is on. With arbitrary_precision,
+    /// serde_json instead reads the integer spelling -0 as I64(0).
     NegativeZeroSign,
 }
 
@@ -173,18 +204,24 @@ impl Features {
             .then_some(Divergence::NestingDepth)
     }
 
-    /// The divergence that explains `serde_json` alone refusing this document,
-    /// read from the message `serde_json` refused it with.
-    fn explain_reference_refusal(self, error: &serde_json::Error) -> Option<Divergence> {
+    /// The divergence the reference engine's own error names.
+    fn explain_reference_refusal(self, error: &reference_codec::Error) -> Option<Divergence> {
         let message = error.to_string();
         let said = |prefix: &str| message.starts_with(prefix);
-        if self.lone_surrogate
-            && (said("lone leading surrogate in hex escape")
-                || said("unexpected end of hex escape"))
-        {
+        #[cfg(feature = "sonic")]
+        let surrogate =
+            said("lone leading surrogate in hex escape") || said("unexpected end of hex escape");
+        #[cfg(not(feature = "sonic"))]
+        let surrogate = said("Invalid surrogate Unicode code point");
+        if self.lone_surrogate && surrogate {
             return Some(Divergence::LoneSurrogate);
         }
-        if said("number out of range") {
+        #[cfg(feature = "sonic")]
+        let range = said("number out of range");
+        #[cfg(not(feature = "sonic"))]
+        let range = said("Number is bigger than the maximum value of its type")
+            || said("Float number must be finite, not be Infinity or NaN");
+        if range {
             if self.beyond_f64 {
                 return Some(Divergence::BeyondF64);
             }
@@ -233,15 +270,23 @@ fn first_difference(
     }
 }
 
-/// Whether the SDK's value is the positive-zero reading of the reference's
-/// negative zero.
+/// Whether the values differ only by the selected engines' negative-zero rules.
 fn is_negative_zero_read_as_positive(sdk: &Json, reference: &Json) -> bool {
-    matches!(reference, Json::F64(bits) if *bits == (-0.0_f64).to_bits())
-        && matches!(sdk, Json::F64(0) | Json::U64(0) | Json::I64(0))
+    #[cfg(feature = "sonic")]
+    {
+        matches!(reference, Json::F64(bits) if *bits == (-0.0_f64).to_bits())
+            && matches!(sdk, Json::F64(0) | Json::U64(0) | Json::I64(0))
+    }
+    #[cfg(not(feature = "sonic"))]
+    {
+        matches!(reference, Json::F64(0) | Json::U64(0) | Json::I64(0))
+            && (matches!(sdk, Json::F64(bits) if *bits == (-0.0_f64).to_bits())
+                || matches!(sdk, Json::I64(0) | Json::U64(0)))
+    }
 }
 
-/// Replaces every negative zero in the reference with what the SDK reads for
-/// the same literal, so the rest of the document can still be compared.
+/// Replaces each reference zero affected by that rule with the SDK's reading,
+/// so the rest of the document can still be compared.
 fn without_negative_zero(sdk: &Json, reference: &Json) -> Json {
     match (sdk, reference) {
         (Json::Array(left), Json::Array(right)) if left.len() == right.len() => Json::Array(
@@ -265,7 +310,7 @@ fn without_negative_zero(sdk: &Json, reference: &Json) -> Json {
 /// listed divergence explains why they do not.
 fn judge(text: &str, features: Features) -> Result<Option<Divergence>, String> {
     let sdk = sdk::decode::<Json>(text.as_bytes());
-    let reference = serde_json::from_str::<Json>(text);
+    let reference = reference_codec::from_str::<Json>(text);
     let explained = match (&sdk, &reference) {
         (Ok(sdk), Ok(reference)) => {
             let Some((path, left, right)) = first_difference(sdk, reference, &mut String::new())
@@ -277,7 +322,7 @@ fn judge(text: &str, features: Features) -> Result<Option<Divergence>, String> {
                 return Ok(Some(Divergence::NegativeZeroSign));
             }
             return Err(format!(
-                "the codecs disagree at `{path}`: sdk {left:?}, serde_json {right:?}"
+                "the codecs disagree at `{path}`: sdk {left:?}, {REFERENCE_CODEC} {right:?}"
             ));
         }
         (Err(_), Err(_)) => return Ok(None),
@@ -286,7 +331,7 @@ fn judge(text: &str, features: Features) -> Result<Option<Divergence>, String> {
     };
     explained.map(Some).ok_or_else(|| {
         format!(
-            "only one codec accepts the document: sdk {:?}, serde_json {:?}",
+            "only one codec accepts the document: sdk {:?}, {REFERENCE_CODEC} {:?}",
             sdk.as_ref().map(|_| "ok").map_err(ToString::to_string),
             reference.as_ref().map(|_| "ok").map_err(ToString::to_string),
         )
@@ -476,11 +521,13 @@ fn render(node: &Node, depth: usize, out: &mut String, features: &mut Features) 
 // ------------------------------------------------------------ the tests
 
 fn runner() -> TestRunner {
+    println!("reference codec: {REFERENCE_CODEC}");
     TestRunner::new(Config { cases: CASES, failure_persistence: None, ..Config::default() })
 }
 
 #[test]
 fn every_fixture_decodes_the_same_through_both_codecs() {
+    println!("reference codec: {REFERENCE_CODEC}");
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut compared = 0;
     for entry in std::fs::read_dir(&directory).expect("the fixture directory is readable") {
@@ -498,11 +545,12 @@ fn every_fixture_decodes_the_same_through_both_codecs() {
         if members.iter().any(|(key, _)| key == "answers") {
             let sdk = sdk::decode::<ResponseProbe>(text.as_bytes()).expect("the fixture decodes");
             let reference: ResponseProbe =
-                serde_json::from_str(&text).expect("the fixture decodes");
+                reference_codec::from_str(&text).expect("the fixture decodes");
             assert_eq!(sdk.normalized(), reference.normalized(), "fixture {name}");
         } else {
             let sdk = sdk::decode::<ModelsProbe>(text.as_bytes()).expect("the fixture decodes");
-            let reference: ModelsProbe = serde_json::from_str(&text).expect("the fixture decodes");
+            let reference: ModelsProbe =
+                reference_codec::from_str(&text).expect("the fixture decodes");
             assert_eq!(sdk, reference, "fixture {name}");
         }
         compared += 1;
@@ -581,7 +629,9 @@ impl ResponseProbe {
 fn parsed(content: &Content<'static>) -> Json {
     match (content.as_text(), content.as_json()) {
         (Some(text), _) => Json::Str(text.to_owned()),
-        (None, Some(raw)) => serde_json::from_str(raw.as_str()).expect("held JSON text parses"),
+        (None, Some(raw)) => {
+            reference_codec::from_str(raw.as_str()).expect("held JSON text parses")
+        }
         (None, None) => panic!("content that is neither text nor JSON: {content:?}"),
     }
 }
@@ -661,9 +711,10 @@ fn only_negative_zero_and_nesting_depth_divergences_occur() {
     assert_eq!(judge(&depth_16, Features::default()), Ok(None), "16 levels decode in both codecs");
     assert_eq!(
         judge(&too_deep, Features::default()),
-        Err("only one codec accepts the document: sdk Err(\"JSON input is nested deeper than the maximum of 16\"), \
-             serde_json Ok(\"ok\")"
-            .to_owned()),
+        Err(format!(
+            "only one codec accepts the document: sdk Err(\"JSON input is nested deeper than the maximum of 16\"), \
+             {REFERENCE_CODEC} Ok(\"ok\")"
+        )),
         "a disagreement the document's features do not explain fails the test"
     );
 }
@@ -674,13 +725,23 @@ fn only_negative_zero_and_nesting_depth_divergences_occur() {
 /// document carried was taken as the cause without looking at the error.
 #[test]
 fn a_one_sided_refusal_is_accepted_only_for_the_cause_its_error_names() {
+    let arbitrary = std::env::var("TYPESAFE_SDK_TEST_ARBITRARY_PRECISION").as_deref() == Ok("1");
+    let probe = serde_json::to_string(
+        &serde_json::from_str::<serde_json::Value>("1E2").expect("the feature probe parses"),
+    )
+    .expect("the feature probe serializes");
+    assert_eq!(
+        probe,
+        if arbitrary { "1e+2" } else { "100.0" },
+        "the feature probe must match the test environment"
+    );
     let too_deep = format!("{}{}", "[".repeat(MAX_DEPTH + 1), "]".repeat(MAX_DEPTH + 1));
     let every_feature =
         Features { lone_surrogate: true, beyond_f64: true, integer_above_u64: true, depth: 30 };
     let refused = |features: Features| {
         format!(
             "only one codec accepts the document: sdk Err(\"JSON input is nested deeper than the \
-             maximum of 16\"), serde_json Ok(\"ok\") ({features:?})"
+             maximum of 16\"), {REFERENCE_CODEC} Ok(\"ok\") ({features:?})"
         )
     };
 
@@ -699,8 +760,9 @@ fn a_one_sided_refusal_is_accepted_only_for_the_cause_its_error_names() {
 
     // What each codec's error names, taken on its own.
     let sdk_error = |text: &str| sdk::decode::<Json>(text.as_bytes()).expect_err("the SDK refuses");
-    let reference_error =
-        |text: &str| serde_json::from_str::<Json>(text).expect_err("serde_json refuses");
+    let reference_error = |text: &str| {
+        reference_codec::from_str::<Json>(text).expect_err("the reference codec refuses")
+    };
     let depth_only = Features { depth: MAX_DEPTH + 1, ..Features::default() };
 
     assert_eq!(
@@ -710,7 +772,14 @@ fn a_one_sided_refusal_is_accepted_only_for_the_cause_its_error_names() {
     assert_eq!(Features::default().explain_sdk_refusal(&sdk_error(&too_deep)), None);
     for syntax in ["[1e400]", "[\"\\ud800\"]", "[1,]"] {
         let error = sdk_error(syntax);
-        assert_eq!(error.kind(), DecodeErrorKind::Syntax, "document {syntax}");
+        // With arbitrary_precision the parser yields a number token; this
+        // probe's visitor rejects infinity as Data instead of parser Syntax.
+        let kind = if arbitrary && syntax == "[1e400]" {
+            DecodeErrorKind::Data
+        } else {
+            DecodeErrorKind::Syntax
+        };
+        assert_eq!(error.kind(), kind, "document {syntax}");
         assert_eq!(every_feature.explain_sdk_refusal(&error), None, "document {syntax}");
     }
 
@@ -733,7 +802,7 @@ fn a_one_sided_refusal_is_accepted_only_for_the_cause_its_error_names() {
         assert_eq!(
             features.explain_reference_refusal(&reference_error(text)),
             expected,
-            "document {text:?}, {features:?}, serde_json said {}",
+            "document {text:?}, {features:?}, {REFERENCE_CODEC} said {}",
             reference_error(text)
         );
     }
@@ -789,7 +858,12 @@ impl State {
             Self::Bool(value) => Json::Bool(*value),
             Self::I64(value) => u64::try_from(*value).map_or(Json::I64(*value), Json::U64),
             Self::U64(value) => Json::U64(*value),
-            Self::F64(value) if value.is_finite() => Json::F64(value.to_bits()),
+            Self::F64(value) if value.is_finite() => {
+                let bits = value.to_bits();
+                #[cfg(not(feature = "sonic"))]
+                let bits = if *value == 0.0 { 0 } else { bits };
+                Json::F64(bits)
+            }
             Self::F64(_) => Json::Null,
             Self::Text(value) => Json::Str(value.clone()),
             Self::List(items) => Json::Array(items.iter().map(Self::expected).collect()),
@@ -828,9 +902,9 @@ fn generated_states_encode_to_json_that_reads_back_as_the_same_value() {
         let mut encoded = Vec::new();
         sdk::encode_into(&mut encoded, &state)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
-        let read_back: Json = serde_json::from_slice(&encoded).map_err(|error| {
+        let read_back: Json = reference_codec::from_slice(&encoded).map_err(|error| {
             TestCaseError::fail(format!(
-                "serde_json cannot read the SDK's output: {error}\n{}",
+                "{REFERENCE_CODEC} cannot read the SDK's output: {error}\n{}",
                 String::from_utf8_lossy(&encoded)
             ))
         })?;
@@ -841,14 +915,15 @@ fn generated_states_encode_to_json_that_reads_back_as_the_same_value() {
             String::from_utf8_lossy(&encoded)
         );
 
-        let reference =
-            serde_json::to_vec(&state).map_err(|error| TestCaseError::fail(error.to_string()))?;
-        let reference_read_back: Json = serde_json::from_slice(&reference)
+        let reference = reference_codec::to_vec(&state)
+            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let reference_read_back: Json = reference_codec::from_slice(&reference)
             .map_err(|error| TestCaseError::fail(error.to_string()))?;
         prop_assert_eq!(
             &reference_read_back,
             &expected,
-            "serde_json wrote {}",
+            "{} wrote {}",
+            REFERENCE_CODEC,
             String::from_utf8_lossy(&reference)
         );
         Ok(())

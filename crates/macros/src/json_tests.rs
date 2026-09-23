@@ -1,4 +1,4 @@
-//! The compile-time JSON: the escaper against the SDK's codec, and whole
+//! The compile-time JSON: the escaper against both SDK backends, and whole
 //! question sets against the bytes the runtime builder writes.
 //!
 //! The expected question-set strings are the runtime builder's output for the
@@ -11,7 +11,7 @@ use syn::Ident;
 
 use super::*;
 
-/// What the SDK's codec writes for `text`.
+/// What sonic-rs writes for `text`.
 fn sonic(text: &str) -> String {
     sonic_rs::to_string(text).expect("a string always encodes")
 }
@@ -65,7 +65,9 @@ proptest! {
     /// to exactly what the codec writes.
     #[test]
     fn the_escaper_matches_the_codec_on_arbitrary_strings(text in any::<String>()) {
-        prop_assert_eq!(escaped(&text), sonic(&text), "input {:?}", text);
+        let encoded = escaped(&text);
+        prop_assert_eq!(&encoded, &sonic(&text), "sonic-rs input {:?}", text);
+        prop_assert_eq!(&encoded, &serde_json::to_string(&text).expect("a string encodes"), "serde_json input {:?}", text);
     }
 
     /// Strings made mostly of quotes, backslashes, control characters and
@@ -75,7 +77,9 @@ proptest! {
         text in proptest::collection::vec(tricky_char(), 0..64)
             .prop_map(|chars| chars.into_iter().collect::<String>())
     ) {
-        prop_assert_eq!(escaped(&text), sonic(&text), "input {:?}", text);
+        let encoded = escaped(&text);
+        prop_assert_eq!(&encoded, &sonic(&text), "sonic-rs input {:?}", text);
+        prop_assert_eq!(&encoded, &serde_json::to_string(&text).expect("a string encodes"), "serde_json input {:?}", text);
     }
 }
 
@@ -85,6 +89,11 @@ fn every_ascii_character_escapes_as_the_codec_does() {
     for code in 0_u8..=0x7F {
         let text = char::from(code).to_string();
         assert_eq!(escaped(&text), sonic(&text), "U+{code:04X}");
+        assert_eq!(
+            escaped(&text),
+            serde_json::to_string(&text).expect("a string encodes"),
+            "U+{code:04X}"
+        );
     }
 }
 
@@ -95,6 +104,14 @@ fn the_escapes_are_the_short_ones_where_json_has_them() {
         "\"\\\"\\\\/\\b\\f\\n\\r\\t\\u0000\\u001f\u{7F}\u{1F30D}\""
     );
     assert_eq!(escaped(""), "\"\"");
+    for text in ["\u{7F}", "\u{2028}"] {
+        assert_eq!(escaped(text), sonic(text), "sonic-rs {text:?}");
+        assert_eq!(
+            escaped(text),
+            serde_json::to_string(text).expect("a string encodes"),
+            "serde_json {text:?}"
+        );
+    }
 }
 
 /// The three questions of the SDK's example set, with every member used.

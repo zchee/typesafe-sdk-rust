@@ -26,7 +26,16 @@ The minimum supported Rust version is **1.98**, and the crate uses edition 2024.
 | `hyper` | on | The built-in transport (hyper over rustls, OS trust store): `Client::builder()`, `build()`, `from_env()`, `HttpVersion`, `add_root_certificate`, `http_version`, `connect_timeout`. Without it, start from `ClientBuilder::new()` and `build_with_service`; hyper and rustls are not compiled. |
 | `macros` | on | `#[derive(QuestionSet)]`: questions declared as a struct and serialized at compile time, answers decoded straight into its fields. Pulls in the `typesafe-sdk-rust-macros` crate at the exact same version. |
 | `tracing` | on | Log events through the [`tracing`](https://docs.rs/tracing) crate (see [Logging](#logging)). Without it, every event is compiled out. |
+| `sonic` | off | JSON through sonic-rs (SIMD, carries `unsafe`) instead of serde_json; faster on large bodies (ledger S7); drops the sign of a literal `-0.0`. |
 | `internals` | off | Exposes a hidden `typesafe_sdk::__internals` module used by this repository's allocation tests and benchmarks. It carries **no semver promise**; do not depend on it. |
+
+serde_json is compiled with `float_roundtrip` and `raw_value`, which Cargo also turns on for the
+application's own serde_json. `arbitrary_precision` from elsewhere in the graph is supported;
+under it, a `RawJson` read by the application's own serde_json keeps the number as serde_json
+scanned it (`0.50`; `1E2` becomes `1e+2`) instead of the canonical `100.0`. A `RawJson` written
+through another serializer rounds integers beyond `u64`/`i64` to `f64`, as serde_json does
+without `arbitrary_precision`. Cargo features are additive: enabling `sonic` anywhere in the
+graph selects sonic-rs for the SDK.
 
 ## Runtime requirement
 
@@ -465,8 +474,10 @@ data, so bodies appear only at `TRACE`.
   `Host` routes by the base URL instead, or speaks HTTP/1.1: `HttpVersion::Auto` does on an `http`
   base URL, and on an `https` one only when the server picks HTTP/1.1 through ALPN; the default
   transport cannot insist on HTTP/1.1 over TLS.
-- **Responses are bounded.** A body is read under a 16 MiB cap, and a JSON document nested deeper
-  than 16 levels is refused before it reaches the parser.
+- **Responses are bounded.** The default JSON parser is serde_json; the optional `sonic`
+  feature selects sonic-rs, which carries `unsafe` internally. With either backend a body is
+  read under a 16 MiB cap, and a JSON document nested deeper than 16 levels is refused before
+  it reaches the parser.
 
 ## Performance notes
 
@@ -474,14 +485,17 @@ The numbers below are measured, not estimated; the method, the machines and ever
 [`docs/perf/ledger.md`](docs/perf/ledger.md). Allocation counts are dhat block counts on the
 second identical call, 64-bit targets.
 
-- **Allocations.** Encoding a request body is **1** allocation (2 when the body is kept for a
+- **Allocations, both backends.** Encoding a request body is **1** allocation (2 when the body is kept for a
   retry). Decoding the three-answer fixture into `Answers` is **7** blocks (578 bytes), 6 into a
   derived struct. A whole call's own allocations, beyond what the transport allocates, are **12**
   blocks (11 with `max_retries(0)`).
 - **Encode scratch.** The body is encoded into a per-thread scratch buffer whose capacity is kept
-  between calls. A scratch that grew past **8 MiB** is dropped after its call, so a `state` whose
-  encoding needs more (a string of about 1.33 MiB or more) pays a first call's allocations on
-  every call.
+  between calls. A scratch that grew past **8 MiB** is dropped after its call. With `sonic`,
+  the six-fold string reservation makes a string of about 1.33 MiB or more pay a first call's
+  allocations on every call. With serde_json, retained capacity is the encoded body rounded up
+  by the `Vec`'s growth rather than a six-fold reservation. Both backends use the same decay
+  and 8x shrink rule; the measured mixed-size fixture shrinks at small call 6 with sonic-rs
+  and call 32 with serde_json.
 - **Debug builds and the default transport.** Tokio boxes a future larger than 2,048 bytes when
   it is spawned or blocked on in a debug build (16,384 in release). A System One call over the
   default transport is a 2,344-byte future, so a debug build that spawns calls pays one more
@@ -497,8 +511,8 @@ second identical call, 64-bit targets.
   lto = "fat"
   codegen-units = 1
   ```
-- **`-C target-cpu` on x86_64.** The JSON codec, [sonic-rs](https://docs.rs/sonic-rs), selects its
-  SIMD code at compile time. Without a `target-cpu`, an x86_64 build gets the SSE2 baseline only.
+- **`-C target-cpu` on x86_64.** With the `sonic` feature, [sonic-rs](https://docs.rs/sonic-rs)
+  selects its SIMD code at compile time. Without a `target-cpu`, an x86_64 build gets the SSE2 baseline only.
   An application that knows its hardware can build with, for example,
   `RUSTFLAGS="-C target-cpu=x86-64-v3"` (AVX2) or `-C target-cpu=native`; the binary then does not
   run on CPUs without those features. Every number in the ledger was taken **without** such a
@@ -560,7 +574,7 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | `response_model=` | `SystemOneResponse<A>` with `.typed::<A>()`, or `#[derive(QuestionSet)]` and `ask::<T>()` | Static typing. |
 | No response size limit | A 16 MiB cap, configurable with `max_response_bytes` | Bounds the memory a broken or hostile endpoint can make one call hold. |
 | No error kind for an oversized response | `ErrorKind::ResponseTooLarge { limit }` for a 2xx body over the cap; a failure status over the cap stays an `ApiError` with its status, headers and `Retry-After` and an empty body | A retry predicate must be able to see that retrying cannot help. |
-| Any nesting depth is parsed | A response nested deeper than 16 levels is a response-validation error; an error body nested deeper than 16 is not parsed and becomes the raw-text message | The JSON parser has no recursion limit and aborts the process on deep input, so the depth is checked on the raw bytes first. |
+| Any nesting depth is parsed | A response nested deeper than 16 levels is a response-validation error; an error body nested deeper than 16 is not parsed and becomes the raw-text message | The JSON parser either has no recursion limit and aborts on deep input (sonic-rs) or stops at 128 levels (serde_json); the depth is checked on the raw bytes first. |
 | ALPN chooses between HTTP/2 and HTTP/1.1 | `Http2Only` for `https` base URLs, `Auto` as the option for HTTP/1.1-only proxies; `http` base URLs use `Auto` | A cold 64-way fan-out opened 64 connections under `Auto` and 1 under HTTP/2 only. |
 | Server messages are used verbatim and uncut | Every message read from a response body is escaped and cut at 200 characters plus U+2026; the request id is shown escaped and cut at 128; the raw data stays in `body()`, `body_text()`, `body_json()`, `request_id()`, `error_type()` | A server-controlled body of up to 16 MiB, with real newlines, terminal escapes or bidi overrides, must not become a log line. A long validation message is cut in `message()`; the whole text is in `body_text()`. |
 | `Retry-After` kept as float milliseconds | A `Duration` truncated to whole milliseconds (`125.7` becomes 125 ms) | The precision the header carries. |

@@ -2000,6 +2000,7 @@ dependencies = [
  "proc-macro2",
  "proptest",
  "quote",
+ "serde_json",
  "sonic-rs",
  "syn 3.0.6",
 ]

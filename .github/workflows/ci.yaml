@@ -85,11 +85,20 @@ jobs:
       - name: Lints without default features
         run: cargo clippy --workspace --exclude typesafe-sdk-rust-live-tests --all-targets --no-default-features -- -D warnings
 
+      - name: Lints with default features
+        run: cargo clippy --workspace --exclude typesafe-sdk-rust-live-tests --all-targets -- -D warnings
+
       # No `--workspace`: this one runs code. A crate whose tests need a live
       # API key is a workspace member and not a default member, so the default
       # selection is the one that can never reach it.
       - name: Tests
         run: cargo nextest run --all-features
+
+      - name: Tests with the default JSON backend
+        run: cargo nextest run --features internals
+
+      - name: Tests with unified arbitrary-precision numbers
+        run: env TYPESAFE_SDK_TEST_ARBITRARY_PRECISION=1 cargo nextest run --features internals,serde_json/arbitrary_precision
 
       - name: Tests without default features
         run: cargo nextest run --no-default-features
@@ -103,6 +112,13 @@ jobs:
       - name: Tests under libtest
         if: matrix.os == 'ubuntu-26.04'
         run: cargo test --all-features --tests
+
+      - name: Tests under libtest with the default JSON backend
+        if: matrix.os == 'ubuntu-26.04'
+        run: cargo test --features internals --tests
+
+      - name: Doctests with default features
+        run: cargo test --doc
 
       - name: Doctests
         run: cargo test --doc --all-features
@@ -197,7 +213,11 @@ jobs:
       # counting it, or one crate with the other, would let its lines pay for
       # lines that nothing reaches.
       - name: Line coverage
-        run: cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --no-report
+          cargo llvm-cov nextest -p typesafe-sdk-rust --features internals --no-report
+          cargo llvm-cov report --fail-under-lines 85
 
       # The derive's entry point runs only inside rustc, never under a test
       # harness, so it counts as unreached; everything it calls is measured.

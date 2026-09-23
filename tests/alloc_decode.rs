@@ -107,15 +107,33 @@ use ticket::Ticket;
 
 #[test]
 fn decoding_the_three_answer_fixture_stays_within_its_budget() {
+    let arbitrary = std::env::var("TYPESAFE_SDK_TEST_ARBITRARY_PRECISION").as_deref() == Ok("1");
+    let probe = serde_json::to_string(
+        &serde_json::from_str::<serde_json::Value>("1E2").expect("the feature probe parses"),
+    )
+    .expect("the feature probe serializes");
+    assert_eq!(
+        probe,
+        if arbitrary { "1e+2" } else { "100.0" },
+        "the feature probe must match the test environment"
+    );
     let _profiler = dhat::Profiler::builder().testing().build();
 
     let answers = second_decode("SystemOneResponse<Answers>", |body, headers| {
         sdk::decode_system_one::<Answers>(body, StatusCode::OK, headers, QUESTIONS)
             .expect("the fixture decodes")
     });
-    let naive = second_decode("naive: #[serde(tag)] answers in a HashMap", |_, _| {
-        sdk::decode::<NaiveResponse>(RESULT).expect("the fixture decodes as the comparator")
-    });
+    let naive = if arbitrary {
+        println!(
+            "naive comparator skipped: serde_json arbitrary_precision turns floats into token maps \
+             an internally tagged derive cannot read"
+        );
+        None
+    } else {
+        Some(second_decode("naive: #[serde(tag)] answers in a HashMap", |_, _| {
+            sdk::decode::<NaiveResponse>(RESULT).expect("the fixture decodes as the comparator")
+        }))
+    };
     let typed = second_decode("SystemOneResponse<Ticket>, field dispatch", |body, headers| {
         let response: SystemOneResponse<Ticket> =
             sdk::decode_system_one(body, StatusCode::OK, headers, QUESTIONS)
@@ -123,12 +141,19 @@ fn decoding_the_three_answer_fixture_stays_within_its_budget() {
         response
     });
 
-    let ratio = answers.blocks as f64 / naive.blocks as f64;
-    println!(
-        "budget: blocks {} <= {MAX_BLOCKS}, bytes {} <= {MAX_BYTES}, ratio to naive {ratio:.2} <= \
-         {MAX_RATIO_TO_NAIVE}; struct set {} < {}",
-        answers.blocks, answers.bytes, typed.blocks, answers.blocks
-    );
+    if let Some(naive) = &naive {
+        let ratio = answers.blocks as f64 / naive.blocks as f64;
+        println!(
+            "budget: blocks {} <= {MAX_BLOCKS}, bytes {} <= {MAX_BYTES}, ratio to naive {ratio:.2} <= \
+             {MAX_RATIO_TO_NAIVE}; struct set {} < {}",
+            answers.blocks, answers.bytes, typed.blocks, answers.blocks
+        );
+    } else {
+        println!(
+            "budget: blocks {} <= {MAX_BLOCKS}, bytes {} <= {MAX_BYTES}; struct set {} < {}",
+            answers.blocks, answers.bytes, typed.blocks, answers.blocks
+        );
+    }
 
     assert!(
         answers.blocks <= MAX_BLOCKS,
@@ -140,12 +165,15 @@ fn decoding_the_three_answer_fixture_stays_within_its_budget() {
         "decoding into Answers allocated {} bytes, over the budget of {MAX_BYTES}",
         answers.bytes
     );
-    assert!(
-        ratio <= MAX_RATIO_TO_NAIVE,
-        "decoding into Answers cost {} blocks against the comparator's {}: a ratio of {ratio:.2}",
-        answers.blocks,
-        naive.blocks
-    );
+    if let Some(naive) = naive {
+        let ratio = answers.blocks as f64 / naive.blocks as f64;
+        assert!(
+            ratio <= MAX_RATIO_TO_NAIVE,
+            "decoding into Answers cost {} blocks against the comparator's {}: a ratio of {ratio:.2}",
+            answers.blocks,
+            naive.blocks
+        );
+    }
     assert!(
         typed.blocks < answers.blocks,
         "a struct answer set cost {} blocks, not fewer than Answers' {}",

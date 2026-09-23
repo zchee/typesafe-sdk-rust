@@ -1,23 +1,21 @@
 //! JSON encoding and decoding for the whole crate.
 //!
-//! This is the only module that names `sonic_rs`. No type of that crate
-//! appears in any signature outside it, so replacing the codec is a change to
-//! this file alone.
+//! [`backend`] selects serde_json by default, or sonic-rs with the `sonic`
+//! feature. No backend type appears in a public signature.
 //!
-//! Four things here are not what a plain `serde_json` wrapper would do:
+//! Four things here are not what a plain serde wrapper would do:
 //!
-//! * **The encode buffer is retained per thread.** Before every string write
-//!   the codec reserves `len * 6 + 35` bytes, so a buffer sized to the final
-//!   body re-allocates on every call. [`encode_body`] writes into a scratch
-//!   buffer this thread keeps between calls and copies the finished bytes into
-//!   an exactly sized one.
-//! * **Decoding runs a depth pre-scan first.** The codec has no recursion
-//!   limit on the paths this crate uses, and it aborts the process rather than
-//!   returning an error when the parser runs out of stack. A counter inside a
-//!   `serde` `Visitor` cannot help, because the overflow happens inside the
-//!   parser before the visitor is entered again; the guard has to be a pass
-//!   over the raw bytes. See [`check_depth`].
-//! * **Decode errors are rebuilt rather than forwarded.** The codec's own
+//! * **The encode buffer is retained per thread.** sonic-rs reserves
+//!   `len * 6 + 35` bytes before every string write, so a buffer sized to the
+//!   final body re-allocates on every call. [`encode_body`] writes into a
+//!   scratch buffer this thread keeps between calls and copies the finished
+//!   bytes into an exactly sized one with either backend.
+//! * **Decoding runs a depth pre-scan first.** sonic-rs has no recursion limit
+//!   on these paths and aborts if it exhausts the stack; serde_json stops at
+//!   128 levels. A counter inside a `serde` visitor cannot prevent a parser's
+//!   own stack overflow, so both backends use the same 16-level guard on the
+//!   raw bytes. See [`check_depth`].
+//! * **Decode errors are rebuilt rather than forwarded.** sonic-rs's
 //!   `Display` embeds a multi-line excerpt of the input, and `serde`'s
 //!   type-mismatch messages quote the offending value; a `state` may carry
 //!   personal data, so [`DecodeError`] keeps only a kind, a position and a
@@ -28,6 +26,8 @@
 //!   hand it to a codec of their own, so it also knows how to write itself out
 //!   as ordinary data and to read ordinary data back. See [`serialize_raw`]
 //!   and [`deserialize_raw`].
+
+pub(crate) mod backend;
 
 use std::{
     borrow::Cow,
@@ -45,13 +45,15 @@ use serde::{
 };
 use thiserror::Error;
 
+use self::backend::SPLICE_TOKEN;
 use crate::text::{Backslash, SafeText};
 
 /// The deepest JSON nesting this crate will parse.
 ///
 /// Anything deeper is rejected before a byte reaches the parser. The limit is
-/// far below what any documented API response needs; it exists because the
-/// parser's failure mode on deep input is a process abort.
+/// far below what any documented API response needs. sonic-rs aborts on deep
+/// input, while serde_json has a 128-level limit; the shared guard keeps the
+/// SDK's bound independent of the chosen backend.
 pub(crate) const MAX_JSON_DEPTH: usize = 16;
 
 // ------------------------------------------------------------------ errors
@@ -122,8 +124,10 @@ impl DecodeError {
         }
     }
 
-    /// The one-based column the parser stopped at, or 0 when the document was
-    /// rejected before it was parsed.
+    /// The byte column the parser stopped at, usually one-based.
+    ///
+    /// It is 0 when no position is available, or when the selected parser
+    /// reports a failure before the first byte of an empty document.
     #[must_use]
     pub fn column(&self) -> usize {
         match self.detail {
@@ -182,7 +186,7 @@ impl EncodeError {
     /// Serialization errors carry no position and no input excerpt, so the
     /// codec's `Display` is safe to keep here. Decode errors are not, which is
     /// why [`DecodeError`] is rebuilt from parts instead.
-    fn from_codec(error: sonic_rs::Error) -> Self {
+    fn from_codec(error: backend::Error) -> Self {
         Self { message: error.to_string().into_boxed_str() }
     }
 }
@@ -204,10 +208,11 @@ thread_local! {
 
 /// The most encode scratch a thread keeps between calls: 8 MiB.
 ///
-/// The codec reserves six times a string's length before writing it, so the
-/// scratch a large string state leaves behind is six times the state, and a
-/// thread would keep it until later calls on that same thread decayed it
-/// away - never, on a thread that goes idle. A scratch over this size is
+/// With sonic-rs, the codec reserves six times a string's length before
+/// writing it, so the scratch a large string state leaves behind is six times
+/// the state; serde_json grows the buffer as it writes. Either backend would
+/// keep an outlier until later calls on the same thread decayed it away -
+/// never, on a thread that goes idle. A scratch over this size is
 /// dropped after its call instead, and a state that large grows it afresh on
 /// every call, as a first call does. The scratch of a 1 MB state, the largest
 /// one a call is budgeted for, stays under the ceiling, so its calls keep
@@ -222,10 +227,10 @@ const MAX_RETAINED_SCRATCH: usize = 8 * 1024 * 1024;
 /// # Errors
 ///
 /// Returns [`EncodeError`] when the value cannot be represented as JSON: a
-/// map whose keys are neither strings, booleans nor numbers, or a
-/// [`Serialize`] implementation that returns an error of its own. A non-finite
-/// float is not one of these - it is written as `null`, which is what
-/// `serde_json` does as well. The buffer may then hold a partial encoding of
+/// map whose keys are neither strings, booleans nor numbers, or a non-finite
+/// float key, or a [`Serialize`] implementation that returns an error of its
+/// own. A non-finite float value is not one of these - both backends write it
+/// as `null`. The buffer may then hold a partial encoding of
 /// that value, so a caller that reuses it has to truncate it.
 pub(crate) fn encode_into<T>(buf: &mut Vec<u8>, value: &T) -> Result<(), EncodeError>
 where
@@ -234,7 +239,7 @@ where
     // The mark is what tells `RawJson` that the serializer about to run is
     // this crate's own, and so that raw text may be spliced in verbatim.
     let _inside = EncoderMark::enter();
-    sonic_rs::to_writer(&mut *buf, value).map_err(EncodeError::from_codec)
+    backend::to_writer(&mut *buf, value).map_err(EncodeError::from_codec)
 }
 
 /// Appends `text` to `buf` as a JSON string literal, quoted and escaped.
@@ -360,14 +365,11 @@ pub(crate) fn check_depth(json: &[u8]) -> Result<(), DecodeError> {
 
 /// Checks that `bytes` are UTF-8, and hands them back as text.
 ///
-/// Every decode starts here, before the depth pre-scan and before any byte
-/// reaches the codec, because the codec cannot be trusted with anything
-/// else: when it reads a string it takes the bytes as text without checking
-/// them (a `debug_assert!` in its debug builds, nothing in its release
-/// builds), and it reports a byte that is not UTF-8 only once the whole
-/// document has been read - after a string holding one has already been
-/// handed on as text. The codec is then given the checked text, which it does
-/// not check a second time.
+/// Every decode starts here, before the depth pre-scan and either parser.
+/// sonic-rs can hand a string's bytes on as text before checking the complete
+/// document's UTF-8; serde_json validates strings itself. Giving both the
+/// already-checked text also keeps rejection positions independent of the
+/// selected backend.
 ///
 /// # Errors
 ///
@@ -401,9 +403,10 @@ where
 {
     let text = as_text(bytes)?;
     check_depth(bytes)?;
+    let _inside = DecoderMark::enter();
     // `PhantomData<T>` is serde's own seed for "decode a `T`", which is what
     // lets the failure pass below serve this function and `decode_seed` alike.
-    sonic_rs::from_str::<T>(text).map_err(|_| describe_failure(text, PhantomData::<T>))
+    backend::from_str::<T>(text).map_err(|_| describe_failure(text, PhantomData::<T>))
 }
 
 /// Decodes `bytes` through `seed`, a decoder that carries state of its own -
@@ -426,11 +429,12 @@ where
 {
     let text = as_text(bytes)?;
     check_depth(bytes)?;
+    let _inside = DecoderMark::enter();
     // The codec's entry point for a type checks that the value is followed by
     // nothing but whitespace; its deserializer does that only when asked, with
     // `end`.
     let decoded = {
-        let mut deserializer = sonic_rs::Deserializer::from_str(text);
+        let mut deserializer = backend::Deserializer::from_str(text);
         seed.clone()
             .deserialize(&mut deserializer)
             .ok()
@@ -447,7 +451,7 @@ fn describe_failure<'de, S>(text: &'de str, seed: S) -> DecodeError
 where
     S: DeserializeSeed<'de>,
 {
-    let mut deserializer = sonic_rs::Deserializer::from_str(text);
+    let mut deserializer = backend::Deserializer::from_str(text);
     let mut track = serde_path_to_error::Track::new();
     let failure = seed
         .deserialize(serde_path_to_error::Deserializer::new(&mut deserializer, &mut track))
@@ -459,9 +463,10 @@ where
         // asking the deserializer to finish is the only way to get the
         // position of the byte the first pass tripped on.
         return match deserializer.end() {
-            Err(trailing) => DecodeError {
-                detail: Detail::Syntax { line: trailing.line(), column: trailing.column() },
-            },
+            Err(trailing) => {
+                let (line, column) = backend::error_position(&trailing);
+                DecodeError { detail: Detail::Syntax { line, column } }
+            }
             // Both passes read the same bytes with the same type and
             // disagreed on whether they parse at all. Nothing about the
             // input can be reported beyond that disagreement.
@@ -470,11 +475,9 @@ where
     };
     let path = track.path();
 
-    let line = inner.line();
-    let column = inner.column();
-    let category = inner.classify();
+    let (line, column) = backend::error_position(&inner);
 
-    if matches!(category, sonic_rs::error::Category::Syntax | sonic_rs::error::Category::Eof) {
+    if backend::is_syntax(&inner) {
         return DecodeError { detail: Detail::Syntax { line, column } };
     }
 
@@ -552,16 +555,8 @@ fn missing_field_name(message: &str) -> Option<&str> {
 
 // ------------------------------------------------------------- raw JSON
 
-/// The struct name sonic-rs reads as "the one field below is JSON text
-/// already, write it out unchanged".
-///
-/// The constant is private to that crate, so the name is spelled out here
-/// rather than reached by serializing a `sonic_rs::LazyValue`: building one of
-/// those needs a parse of the text, and the parser has no recursion limit, so
-/// that would put a process abort on the outbound path for a deeply nested
-/// value. Should a later sonic-rs rename the token, the splice degrades into
-/// an ordinary one-field object and the round-trip tests fail on it.
-const SPLICE_TOKEN: &str = "$sonic_rs::LazyValue";
+/// The private map key serde_json uses for arbitrary-precision numbers.
+const NUMBER_TOKEN: &str = "$serde_json::private::Number";
 
 thread_local! {
     /// How many [`encode_into`] calls this thread is inside.
@@ -569,6 +564,35 @@ thread_local! {
     /// A counter rather than a flag, because a `Serialize` implementation the
     /// encoder reaches may encode a value of its own.
     static INSIDE_SDK_ENCODER: Cell<u32> = const { Cell::new(0) };
+    /// How many synchronous SDK decode calls this thread is inside.
+    static INSIDE_SDK_DECODER: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Marks the synchronous SDK decode, including its failure re-read.
+///
+/// This means the thread is inside the SDK, not that any particular serde
+/// deserializer is the SDK's: a caller decoding RawJson inside its own
+/// Deserialize implementation also gets the verbatim form. Enter only in
+/// decode/decode_seed, never across an await; the counter preserves nesting
+/// and Drop clears the mark during unwinding.
+struct DecoderMark;
+
+impl DecoderMark {
+    fn enter() -> Self {
+        INSIDE_SDK_DECODER.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+
+    #[cfg(not(feature = "sonic"))]
+    fn is_set() -> bool {
+        INSIDE_SDK_DECODER.with(|depth| depth.get() > 0)
+    }
+}
+
+impl Drop for DecoderMark {
+    fn drop(&mut self) {
+        INSIDE_SDK_DECODER.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
 }
 
 /// Marks this thread as being inside the SDK's serializer while it lives.
@@ -654,7 +678,7 @@ where
     // above does not read the text at all and so needs no cap.
     check_depth(text.as_bytes()).map_err(ser::Error::custom)?;
 
-    let mut source = sonic_rs::Deserializer::from_str(text);
+    let mut source = backend::Deserializer::from_str(text);
     Transcoder::new(&mut source).serialize(serializer)
 }
 
@@ -801,7 +825,39 @@ where
     where
         A: de::MapAccess<'de>,
     {
+        #[cfg(not(feature = "sonic"))]
+        let first = access.next_key_seed(TextSeed)?;
+        #[cfg(not(feature = "sonic"))]
+        if first.as_deref() == Some(NUMBER_TOKEN) {
+            let text: String = access.next_value()?;
+            if access.next_key::<IgnoredAny>()?.is_some() {
+                return Err(de::Error::custom("a JSON number token must be the only entry"));
+            }
+            // Match serde_json without arbitrary_precision: wide integers
+            // become f64 here, not serializer-dependent 128-bit integers.
+            if let Ok(value) = text.parse::<u64>() {
+                return self.serializer.serialize_u64(value).map_err(writer_refused);
+            }
+            if let Ok(value) = text.parse::<i64>() {
+                return self.serializer.serialize_i64(value).map_err(writer_refused);
+            }
+            let value = text
+                .parse::<f64>()
+                .map_err(|_| <A::Error as de::Error>::custom("number out of range"))?;
+            if !value.is_finite() {
+                return Err(de::Error::custom("number out of range"));
+            }
+            return self.serializer.serialize_f64(value).map_err(writer_refused);
+        }
         let mut map = self.serializer.serialize_map(access.size_hint()).map_err(writer_refused)?;
+        #[cfg(not(feature = "sonic"))]
+        match first {
+            Some(key) => {
+                map.serialize_key(key.as_ref()).map_err(writer_refused)?;
+                access.next_value_seed(TranscodeValue { map: &mut map })?;
+            }
+            None => return map.end().map_err(writer_refused),
+        }
         loop {
             let key = access.next_key_seed(TranscodeKey { map: &mut map })?;
             if key.is_none() {
@@ -917,7 +973,41 @@ where
     deserializer.deserialize_newtype_struct(SPLICE_TOKEN, RawTextVisitor)
 }
 
-/// The two ways a value arrives at [`deserialize_raw`].
+/// A string seed that retains a borrow or takes an owned string without copying it.
+#[cfg(not(feature = "sonic"))]
+struct TextSeed;
+
+#[cfg(not(feature = "sonic"))]
+impl<'de> DeserializeSeed<'de> for TextSeed {
+    type Value = Cow<'de, str>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+#[cfg(not(feature = "sonic"))]
+impl<'de> de::Visitor<'de> for TextSeed {
+    type Value = Cow<'de, str>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a string")
+    }
+
+    fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+        Ok(Cow::Borrowed(value))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Cow::Owned(value.to_owned()))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(Cow::Owned(value))
+    }
+}
+
+/// The raw text or ordinary data a deserializer provides.
 struct RawTextVisitor;
 
 impl<'de> de::Visitor<'de> for RawTextVisitor {
@@ -942,6 +1032,11 @@ impl<'de> de::Visitor<'de> for RawTextVisitor {
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
         one_json_value(value)?;
         Ok(Cow::Owned(value.to_owned()))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+        one_json_value(&value)?;
+        Ok(Cow::Owned(value))
     }
 
     /// Any other deserializer: it does not know the request above, so it hands
@@ -1003,12 +1098,44 @@ impl<'de> de::Visitor<'de> for RawTextVisitor {
         Ok(Cow::Owned(rendered_text(out)))
     }
 
+    #[cfg(feature = "sonic")]
     fn visit_map<A>(self, access: A) -> Result<Self::Value, A::Error>
     where
         A: de::MapAccess<'de>,
     {
         let mut out = Vec::new();
         de::Visitor::visit_map(Render { out: &mut out, depth: 0 }, access)?;
+        Ok(Cow::Owned(rendered_text(out)))
+    }
+
+    #[cfg(not(feature = "sonic"))]
+    fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+    where
+        A: de::MapAccess<'de>,
+    {
+        let first = access.next_key_seed(TextSeed)?;
+        let mut out = Vec::new();
+        match first {
+            Some(key) if key == SPLICE_TOKEN => {
+                let text = access.next_value_seed(TextSeed)?;
+                one_json_value(&text)?;
+                if access.next_key::<IgnoredAny>()?.is_some() {
+                    return Err(de::Error::custom("a raw JSON token must be the only entry"));
+                }
+                // one_json_value entered and left its own mark; only an outer
+                // SDK decode still has one. A caller's reload always renders.
+                if DecoderMark::is_set() {
+                    return Ok(text);
+                }
+                let mut source = backend::Deserializer::from_str(&text);
+                Render { out: &mut out, depth: 0 }
+                    .deserialize(&mut source)
+                    .map_err(de::Error::custom)?;
+                source.end().map_err(de::Error::custom)?;
+            }
+            Some(key) => Render { out: &mut out, depth: 0 }.map_after_key(&key, access)?,
+            None => out.extend_from_slice(b"{}"),
+        }
         Ok(Cow::Owned(rendered_text(out)))
     }
 }
@@ -1039,6 +1166,56 @@ fn rendered_text(out: Vec<u8>) -> String {
 struct Render<'b> {
     out: &'b mut Vec<u8>,
     depth: usize,
+}
+
+impl Render<'_> {
+    /// Continues an object after its first key was read by raw-value dispatch.
+    #[cfg(not(feature = "sonic"))]
+    fn map_after_key<'de, A: de::MapAccess<'de>>(
+        self,
+        key: &str,
+        access: A,
+    ) -> Result<(), A::Error> {
+        if key == NUMBER_TOKEN {
+            return self.number_map(access);
+        }
+        self.out.push(b'{');
+        write_json_string(self.out, key);
+        self.finish_map(access)
+    }
+
+    /// Finishes an object whose opening brace and first key are already written.
+    fn finish_map<'de, A: de::MapAccess<'de>>(self, mut access: A) -> Result<(), A::Error> {
+        let inner = one_level_in(self.depth)?;
+        let out = self.out;
+        out.push(b':');
+        access.next_value_seed(Render { out: &mut *out, depth: inner })?;
+        while access.next_key_seed(RenderKey { out: &mut *out, first: false })?.is_some() {
+            out.push(b':');
+            access.next_value_seed(Render { out: &mut *out, depth: inner })?;
+        }
+        out.push(b'}');
+        Ok(())
+    }
+
+    /// Renders serde_json's number protocol as a scalar, not an object.
+    fn number_map<'de, A: de::MapAccess<'de>>(self, mut access: A) -> Result<(), A::Error> {
+        let text: String = access.next_value()?;
+        if !matches!(text.as_bytes().first(), Some(b'-' | b'0'..=b'9'))
+            || !text.as_bytes().last().is_some_and(u8::is_ascii_digit)
+        {
+            return Err(de::Error::custom("invalid JSON number token"));
+        }
+        one_json_value(&text)?;
+        if access.next_key::<IgnoredAny>()?.is_some() {
+            return Err(de::Error::custom("a JSON number token must be the only entry"));
+        }
+        // arbitrary_precision preserves scanned text here, including 1e400;
+        // the transcoder instead requires a finite typed number. A caller's
+        // arbitrary_precision combined with the sonic feature has no test run.
+        self.out.extend_from_slice(text.as_bytes());
+        Ok(())
+    }
 }
 
 /// The depth one level in, or a too-deep error at the cap.
@@ -1144,21 +1321,15 @@ impl<'de> de::Visitor<'de> for Render<'_> {
     where
         A: de::MapAccess<'de>,
     {
-        let inner = one_level_in(self.depth)?;
-        let out = self.out;
-        out.push(b'{');
-        let mut first = true;
-        loop {
-            let key = RenderKey { out: &mut *out, first };
-            if access.next_key_seed(key)?.is_none() {
-                break;
+        match access.next_key_seed(RenderKey { out: &mut *self.out, first: true })? {
+            Some(true) => self.number_map(access),
+            Some(false) => self.finish_map(access),
+            None => {
+                one_level_in::<A::Error>(self.depth)?;
+                self.out.extend_from_slice(b"{}");
+                Ok(())
             }
-            out.push(b':');
-            access.next_value_seed(Render { out: &mut *out, depth: inner })?;
-            first = false;
         }
-        out.push(b'}');
-        Ok(())
     }
 }
 
@@ -1195,29 +1366,30 @@ struct RenderKey<'b> {
 }
 
 impl<'de> de::DeserializeSeed<'de> for RenderKey<'_> {
-    type Value = ();
+    type Value = bool;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: Deserializer<'de>,
     {
-        if !self.first {
-            self.out.push(b',');
-        }
         deserializer.deserialize_str(self)
     }
 }
 
 impl<'de> de::Visitor<'de> for RenderKey<'_> {
-    type Value = ();
+    type Value = bool;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a JSON object key")
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        if self.first && value == NUMBER_TOKEN {
+            return Ok(true);
+        }
+        self.out.push(if self.first { b'{' } else { b',' });
         write_json_string(self.out, value);
-        Ok(())
+        Ok(false)
     }
 }
 

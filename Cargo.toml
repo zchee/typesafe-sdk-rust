@@ -99,7 +99,7 @@ rcgen = { version = "0.14.10", default-features = false, features = [
 ] }
 # `float_roundtrip` makes serde_json parse f64 exactly, which is what the
 # differential tests against the primary codec compare against.
-serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "raw_value"] }
 serde_path_to_error = "0.1.20"
 trybuild = "1.0.121"
 
@@ -136,6 +136,8 @@ hyper = ["dep:hyper", "dep:hyper-rustls", "dep:hyper-util", "dep:rustls", "dep:r
 # compile time.
 macros = ["dep:typesafe-sdk-rust-macros"]
 tracing = ["dep:tracing"]
+# A SIMD parser that carries `unsafe`; off by default.
+sonic = ["dep:sonic-rs"]
 # Exposes `typesafe_sdk::__internals`, the seam the allocation tests and the
 # benchmarks measure through. It carries no semver promise and is never on by
 # default.
@@ -169,11 +171,13 @@ rustls-platform-verifier = { workspace = true, optional = true }
 # client or its configuration can print it.
 secrecy = { workspace = true }
 serde = { workspace = true }
+# The default JSON backend; its raw-value protocol preserves wire text.
+serde_json = { workspace = true }
 # A normal dependency rather than a dev one: the decode failure path uses it to
 # turn a position into a field path, and that path is part of the errors the
 # SDK reports at runtime.
 serde_path_to_error = { workspace = true }
-sonic-rs = { workspace = true }
+sonic-rs = { workspace = true, optional = true }
 thiserror = { workspace = true }
 # The per-attempt deadline, and the runtime the default transport runs on.
 tokio = { workspace = true }
@@ -193,7 +197,8 @@ typesafe-sdk-rust-macros = { version = "=0.1.0", path = "crates/macros", optiona
 codspeed-divan-compat = { workspace = true }
 dhat = { workspace = true }
 proptest = { workspace = true }
-serde_json = { workspace = true }
+# The reference engine when serde_json is the SDK's backend.
+sonic-rs = { workspace = true }
 # `net` and `io-util` for the raw sockets the failure tests answer with.
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util"] }
 # Compiles the derive's misuse cases and compares rustc's messages.

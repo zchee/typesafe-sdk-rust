@@ -1,7 +1,7 @@
 //! Comparator (A): a System One client written the obvious way.
 //!
 //! It is held to the rules that keep it from being a strawman. It uses the
-//! same codec as the SDK (sonic-rs) and the same in-memory service. What it
+//! same selected codec as the SDK and the same in-memory service. What it
 //! does differently is what a first implementation does:
 //!
 //! - the body is built as a value tree (`state`, `model`, and a copy of the
@@ -26,6 +26,10 @@ use http::{
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT},
 };
 use http_body_util::BodyExt as _;
+#[cfg(not(feature = "sonic"))]
+use serde_json as codec;
+#[cfg(feature = "sonic")]
+use sonic_rs as codec;
 use tower_service::Service;
 use typesafe_sdk::Body;
 
@@ -41,7 +45,7 @@ pub(crate) struct NaiveClient {
     base_url: String,
     api_key: String,
     model: String,
-    questions: sonic_rs::Value,
+    questions: codec::Value,
     timeout: Duration,
 }
 
@@ -53,7 +57,7 @@ impl NaiveClient {
             base_url: base_url.to_owned(),
             api_key: api_key.to_owned(),
             model: model.to_owned(),
-            questions: sonic_rs::from_slice(questions).expect("the questions are JSON"),
+            questions: codec::from_slice(questions).expect("the questions are JSON"),
             timeout: Duration::from_secs(10),
         }
     }
@@ -74,12 +78,12 @@ impl NaiveClient {
         S: Service<Request<Body>, Response = Response<Body>>,
         S::Error: Into<NaiveError>,
     {
-        let tree = sonic_rs::json!({
+        let tree = codec::json!({
             "state": state,
             "model": self.model.as_str(),
             "questions": self.questions.clone(),
         });
-        let body = sonic_rs::to_vec(&tree)?;
+        let body = codec::to_vec(&tree)?;
 
         let uri: Uri = format!("{}/v1/systemone", self.base_url).parse()?;
         let mut headers = HeaderMap::new();
@@ -105,6 +109,6 @@ impl NaiveClient {
         if !status.is_success() {
             return Err(format!("the server answered {status}").into());
         }
-        Ok(sonic_rs::from_slice(&bytes)?)
+        Ok(codec::from_slice(&bytes)?)
     }
 }

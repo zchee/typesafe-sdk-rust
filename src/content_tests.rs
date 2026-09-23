@@ -3,6 +3,10 @@
 use std::mem;
 
 use serde::Deserialize;
+#[cfg(feature = "sonic")]
+use serde_json as other_codec;
+#[cfg(not(feature = "sonic"))]
+use sonic_rs as other_codec;
 
 use super::*;
 use crate::DecodeErrorKind;
@@ -215,17 +219,17 @@ fn every_shape_round_trips_through_another_codec() {
     ] {
         let decoded = row(document).expect("valid content");
 
-        let written = serde_json::to_string(&decoded.value).expect("another codec writes it");
-        assert!(!written.contains("$sonic_rs"), "token leaked: {written}");
+        let written = other_codec::to_string(&decoded.value).expect("another codec writes it");
+        assert!(!written.contains(codec::backend::SPLICE_TOKEN), "token leaked: {written}");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&written).expect("the output is JSON"),
+            other_codec::from_str::<serde_json::Value>(&written).expect("the output is JSON"),
             data,
             "from {}",
             String::from_utf8_lossy(document)
         );
 
         let read_back: Content<'_> =
-            serde_json::from_str(&written).expect("another codec reads it back");
+            other_codec::from_str(&written).expect("another codec reads it back");
         assert_eq!(
             serde_json::to_value(&read_back).expect("it is JSON"),
             data,
@@ -247,12 +251,12 @@ fn a_struct_of_content_fields_carries_the_same_data_through_both_codecs() {
     let mut buffer = Vec::new();
     codec::encode_into(&mut buffer, &fields).expect("this codec writes it");
     let ours = String::from_utf8(buffer).expect("the codec emits UTF-8");
-    let theirs = serde_json::to_string(&fields).expect("another codec writes it");
+    let theirs = other_codec::to_string(&fields).expect("another codec writes it");
 
-    assert!(!theirs.contains("$sonic_rs"), "token leaked: {theirs}");
+    assert!(!theirs.contains(codec::backend::SPLICE_TOKEN), "token leaked: {theirs}");
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&ours).expect("our output is JSON"),
-        serde_json::from_str::<serde_json::Value>(&theirs).expect("theirs is too"),
+        other_codec::from_str::<serde_json::Value>(&ours).expect("our output is JSON"),
+        other_codec::from_str::<serde_json::Value>(&theirs).expect("theirs is too"),
         "this codec wrote {ours}, the other wrote {theirs}"
     );
     // The difference between them is spelling, not data: this codec splices
@@ -268,11 +272,15 @@ fn text_that_is_not_one_json_value_never_becomes_content() {
     // A deserializer that answers the raw-text request with a string of the
     // caller's own: spliced into a request body, the first of these would put
     // a key of their choosing next to the field that holds it.
+    #[cfg(feature = "sonic")]
+    let empty_error = "invalid JSON syntax at line 1 column 1";
+    #[cfg(not(feature = "sonic"))]
+    let empty_error = "invalid JSON syntax at line 1 column 0";
     for (text, expected) in [
         (r#"{"a":1}, "model": "evil""#, "invalid JSON syntax at line 1 column 8"),
         ("{not json", "invalid JSON syntax at line 1 column 2"),
         ("hello", "invalid JSON syntax at line 1 column 1"),
-        ("", "invalid JSON syntax at line 1 column 1"),
+        ("", empty_error),
     ] {
         let refused = <Content<'_> as Deserialize>::deserialize(BorrowedStrDeserializer::<
             ValueError,
@@ -340,10 +348,10 @@ fn a_converted_string_round_trips_through_both_codecs() {
     );
     assert_eq!(codec::decode::<String>(ours.as_bytes()).expect("decodes"), text);
 
-    let theirs = serde_json::to_string(&content).expect("serde_json encodes text");
-    assert_eq!(serde_json::from_str::<String>(&theirs).expect("serde_json decodes"), text);
+    let theirs = other_codec::to_string(&content).expect("serde_json encodes text");
+    assert_eq!(other_codec::from_str::<String>(&theirs).expect("serde_json decodes"), text);
     assert_eq!(
-        serde_json::from_str::<Content<'_>>(&theirs).expect("reads back as content"),
+        other_codec::from_str::<Content<'_>>(&theirs).expect("reads back as content"),
         content
     );
 }
