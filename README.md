@@ -24,7 +24,7 @@ The minimum supported Rust version is **1.98**, and the crate uses edition 2024.
 | Feature | Default | What it does |
 | --- | --- | --- |
 | `hyper` | on | The built-in transport (hyper over rustls, OS trust store): `Client::builder()`, `build()`, `from_env()`, `HttpVersion`, `add_root_certificate`, `http_version`, `connect_timeout`. Without it, start from `ClientBuilder::new()` and `build_with_service`; hyper and rustls are not compiled. |
-| `macros` | on | `#[derive(QuestionSet)]`: questions declared as a struct and serialized at compile time, answers decoded straight into its fields. Pulls in the `typesafe-sdk-rust-macros` crate at the exact same version. |
+| `macros` | on | `#[derive(QuestionSet)]`: questions declared as a struct and serialized at compile time, answers decoded straight into its fields. Pulls in the `typesafe-sdk-rust-macros` crate at the exact version this SDK release pins (the two crates are versioned independently). |
 | `tracing` | on | Log events through the [`tracing`](https://docs.rs/tracing) crate (see [Logging](#logging)). Without it, every event is compiled out. |
 | `sonic` | off | JSON through sonic-rs (SIMD, carries `unsafe`) instead of serde_json; faster on large bodies (ledger S7); drops the sign of a literal `-0.0`. |
 | `internals` | off | Exposes a hidden `typesafe_sdk::__internals` module used by this repository's allocation tests and benchmarks. It carries **no semver promise**; do not depend on it. |
