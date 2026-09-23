@@ -396,6 +396,6 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hyper"))]
 #[path = "request_tests.rs"]
 mod tests;

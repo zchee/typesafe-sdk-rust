@@ -124,8 +124,14 @@ include = ["/src", "/examples", "/README.md", "/LICENSE", "/LICENSE-THIRD-PARTY"
 [lib]
 name = "typesafe_sdk"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
-default = ["macros", "tracing"]
+default = ["hyper", "macros", "tracing"]
+# The built-in transport and its TLS stack.
+hyper = ["dep:hyper", "dep:hyper-rustls", "dep:hyper-util", "dep:rustls", "dep:rustls-platform-verifier"]
 # `#[derive(QuestionSet)]`: questions declared as a struct and serialized at
 # compile time.
 macros = ["dep:typesafe-sdk-rust-macros"]
@@ -153,11 +159,11 @@ http-body-util = { workspace = true }
 httpdate = { workspace = true }
 # The default transport: hyper-util's pooled client over hyper-rustls, with the
 # trust anchors from the operating system through rustls-platform-verifier.
-hyper = { workspace = true }
-hyper-rustls = { workspace = true }
-hyper-util = { workspace = true }
-rustls = { workspace = true }
-rustls-platform-verifier = { workspace = true }
+hyper = { workspace = true, optional = true }
+hyper-rustls = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
 # Held for the client's API key: it is kept as a secret until the one place
 # that turns it into an `Authorization` header value, so no formatting of a
 # client or its configuration can print it.
@@ -215,18 +221,45 @@ name = "differential"
 required-features = ["internals"]
 
 [[test]]
+name = "client"
+required-features = ["hyper"]
+
+[[test]]
+name = "retry"
+required-features = ["hyper"]
+
+[[test]]
+name = "models"
+required-features = ["hyper"]
+
+[[test]]
+name = "connection_reuse"
+required-features = ["hyper"]
+
+[[test]]
+name = "malformed_body"
+required-features = ["hyper"]
+
+[[test]]
 name = "derive"
-required-features = ["macros"]
+required-features = ["macros", "hyper"]
 
 [[test]]
 name = "alloc_derive"
 required-features = ["internals", "macros"]
 
-# The example declares its questions with the derive; without the feature
-# cargo skips it rather than building a stub.
+# The examples use the built-in transport; typed_answers also needs the derive.
 [[example]]
 name = "typed_answers"
-required-features = ["macros"]
+required-features = ["macros", "hyper"]
+
+[[example]]
+name = "quickstart"
+required-features = ["hyper"]
+
+[[example]]
+name = "concurrency"
+required-features = ["hyper"]
 
 # divan supplies its own `main`, so the benches opt out of libtest's harness.
 # `sdk` is the CPU-only set that CodSpeed measures; `loopback` is a real
@@ -239,6 +272,7 @@ required-features = ["internals", "macros"]
 [[bench]]
 name = "loopback"
 harness = false
+required-features = ["hyper"]
 
 [lints]
 workspace = true

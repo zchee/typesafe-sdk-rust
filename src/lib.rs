@@ -37,7 +37,7 @@
 //!     .header("x-team", "billing");
 //!
 //! // Sending needs a Tokio runtime; this example stops before it.
-//! async fn ask(request: typesafe_sdk::SystemOne<'_, typesafe_sdk::HyperTransport, str>)
+//! async fn ask<S: typesafe_sdk::HttpService>(request: typesafe_sdk::SystemOne<'_, S, str>)
 //! -> Result<f64, typesafe_sdk::Error> {
 //!     let response = request.send().await?;
 //!     Ok(response.answers().noul("billing").map_or(0.0, |answer| answer.noul()))
@@ -63,6 +63,7 @@
 //! [Tokio]: https://docs.rs/tokio
 
 #![forbid(unsafe_code)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod client;
 mod codec;
@@ -102,10 +103,12 @@ pub use crate::{
         Usage,
     },
     retry::{RetryPolicy, StatusSet},
-    transport::{
-        Body, BoxError, HttpService, HttpVersion, HyperResponseFuture, HyperTransport, ResponseBody,
-    },
+    transport::{Body, BoxError, HttpService},
 };
+
+#[cfg(feature = "hyper")]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
+pub use crate::transport::{HttpVersion, HyperResponseFuture, HyperTransport, ResponseBody};
 
 pub use crate::question::QuestionSet;
 
@@ -139,6 +142,6 @@ pub mod __private;
 /// Compiles every Rust block of `README.md` as a doctest, so the front page
 /// cannot drift from the API. The typed-answers block needs the derive, hence
 /// the feature.
-#[cfg(all(doctest, feature = "macros"))]
+#[cfg(all(doctest, feature = "macros", feature = "hyper"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;

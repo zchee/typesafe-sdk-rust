@@ -3,7 +3,7 @@
 //! The SDK drives a `tower`-shaped service rather than an HTTP client, so a
 //! caller can put their own stack underneath it - a recorder, a proxy, an
 //! in-memory harness - without this crate knowing about it, and the default
-//! stack, [`HyperTransport`], is one implementation of that seam rather than a
+//! stack, `HyperTransport` (with the `hyper` feature), is one implementation of that seam rather than a
 //! hard dependency. Any [`tower_service::Service`] over `http` requests with
 //! this crate's [`Body`] is a transport; [`HttpService`] names the bounds.
 //!
@@ -16,6 +16,8 @@
 //! turning a failure into this crate's [`Error`] - happens here, once per
 //! attempt, whichever transport is underneath.
 
+#[cfg(feature = "hyper")]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
 mod hyper;
 
 use std::{
@@ -37,7 +39,10 @@ use http_body::{Frame, SizeHint};
 use http_body_util::{BodyExt as _, LengthLimitError, Limited};
 use tower_service::Service;
 
+#[cfg(feature = "hyper")]
 pub(crate) use self::hyper::TransportSettings;
+#[cfg(feature = "hyper")]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
 pub use self::hyper::{HttpVersion, HyperResponseFuture, HyperTransport, ResponseBody};
 use crate::{
     config::Config,
@@ -144,8 +149,8 @@ mod sealed {
 /// nothing else, so it is a name for a set of bounds rather than a trait to
 /// implement: implement `Service` and a type is a transport. The service is
 /// cloned for every request and driven with its own `poll_ready`, so a
-/// service with back-pressure keeps it; the default [`HyperTransport`] is
-/// always ready.
+/// service with back-pressure keeps it; `HyperTransport` (with the `hyper`
+/// feature) is always ready.
 ///
 /// The error of the service, and of its response body, is anything that can
 /// cross threads. It is kept as the [`source`](StdError::source) of the

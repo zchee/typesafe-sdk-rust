@@ -1,10 +1,18 @@
 //! Tests for building a client. None of them reads the process environment:
 //! the builder is given a lookup of its own.
 
+#[cfg(feature = "hyper")]
 use std::ffi::OsString;
 
 use super::*;
 use crate::ErrorKind;
+
+#[cfg(feature = "hyper")]
+#[test]
+fn client_builder_new_is_client_builder() {
+    assert_eq!(format!("{:?}", ClientBuilder::new()), format!("{:?}", Client::builder()));
+    assert_eq!(format!("{:?}", ClientBuilder::new()), format!("{:?}", ClientBuilder::default()));
+}
 
 #[cfg(feature = "tracing")]
 #[path = "../tests/support/recorder.rs"]
@@ -61,7 +69,7 @@ async fn log_endpoint_host_false_prints_the_api_path_alone_over_a_custom_service
     let recorder = Recorder::default();
     let _installed = install(&recorder);
     let calls = Arc::new(AtomicUsize::new(0));
-    let builder = ClientBuilder::default()
+    let builder = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9/prefix")
         .default_model("jev-latest")
@@ -123,11 +131,13 @@ async fn log_endpoint_host_false_prints_the_api_path_alone_over_a_custom_service
 }
 
 /// An environment with none of the SDK's variables.
+#[cfg(feature = "hyper")]
 fn empty(_: &str) -> Option<String> {
     None
 }
 
 /// The config error `builder` fails to build with, rendered.
+#[cfg(feature = "hyper")]
 fn config_error(builder: ClientBuilder) -> String {
     match builder.build_with_env(empty) {
         Ok(client) => panic!("expected a config error, built {client:?}"),
@@ -138,16 +148,28 @@ fn config_error(builder: ClientBuilder) -> String {
     }
 }
 
-/// A transport for `build_with_service`.
-fn transport() -> HyperTransport {
-    HyperTransport::new(TransportSettings {
-        version: HttpVersion::Auto,
-        extra_roots: Vec::new(),
-        connect_timeout: None,
-    })
-    .expect("the transport builds")
+/// An in-memory transport for configuration tests that never send a request.
+#[derive(Debug, Clone)]
+struct InMemory;
+
+impl tower_service::Service<http::Request<crate::Body>> for InMemory {
+    type Response = http::Response<crate::Body>;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<crate::Body>) -> Self::Future {
+        std::future::ready(Ok(http::Response::new(request.into_body())))
+    }
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn settings_the_builder_leaves_unset_come_from_the_environment() {
     let environment = |name: &str| match name {
@@ -157,7 +179,7 @@ fn settings_the_builder_leaves_unset_come_from_the_environment() {
         _ => None,
     };
     let client =
-        Client::builder().build_with_env(environment).expect("the environment is complete");
+        ClientBuilder::new().build_with_env(environment).expect("the environment is complete");
     let shared = client.shared();
 
     assert_eq!(shared.config.endpoints().system_one(), "http://127.0.0.1:9/prefix/v1/systemone");
@@ -166,6 +188,7 @@ fn settings_the_builder_leaves_unset_come_from_the_environment() {
     assert_eq!(&shared.model_json[..], b"\"env-model\"");
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn the_default_version_is_http2_only_for_https_and_auto_for_http_and_a_choice_wins() {
     let rows = [
@@ -175,7 +198,7 @@ fn the_default_version_is_http2_only_for_https_and_auto_for_http_and_a_choice_wi
         ("http://127.0.0.1:9", Some(HttpVersion::Http2Only), HttpVersion::Http2Only),
     ];
     for (base_url, chosen, expected) in rows {
-        let mut builder = Client::builder().api_key("test-key").base_url(base_url);
+        let mut builder = ClientBuilder::new().api_key("test-key").base_url(base_url);
         if let Some(version) = chosen {
             builder = builder.http_version(version);
         }
@@ -188,6 +211,7 @@ fn the_default_version_is_http2_only_for_https_and_auto_for_http_and_a_choice_wi
     }
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn a_custom_transport_refuses_the_settings_only_the_default_one_has() {
     type Configure = fn(ClientBuilder) -> ClientBuilder;
@@ -214,8 +238,8 @@ fn a_custom_transport_refuses_the_settings_only_the_default_one_has() {
         ),
     ];
     for (configure, named) in rows {
-        let builder = configure(Client::builder().api_key("test-key"));
-        let error = builder.build_with_service(transport()).expect_err("it must be refused");
+        let builder = configure(ClientBuilder::new().api_key("test-key"));
+        let error = builder.build_with_service(InMemory).expect_err("it must be refused");
         assert!(matches!(error.kind(), ErrorKind::Config), "{error:?}");
         assert_eq!(
             error.to_string(),
@@ -227,7 +251,7 @@ fn a_custom_transport_refuses_the_settings_only_the_default_one_has() {
     }
 
     // The same settings are accepted by the default transport.
-    Client::builder()
+    ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .http_version(HttpVersion::Http2Only)
@@ -236,6 +260,7 @@ fn a_custom_transport_refuses_the_settings_only_the_default_one_has() {
         .expect("the default transport takes them");
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn a_default_header_that_cannot_be_sent_is_refused_without_its_value() {
     let secret = "sk-live-do-not-log";
@@ -251,22 +276,24 @@ fn a_default_header_that_cannot_be_sent_is_refused_without_its_value() {
     ];
     for ((name, value), message) in rows {
         let rendered =
-            config_error(Client::builder().api_key("test-key").default_header(name, value));
+            config_error(ClientBuilder::new().api_key("test-key").default_header(name, value));
         assert_eq!(rendered, message);
         assert!(!rendered.contains(secret));
     }
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn a_zero_connect_timeout_is_refused() {
     let rendered =
-        config_error(Client::builder().api_key("test-key").connect_timeout(Duration::ZERO));
+        config_error(ClientBuilder::new().api_key("test-key").connect_timeout(Duration::ZERO));
     assert_eq!(rendered, "connect_timeout must be a positive number of seconds.");
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn a_later_default_header_of_a_name_replaces_an_earlier_one() {
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .default_header("X-Team", "first")
         .default_header("x-team", "second")
@@ -278,11 +305,13 @@ fn a_later_default_header_of_a_name_replaces_an_earlier_one() {
 
 // ---------------------------------------------------------------- Debug
 
+#[cfg(feature = "hyper")]
 const KEY: &str = "sk-live-0123456789-DO-NOT-LOG";
 
+#[cfg(feature = "hyper")]
 #[test]
 fn a_builder_prints_what_was_set_and_nothing_secret() {
-    let builder = Client::builder()
+    let builder = ClientBuilder::new()
         .api_key(KEY)
         .base_url("https://example.test/prefix/")
         .default_model("jev-latest")
@@ -321,15 +350,16 @@ fn a_builder_does_not_print_a_base_url_that_failed_its_checks() {
     for url in
         ["https://user:hunter2@example.test", "https://example.test/?token=hunter2", "not a url"]
     {
-        let debug = format!("{:?}", Client::builder().base_url(url));
+        let debug = format!("{:?}", ClientBuilder::new().base_url(url));
         assert!(debug.contains("base_url: Some(<not a usable URL>)"), "{url}: {debug}");
         assert!(!debug.contains("hunter2"), "{url}: {debug}");
     }
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn a_client_prints_its_settings_and_transport_and_nothing_secret() {
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key(KEY)
         .base_url("https://example.test:443/prefix")
         .default_header("x-client-secret", "client-secret-value")
@@ -354,9 +384,10 @@ fn a_client_prints_its_settings_and_transport_and_nothing_secret() {
     }
 }
 
+#[cfg(feature = "hyper")]
 #[test]
 fn a_clone_shares_one_client() {
-    let client = Client::builder().api_key("test-key").build_with_env(empty).expect("it builds");
+    let client = ClientBuilder::new().api_key("test-key").build_with_env(empty).expect("it builds");
     let clone = client.clone();
     assert!(std::ptr::eq(client.shared(), clone.shared()));
 }
@@ -364,6 +395,7 @@ fn a_clone_shares_one_client() {
 // ---------------------------------------------- User-Agent and runtime
 
 /// `User-Agent` of a client's requests, both kinds, which must agree.
+#[cfg(feature = "hyper")]
 fn user_agent<S>(client: &Client<S>) -> String {
     let shared = client.shared();
     assert_eq!(shared.get_headers["user-agent"], shared.post_headers["user-agent"]);
@@ -371,6 +403,7 @@ fn user_agent<S>(client: &Client<S>) -> String {
 }
 
 /// Whether both kinds of request of a client carry `X-TypeSafe-Runtime`.
+#[cfg(feature = "hyper")]
 fn sends_runtime<S>(client: &Client<S>) -> bool {
     let shared = client.shared();
     let get = shared.get_headers.contains_key("x-typesafe-runtime");
@@ -381,10 +414,11 @@ fn sends_runtime<S>(client: &Client<S>) -> bool {
 /// Like every other setter, a later call replaces an earlier one: a refused
 /// product followed by a good one builds, a good one followed by a refused
 /// one does not, and the last runtime switch decides.
+#[cfg(feature = "hyper")]
 #[test]
 fn a_later_user_agent_product_or_runtime_switch_replaces_an_earlier_one() {
     let sdk = format!("typesafe-sdk-rust/{}", env!("CARGO_PKG_VERSION"));
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .user_agent_product("not a token")
         .user_agent_product("app/2")
@@ -393,7 +427,10 @@ fn a_later_user_agent_product_or_runtime_switch_replaces_an_earlier_one() {
     assert_eq!(user_agent(&client), format!("app/2 {sdk}"));
 
     let rendered = config_error(
-        Client::builder().api_key("test-key").user_agent_product("app/2").user_agent_product("app"),
+        ClientBuilder::new()
+            .api_key("test-key")
+            .user_agent_product("app/2")
+            .user_agent_product("app"),
     );
     assert_eq!(
         rendered,
@@ -403,7 +440,7 @@ fn a_later_user_agent_product_or_runtime_switch_replaces_an_earlier_one() {
 
     let rows = [(vec![false], false), (vec![false, true], true), (vec![true, false], false)];
     for (switches, expected) in rows {
-        let mut builder = Client::builder().api_key("test-key");
+        let mut builder = ClientBuilder::new().api_key("test-key");
         for send in &switches {
             builder = builder.send_runtime_header(*send);
         }
@@ -421,17 +458,24 @@ fn a_user_agent_product_that_is_not_a_token_fails_either_way_of_building() {
     let message = "The user_agent_product must be a product token, name/version \
                    (RFC 9110, section 10.1.5): it contains whitespace.";
 
-    let built = config_error(Client::builder().api_key("test-key").user_agent_product(product));
+    #[cfg(feature = "hyper")]
+    let built = config_error(ClientBuilder::new().api_key("test-key").user_agent_product(product));
+    #[cfg(feature = "hyper")]
     assert_eq!(built, message);
 
-    let error = Client::builder()
+    let error = ClientBuilder::new()
         .api_key("test-key")
         .user_agent_product(product)
-        .build_with_service(transport())
+        .build_with_service(InMemory)
         .expect_err("it must be refused");
     assert!(matches!(error.kind(), ErrorKind::Config), "{error:?}");
     assert_eq!(error.to_string(), message);
-    for rendered in [built, error.to_string(), format!("{error:?}")] {
+    for rendered in [
+        #[cfg(feature = "hyper")]
+        built,
+        error.to_string(),
+        format!("{error:?}"),
+    ] {
         crate::rendering_tests::assert_printable(&rendered);
         assert!(!rendered.contains("X-Injected"), "{rendered}");
     }
@@ -440,10 +484,11 @@ fn a_user_agent_product_that_is_not_a_token_fails_either_way_of_building() {
 /// The product is printed quoted and escaped, since before `build` it can
 /// hold anything; a runtime header switched off is printed, one left on is
 /// not.
+#[cfg(feature = "hyper")]
 #[test]
 fn a_builder_prints_its_user_agent_product_escaped_and_a_runtime_header_switched_off() {
     let builder =
-        Client::builder().user_agent_product("app\u{1b}[31m/1").send_runtime_header(false);
+        ClientBuilder::new().user_agent_product("app\u{1b}[31m/1").send_runtime_header(false);
     let debug = format!("{builder:?}");
     assert!(
         debug.ends_with(
@@ -454,7 +499,7 @@ fn a_builder_prints_its_user_agent_product_escaped_and_a_runtime_header_switched
     crate::rendering_tests::assert_printable(&debug);
 
     assert_eq!(
-        format!("{:?}", Client::builder().send_runtime_header(true)),
+        format!("{:?}", ClientBuilder::new().send_runtime_header(true)),
         format!("{:?}", ClientBuilder::default())
     );
 }

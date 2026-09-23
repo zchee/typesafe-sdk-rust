@@ -829,7 +829,7 @@ struct Spam {
 
 /// `ask` is `system_one` with the set's questions, typed as the set: the same
 /// builder, and the same settings.
-#[cfg(feature = "macros")]
+#[cfg(all(feature = "macros", feature = "hyper"))]
 #[test]
 fn ask_is_system_one_with_the_sets_questions() {
     let client = Client::builder().api_key("test-key").build().expect("the client builds");

@@ -53,8 +53,8 @@ use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use http_body_util::BodyExt as _;
 use tower_service::Service;
 use typesafe_sdk::{
-    __internals as sdk, Body, Choice, Client, Noul, PreparedQuestions, Questions, RetryPolicy,
-    Score, response::Answers,
+    __internals as sdk, Body, Choice, ClientBuilder, Noul, PreparedQuestions, Questions,
+    RetryPolicy, Score, response::Answers,
 };
 
 use crate::support::measure_min;
@@ -132,7 +132,7 @@ fn a_whole_call_costs_its_own_steps_and_nothing_else() {
         .enable_time()
         .build()
         .expect("the runtime builds");
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .default_model("jev-latest")

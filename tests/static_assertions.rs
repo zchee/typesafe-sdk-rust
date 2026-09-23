@@ -17,12 +17,14 @@ use std::{
 use http::{Request, Response};
 use tower_service::Service;
 use typesafe_sdk::{
-    ApiError, Body, Client, Error, ErrorKind, HttpService, HyperResponseFuture, HyperTransport,
-    Noul, PreparedQuestions, QuestionSet, Questions, ResponseBody, ResponseValidationError,
-    RetryPolicy, StatusSet, SystemOneResponse,
+    ApiError, Body, Client, ClientBuilder, Error, ErrorKind, Noul, PreparedQuestions, QuestionSet,
+    Questions, ResponseValidationError, RetryPolicy, StatusSet, SystemOneResponse,
     de::{AnswerContext, AnswerSet},
     response::{Answer, Answers, ChoiceAnswer, NoulAnswer},
 };
+
+#[cfg(feature = "hyper")]
+use typesafe_sdk::{HttpService, HyperResponseFuture, HyperTransport, ResponseBody};
 
 // `Result<T, Error>` costs a pointer beside `T`.
 const _: () = assert!(size_of::<Error>() == size_of::<usize>());
@@ -37,7 +39,9 @@ const _: () = error_is_shareable::<ApiError>();
 const _: () = error_is_shareable::<ResponseValidationError>();
 
 const fn client_is_shareable<T: Clone + Send + Sync>() {}
+#[cfg(feature = "hyper")]
 const _: () = client_is_shareable::<Client>();
+#[cfg(feature = "hyper")]
 const _: () = client_is_shareable::<Client<HyperTransport>>();
 const _: () = client_is_shareable::<Client<Echo>>();
 
@@ -49,9 +53,13 @@ const _: () = is_copy::<StatusSet>();
 
 // The default transport answers with this crate's own body type, not hyper's,
 // and both it and the future that yields it can move to another thread.
+#[cfg(feature = "hyper")]
 const fn crosses_threads<T: Send + 'static>() {}
+#[cfg(feature = "hyper")]
 const _: () = crosses_threads::<ResponseBody>();
+#[cfg(feature = "hyper")]
 const _: () = crosses_threads::<HyperResponseFuture>();
+#[cfg(feature = "hyper")]
 const _: fn(<HyperTransport as HttpService>::ResponseBody) -> ResponseBody = |body| body;
 
 // The response types keep their sizes whatever holds their names: a name is
@@ -129,22 +137,25 @@ fn the_future_of_every_call_is_send() {
         Questions::new().noul("spam", Noul::new().instructions("?")).prepare().expect("prepares");
     let state = String::from("hello");
 
-    let client = Client::builder()
-        .api_key("test-key")
-        .base_url("http://127.0.0.1:9")
-        .build()
-        .expect("the client builds");
-    is_send(&client.system_one(state.as_str(), &questions).send());
-    is_send(&client.system_one(&state, &questions).typed::<Ticket>().send());
-    is_send(&client.ask::<Ticket>(&state).send());
-    is_send(&client.models().list().send());
-    is_send(&client.warm_up());
     let policy = RetryPolicy::default().predicate(|_| true);
-    is_send(&client.system_one(state.as_str(), &questions).retry(policy.clone()).send());
-    is_send(&client.models().list().retry(policy.clone()).send());
-    is_send(&client.ask::<Ticket>(&state).retry(policy.clone()).send());
+    #[cfg(feature = "hyper")]
+    {
+        let client = Client::builder()
+            .api_key("test-key")
+            .base_url("http://127.0.0.1:9")
+            .build()
+            .expect("the client builds");
+        is_send(&client.system_one(state.as_str(), &questions).send());
+        is_send(&client.system_one(&state, &questions).typed::<Ticket>().send());
+        is_send(&client.ask::<Ticket>(&state).send());
+        is_send(&client.models().list().send());
+        is_send(&client.warm_up());
+        is_send(&client.system_one(state.as_str(), &questions).retry(policy.clone()).send());
+        is_send(&client.models().list().retry(policy.clone()).send());
+        is_send(&client.ask::<Ticket>(&state).retry(policy.clone()).send());
+    }
 
-    let custom = Client::builder()
+    let custom = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .build_with_service(Echo)
@@ -185,25 +196,30 @@ fn the_future_of_every_call_stays_small() {
     const TOKIO_DEBUG_BOX: usize = 2048;
     // Measured over the default transport: 2344, 2328 and 2032 bytes, `ask`
     // the same 2328 as `typed`; over a custom transport 2040, 2024 and 1728.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(all(feature = "hyper", any(target_os = "macos", target_os = "linux")))]
     const DEFAULT_TRANSPORT: [usize; 4] = [2376, 2360, 2360, 2064];
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(feature = "hyper", not(any(target_os = "macos", target_os = "linux"))))]
     const DEFAULT_TRANSPORT: [usize; 4] = [2816, 2816, 2816, 2560];
+    #[cfg(feature = "hyper")]
     const SYSTEM_ONE: usize = DEFAULT_TRANSPORT[0];
+    #[cfg(feature = "hyper")]
     const TYPED: usize = DEFAULT_TRANSPORT[1];
+    #[cfg(feature = "hyper")]
     const ASK: usize = DEFAULT_TRANSPORT[2];
+    #[cfg(feature = "hyper")]
     const MODELS: usize = DEFAULT_TRANSPORT[3];
 
     let questions =
         Questions::new().noul("spam", Noul::new().instructions("?")).prepare().expect("prepares");
     let state = String::from("hello");
+    #[cfg(feature = "hyper")]
     let client = Client::builder()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .default_model("jev-latest")
         .build()
         .expect("the client builds");
-    let custom = Client::builder()
+    let custom = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .default_model("jev-latest")
@@ -211,17 +227,21 @@ fn the_future_of_every_call_stays_small() {
         .expect("the client builds");
 
     let sizes = [
+        #[cfg(feature = "hyper")]
         (
             "system_one",
             size_of_val(&client.system_one(state.as_str(), &questions).send()),
             SYSTEM_ONE,
         ),
+        #[cfg(feature = "hyper")]
         (
             "typed",
             size_of_val(&client.system_one(&state, &questions).typed::<Ticket>().send()),
             TYPED,
         ),
+        #[cfg(feature = "hyper")]
         ("ask", size_of_val(&client.ask::<Ticket>(&state).send()), ASK),
+        #[cfg(feature = "hyper")]
         ("models", size_of_val(&client.models().list().send()), MODELS),
         (
             "system_one, custom",

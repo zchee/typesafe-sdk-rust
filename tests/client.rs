@@ -569,7 +569,7 @@ fn cause<T: StdError + 'static>(error: &Error) -> Option<&T> {
 #[tokio::test]
 async fn transport_errors_are_connection_errors_with_their_cause() {
     let client = |url: &str| {
-        Client::builder().api_key("test-key").base_url(url).build().expect("the client builds")
+        ClientBuilder::new().api_key("test-key").base_url(url).build().expect("the client builds")
     };
 
     // Nothing listening.
@@ -603,7 +603,7 @@ async fn transport_errors_are_connection_errors_with_their_cause() {
 
     // Upstream's `LocalProtocolError`: the transport fails before anything is
     // sent, which here is `poll_ready`.
-    let error = Client::builder()
+    let error = ClientBuilder::new()
         .api_key("test-key")
         .base_url("https://api.typesafe.ai")
         .retry(RetryPolicy::default().max_retries(0))
@@ -674,7 +674,7 @@ impl Service<Request<Body>> for Failing {
 /// itself, whole, is the cause.
 #[tokio::test]
 async fn a_transport_error_of_any_text_is_escaped_and_cut_in_the_message() {
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("https://api.typesafe.ai")
         .build_with_service(Failing)
@@ -919,7 +919,7 @@ fn assert_no_credential(error: &Error, secrets: &[&str], case: &str) {
 /// The client of these tests: the credential as its key, a secret default
 /// header, and three attempts with no wait between them.
 fn echo_client(echo: Echo, credential: &str) -> Client<Echo> {
-    Client::builder()
+    ClientBuilder::new()
         .api_key(credential)
         .base_url("https://api.typesafe.ai")
         .default_header("x-client-secret", PROVIDER_SECRET)
@@ -1044,8 +1044,11 @@ async fn transport_errors_never_expose_a_credential() {
 #[tokio::test]
 async fn an_untrusted_certificate_is_a_connection_error_naming_the_certificate() {
     let server = answering(Protocol::Http2Tls, StatusCode::OK, br#"{"models":[]}"#).await;
-    let client =
-        Client::builder().api_key("test-key").base_url(server.base_url()).build().expect("builds");
+    let client = ClientBuilder::new()
+        .api_key("test-key")
+        .base_url(server.base_url())
+        .build()
+        .expect("builds");
 
     let error = client.models().list().send().await.expect_err("the certificate is not trusted");
     let message = connection_message(&error);
@@ -1241,7 +1244,7 @@ async fn a_declared_length_over_the_limit_is_refused_whatever_follows_it() {
             .await
             .expect("a loopback port")
     );
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url(url)
         .max_response_bytes(1024)
@@ -1260,7 +1263,7 @@ async fn a_streamed_response_over_the_limit_is_refused_as_it_arrives() {
         " ".repeat(1024)
     );
     let url = format!("http://{}", raw_server(reply).await.expect("a loopback port"));
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url(url)
         .max_response_bytes(100)
@@ -1417,7 +1420,7 @@ async fn headers_timeout_and_logging() {
 async fn the_upstream_base_url_with_a_prefix_and_trailing_slashes() {
     let server = logging_server(Protocol::Http1).await;
     let forward = Forward::to(&server);
-    let builder = Client::builder()
+    let builder = ClientBuilder::new()
         .api_key("test-key")
         .default_model("jev-latest")
         .base_url("https://example.test/prefix///");
@@ -1653,7 +1656,7 @@ async fn framing_and_connection_headers_are_dropped_and_host_is_sent() {
 async fn a_custom_transport_carries_every_request_with_the_sdk_headers() {
     let server = listing_and_answering(Protocol::Http1).await;
     let forward = Forward::to(&server);
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("https://api.typesafe.ai")
         .default_header("x-sdk-default", "sdk")
@@ -1732,7 +1735,7 @@ impl Service<Request<Body>> for Counted {
 async fn the_last_clone_of_a_client_drops_its_transport() {
     let server = answering(Protocol::Http1, StatusCode::OK, br#"{"models":[]}"#).await;
     let alive = Arc::new(AtomicUsize::new(0));
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://api.test")
         .build_with_service(Counted::new(Forward::to(&server), &alive))
@@ -1960,7 +1963,7 @@ mod logging {
                 "timeout",
             ),
             (
-                Client::builder()
+                ClientBuilder::new()
                     .api_key("test-key")
                     .base_url(refused.as_str())
                     .retry(RetryPolicy::default().max_retries(0)),
@@ -2056,7 +2059,7 @@ mod logging {
                 })
                 .await
                 .expect("the test server starts");
-                let client = Client::builder()
+                let client = ClientBuilder::new()
                     .api_key("auth-credential")
                     .base_url(server.base_url())
                     .default_header(name, "request-credential")

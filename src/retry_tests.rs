@@ -33,17 +33,22 @@ use std::{
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::BodyExt as _;
+#[cfg(feature = "hyper")]
 use serde::Serialize;
+#[cfg(feature = "hyper")]
 use test_support::{Protocol, RecordedRequest, TestResponse, TestServer, json_response};
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
+#[cfg(feature = "hyper")]
+use tokio::sync::watch;
 use tower_service::Service;
 
 use super::*;
+#[cfg(feature = "hyper")]
 use crate::{
-    Client, ClientBuilder, Noul, PreparedQuestions, Questions, RawQuestion,
-    error::ApiError,
-    transport::{Body, BoxError, HttpVersion, HyperTransport, ResponseBody, TransportSettings},
+    Client, RawQuestion,
+    transport::{BoxError, HttpVersion, HyperTransport, ResponseBody, TransportSettings},
 };
+use crate::{ClientBuilder, Noul, PreparedQuestions, Questions, error::ApiError, transport::Body};
 
 /// The upstream `RetryPolicy` defaults: `backoff_initial`, `backoff_max` and
 /// `backoff_jitter`.
@@ -347,6 +352,7 @@ impl FakeTime {
     }
 
     /// The same, with a sleep that never ends.
+    #[cfg(feature = "hyper")]
     fn hanging() -> Arc<Self> {
         Arc::new(Self::build(true))
     }
@@ -375,6 +381,7 @@ impl FakeTime {
         lock(&self.delays).clone()
     }
 
+    #[cfg(feature = "hyper")]
     fn clear_delays(&self) {
         lock(&self.delays).clear();
     }
@@ -442,6 +449,7 @@ const RESULT: &[u8] = include_bytes!("../tests/fixtures/result.json");
 const SHORT: Duration = Duration::from_millis(50);
 
 /// A JSON response with `status`, `body` and the extra headers.
+#[cfg(feature = "hyper")]
 fn respond(status: u16, body: &str, headers: &[(&str, &str)]) -> TestResponse {
     let status = StatusCode::from_u16(status).expect("a test status is valid");
     let mut response = json_response(status, Bytes::copy_from_slice(body.as_bytes()));
@@ -455,6 +463,7 @@ fn respond(status: u16, body: &str, headers: &[(&str, &str)]) -> TestResponse {
 }
 
 /// A server answering its `n`th request, counted from 1, with `answer(n)`.
+#[cfg(feature = "hyper")]
 async fn serve<F>(answer: F) -> TestServer
 where
     F: Fn(usize, &RecordedRequest) -> TestResponse + Send + Sync + 'static,
@@ -463,8 +472,9 @@ where
 }
 
 /// A client of `server` with `policy`, reading nothing from the environment.
+#[cfg(feature = "hyper")]
 fn client(server: &TestServer, policy: RetryPolicy) -> Client {
-    Client::builder()
+    ClientBuilder::new()
         .api_key("test-key")
         .base_url(server.base_url())
         .default_model("jev-latest")
@@ -479,6 +489,7 @@ fn questions() -> PreparedQuestions {
 }
 
 /// The same question written as a raw question.
+#[cfg(feature = "hyper")]
 fn raw_questions() -> PreparedQuestions {
     Questions::new()
         .raw("q", RawQuestion::new("noul").field("instructions", "?"))
@@ -488,11 +499,13 @@ fn raw_questions() -> PreparedQuestions {
 
 /// The two endpoints upstream parametrizes the loop tests over.
 #[derive(Debug, Clone, Copy)]
+#[cfg(feature = "hyper")]
 enum Resource {
     Models,
     SystemOne,
 }
 
+#[cfg(feature = "hyper")]
 impl Resource {
     const ALL: [Self; 2] = [Self::Models, Self::SystemOne];
 
@@ -527,6 +540,7 @@ impl Resource {
 }
 
 /// The `X-TypeSafe-Retry-Count` of each request, `None` where it is absent.
+#[cfg(feature = "hyper")]
 fn retry_counts(requests: &[RecordedRequest]) -> Vec<Option<String>> {
     requests
         .iter()
@@ -537,6 +551,7 @@ fn retry_counts(requests: &[RecordedRequest]) -> Vec<Option<String>> {
 }
 
 /// What `retry_counts` reads for `attempts` attempts: none, then 1, 2, ...
+#[cfg(feature = "hyper")]
 fn expected_counts(attempts: usize) -> Vec<Option<String>> {
     (0..attempts).map(|attempt| (attempt > 0).then(|| attempt.to_string())).collect()
 }
@@ -569,6 +584,7 @@ fn assert_config(result: Result<RetryPolicy, Error>, display: &str) {
 /// `failed`: a failure before anything is sent, as upstream's
 /// `LocalProtocolError`.
 #[derive(Clone)]
+#[cfg(feature = "hyper")]
 struct Flaky {
     inner: HyperTransport,
     calls: Arc<AtomicUsize>,
@@ -578,6 +594,7 @@ struct Flaky {
     ready_failures: usize,
 }
 
+#[cfg(feature = "hyper")]
 impl Flaky {
     fn new(failures: usize, kind: io::ErrorKind) -> Self {
         let settings = TransportSettings {
@@ -610,8 +627,10 @@ impl Flaky {
     }
 }
 
+#[cfg(feature = "hyper")]
 type Answered = Pin<Box<dyn Future<Output = Result<Response<ResponseBody>, BoxError>> + Send>>;
 
+#[cfg(feature = "hyper")]
 impl Service<Request<Body>> for Flaky {
     type Response = Response<ResponseBody>;
     type Error = BoxError;
@@ -637,8 +656,9 @@ impl Service<Request<Body>> for Flaky {
 
 /// A client of `server` through `transport`, with `policy`. Every setting the
 /// environment could supply is given, so none is read.
+#[cfg(feature = "hyper")]
 fn flaky_client(server: &TestServer, transport: Flaky, policy: RetryPolicy) -> Client<Flaky> {
-    Client::builder()
+    ClientBuilder::new()
         .api_key("test-key")
         .base_url(server.base_url())
         .default_model("jev-latest")
@@ -650,6 +670,7 @@ fn flaky_client(server: &TestServer, transport: Flaky, policy: RetryPolicy) -> C
 /// A server that holds its first `held` requests until the test ends and
 /// answers the rest with `{"models": []}`: an attempt with a short deadline
 /// times out on each held one.
+#[cfg(feature = "hyper")]
 async fn holding(held: usize) -> (TestServer, watch::Sender<bool>) {
     let (release, released) = watch::channel(false);
     let served = Arc::new(AtomicUsize::new(0));
@@ -732,7 +753,7 @@ async fn none_makes_one_attempt_whatever_fails() {
     for outcome in cases {
         let time = FakeTime::new();
         let transport = AttemptService { outcome, calls: Arc::default(), dropped: Arc::default() };
-        let client = ClientBuilder::default()
+        let client = ClientBuilder::new()
             .api_key("test-key")
             .base_url("http://127.0.0.1:9")
             .default_model("jev-latest")
@@ -775,7 +796,7 @@ async fn dropping_the_call_future_cancels_the_attempt_and_nothing_follows() {
         calls: Arc::default(),
         dropped: Arc::default(),
     };
-    let client = ClientBuilder::default()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .default_model("jev-latest")
@@ -812,7 +833,7 @@ async fn none_with_a_per_attempt_deadline_times_out_after_exactly_one_call() {
         dropped: Arc::default(),
     };
     let deadline = Duration::from_secs(1);
-    let client = ClientBuilder::default()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .default_model("jev-latest")
@@ -861,6 +882,7 @@ fn a_zero_budget_is_refused_as_upstream_test_retry_policy_invalid_timeout() {
 
 /// `test_zero_backoff_retries`: a zero initial delay, a zero cap, or both,
 /// retry at once, whether or not the retry succeeds.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn zero_backoff_retries_at_once_as_upstream_test_zero_backoff_retries() {
     let millis = Duration::from_millis;
@@ -903,6 +925,7 @@ async fn zero_backoff_retries_at_once_as_upstream_test_zero_backoff_retries() {
 /// questions; `RetryPolicy` field types checked at run time"). The largest one
 /// can, and it degrades instead of panicking: under a budget it ends the
 /// retrying, and with no budget it is waited out as `Duration::MAX`.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_largest_backoff_degrades_as_upstream_test_invalid_backoff() {
     let server = serve(|_, _| respond(503, r#"{"message": "down"}"#, &[])).await;
@@ -961,6 +984,7 @@ fn a_jitter_outside_zero_to_one_is_refused_as_upstream_test_invalid_backoff_jitt
 /// as a `u32` (README deviation row "Unknown fields rejected on typed
 /// questions; `RetryPolicy` field types checked at run time"). The largest
 /// count is accepted and counts without overflowing.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_largest_retry_count_is_accepted_as_upstream_test_invalid_max_retries() {
     let server = serve(|attempt, _| match attempt {
@@ -980,6 +1004,7 @@ async fn the_largest_retry_count_is_accepted_as_upstream_test_invalid_max_retrie
 /// `Retry-After: <delay>`; retrying stops before a wait that would reach the
 /// budget, and the error is the last attempt's. Each call gets a fresh
 /// budget, so every row runs twice on one client.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_budget_stops_retrying_as_upstream_test_retry_policy_timeout_budget() {
     let secs = Duration::from_secs_f64;
@@ -1037,6 +1062,7 @@ async fn the_budget_stops_retrying_as_upstream_test_retry_policy_timeout_budget(
 /// `test_retry_policy_timeout_override` (AC-F9, AC-F10): each attempt takes
 /// 20 s on the fake clock, so the client's default 30 s budget stops after
 /// two attempts; a call's own policy replaces it for that call alone.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_calls_budget_replaces_the_clients_as_upstream_test_retry_policy_timeout_override() {
     for resource in Resource::ALL {
@@ -1074,6 +1100,7 @@ async fn a_calls_budget_replaces_the_clients_as_upstream_test_retry_policy_timeo
 
 /// `test_default_retry_statuses`: 408, 429 and 5xx are retried twice; other
 /// failures, and a redirect the transport does not follow, are not.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_default_statuses_are_retried_as_upstream_test_default_retry_statuses() {
     let rows = [
@@ -1112,6 +1139,7 @@ async fn the_default_statuses_are_retried_as_upstream_test_default_retry_statuse
 /// transport failure is retried with the backoff, and the third attempt
 /// succeeds. The draw is fixed at one half, inside upstream's asserted
 /// ranges: 0.5 s less an eighth, rounded, then 1 s less an eighth.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_transport_failure_is_retried_as_upstream_test_connection_retry_recovers() {
     for kind in [io::ErrorKind::ConnectionRefused, io::ErrorKind::ConnectionReset] {
@@ -1134,6 +1162,7 @@ async fn a_transport_failure_is_retried_as_upstream_test_connection_retry_recove
 /// `test_connection_retry_recovers`, `LocalProtocolError`: a transport that
 /// fails before anything is sent - here, its `poll_ready` - is retried like
 /// one that fails the call, and the third attempt succeeds.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_failure_before_sending_is_retried_as_upstream_test_connection_retry_recovers() {
     let server = serve(|_, _| respond(200, r#"{"models": []}"#, &[])).await;
@@ -1168,6 +1197,7 @@ async fn a_failure_before_sending_is_retried_as_upstream_test_connection_retry_r
 /// `test_connection_retry_recovers`, `ReadTimeout`: an attempt that runs
 /// past its deadline is retried. The deadline is real, 50 ms, against a
 /// handler held on a channel.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_timeout_is_retried_as_upstream_test_connection_retry_recovers() {
     let (server, release) = holding(2).await;
@@ -1184,6 +1214,7 @@ async fn a_timeout_is_retried_as_upstream_test_connection_retry_recovers() {
 
 /// `test_server_delay_through_tenacity`: the server's delay replaces the
 /// backoff, `retry-after-ms` before `Retry-After`, however long it is.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_servers_delay_is_waited_as_upstream_test_server_delay_through_tenacity() {
     let rows: [(&[(&str, &str)], Duration); 4] = [
@@ -1252,6 +1283,7 @@ fn delays_follow_upstream_test_backoff_dates_cap_and_jitter() {
 /// `test_system_one_retry_override` (AC-F9): a call's policy - its count and
 /// its statuses - replaces the client's for that call, and the next call
 /// without one is back on the client's.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_calls_policy_replaces_the_clients_as_upstream_test_system_one_retry_override() {
     for (client_attempts, call_attempts) in [(1_u32, 3_u32), (3, 1)] {
@@ -1295,6 +1327,7 @@ async fn a_calls_policy_replaces_the_clients_as_upstream_test_system_one_retry_o
 
 /// `test_async_concurrent_retry_state`: calls in flight together each count
 /// their own retries.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn concurrent_calls_count_their_own_retries_as_upstream_test_async_concurrent_retry_state() {
     // Each request's `x-call` key and retry count, in arrival order.
@@ -1343,6 +1376,7 @@ async fn concurrent_calls_count_their_own_retries_as_upstream_test_async_concurr
 
 /// The state upstream's recovery test sends.
 #[derive(Serialize)]
+#[cfg(feature = "hyper")]
 struct Document {
     document: &'static str,
 }
@@ -1356,6 +1390,7 @@ struct Document {
 /// call has one deadline per attempt, 50 ms here so the first attempt times
 /// out in real time, and what the server can observe is asserted instead of
 /// the transport's own timeout settings.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_call_recovers_with_its_overrides_as_upstream_test_system_one_retry_recovers_with_overrides()
  {
@@ -1379,7 +1414,7 @@ async fn a_call_recovers_with_its_overrides_as_upstream_test_system_one_retry_re
         .await
         .expect("the test server starts");
         let time = FakeTime::new();
-        let client = Client::builder()
+        let client = ClientBuilder::new()
             .api_key("test-key")
             .base_url(server.base_url())
             .default_model("client-model")
@@ -1434,6 +1469,7 @@ async fn a_call_recovers_with_its_overrides_as_upstream_test_system_one_retry_re
 /// together, two with a policy of their own, each keep their own count,
 /// state and model. Upstream also reads each attempt's timeout off the
 /// request; a Rust deadline never reaches the server, so it is not asserted.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn concurrent_calls_keep_their_own_policies_as_upstream_test_concurrent_system_one_overrides()
 {
@@ -1444,7 +1480,7 @@ async fn concurrent_calls_keep_their_own_policies_as_upstream_test_concurrent_sy
     .await
     .expect("the test server starts");
     let time = FakeTime::new();
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url(server.base_url())
         .default_model("jev-latest")
@@ -1488,6 +1524,7 @@ async fn concurrent_calls_keep_their_own_policies_as_upstream_test_concurrent_sy
 /// and the call fails with the last timeout. Upstream also finds httpx's own
 /// `ReadTimeout` as the cause; the Rust deadline is the SDK's own, so a
 /// timeout has no cause, and it carries the deadline it was given.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_last_timeout_is_returned_as_upstream_test_exhausted_transport_retry() {
     let (server, release) = holding(usize::MAX).await;
@@ -1519,6 +1556,7 @@ async fn the_last_timeout_is_returned_as_upstream_test_exhausted_transport_retry
 /// `test_exhausted_transport_retry`, `ConnectError`: every attempt fails to
 /// connect, and the call fails with the last failure, whose cause is the
 /// transport's own error from the third attempt.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_last_connection_failure_is_returned_as_upstream_test_exhausted_transport_retry() {
     let server = serve(|_, _| respond(200, "{}", &[])).await;
@@ -1553,6 +1591,7 @@ async fn the_last_connection_failure_is_returned_as_upstream_test_exhausted_tran
 /// `test_exhausted_retry_preserves_final_http_error` (AC-F10): the error of
 /// the last attempt is returned whole - status, body, request id, message -
 /// not wrapped and not the first one.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_last_api_error_is_returned_whole_as_upstream_test_exhausted_retry_preserves_final_http_error()
  {
@@ -1584,6 +1623,7 @@ async fn the_last_api_error_is_returned_whole_as_upstream_test_exhausted_retry_p
 /// `test_cancel_pending_retry` (AC-F8): dropping a call while it waits to
 /// retry drops the wait itself - no task was spawned to hold it - and
 /// nothing more is sent.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn dropping_a_waiting_call_cancels_its_retry_as_upstream_test_cancel_pending_retry() {
     let server = serve(|_, _| respond(429, "", &[])).await;
@@ -1607,6 +1647,7 @@ async fn dropping_a_waiting_call_cancels_its_retry_as_upstream_test_cancel_pendi
 
 /// `test_retry_policy_max_retries`: `max_retries` more attempts after the
 /// first, and none for 0.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn max_retries_counts_attempts_as_upstream_test_retry_policy_max_retries() {
     for (retries, attempts) in [(0, 1), (1, 2), (4, 5)] {
@@ -1623,6 +1664,7 @@ async fn max_retries_counts_attempts_as_upstream_test_retry_policy_max_retries()
 
 /// `test_retry_policy_custom_statuses`: a policy's own statuses replace the
 /// default ones.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn custom_statuses_replace_the_default_as_upstream_test_retry_policy_custom_statuses() {
     for (status, attempts) in [(409, 3), (500, 1)] {
@@ -1641,6 +1683,7 @@ async fn custom_statuses_replace_the_default_as_upstream_test_retry_policy_custo
 
 /// `test_retry_policy_per_call_override` (AC-F9): a call's `max_retries(0)`
 /// replaces the client's 2.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_calls_count_replaces_the_clients_as_upstream_test_retry_policy_per_call_override() {
     let server = serve(|_, _| respond(429, "{}", &[("retry-after-ms", "0")])).await;
@@ -1662,6 +1705,7 @@ async fn a_calls_count_replaces_the_clients_as_upstream_test_retry_policy_per_ca
 /// Upstream's `exceptions={TypeSafeAPIError}` is dropped (README deviation
 /// row "`RetryPolicy.exceptions`"); the Rust spelling of it is a predicate that
 /// matches the kind, tested as the second row.
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn a_predicate_opts_a_failure_in_as_upstream_test_retry_policy_exceptions_and_predicate() {
     let by_status = |error: &Error| matches!(error.kind(), ErrorKind::Api(api) if api.status() == StatusCode::NOT_FOUND);
@@ -1841,7 +1885,7 @@ impl Service<Request<Body>> for Recording {
 async fn every_attempt_sends_the_same_bytes_of_one_encoded_body() {
     let time = FakeTime::new();
     let transport = Recording { pointers: Arc::default(), failures: 2 };
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .default_model("jev-latest")

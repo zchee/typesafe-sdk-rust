@@ -23,6 +23,7 @@ The minimum supported Rust version is **1.98**, and the crate uses edition 2024.
 
 | Feature | Default | What it does |
 | --- | --- | --- |
+| `hyper` | on | The built-in transport (hyper over rustls, OS trust store): `Client::builder()`, `build()`, `from_env()`, `HttpVersion`, `add_root_certificate`, `http_version`, `connect_timeout`. Without it, start from `ClientBuilder::new()` and `build_with_service`; hyper and rustls are not compiled. |
 | `macros` | on | `#[derive(QuestionSet)]`: questions declared as a struct and serialized at compile time, answers decoded straight into its fields. Pulls in the `typesafe-sdk-rust-macros` crate at the exact same version. |
 | `tracing` | on | Log events through the [`tracing`](https://docs.rs/tracing) crate (see [Logging](#logging)). Without it, every event is compiled out. |
 | `internals` | off | Exposes a hidden `typesafe_sdk::__internals` module used by this repository's allocation tests and benchmarks. It carries **no semver promise**; do not depend on it. |
@@ -286,7 +287,7 @@ first three fall back to the environment, then to a default:
 | `user_agent_product("my-app/1.2.0")` | - | none: `User-Agent` names the SDK alone |
 | `send_runtime_header` | - | `true` |
 | `log_endpoint_host(false)` | - | `true` |
-| `add_root_certificate(der)`, `http_version`, `connect_timeout` | - | none, see below |
+| `add_root_certificate(der)`, `http_version`, `connect_timeout` (`hyper` feature) | - | none, see below |
 
 These three are the only environment variables the SDK reads, and only for a setting the caller
 left unset: an explicit value always wins. A value from the environment is trimmed (with
@@ -316,14 +317,17 @@ bytes; anything else is a `Config` error from `build()`. `send_runtime_header(fa
 
 ## Custom transport
 
+Start a custom-transport client with `ClientBuilder::new()`; `ClientBuilder::default()` gives
+the same value. Neither needs the `hyper` feature.
+
 `ClientBuilder::build_with_service(service)` sends every request through any
 [`tower_service::Service`](https://docs.rs/tower-service) that takes an
 `http::Request<typesafe_sdk::Body>` and answers with an `http::Response` of any
 [`http_body::Body`](https://docs.rs/http-body): a proxy, a recorder, a middleware stack, or, as
 below, an in-memory answer for a test. The service owns its connections and their timeouts; the
 SDK still applies its own per-attempt deadline and response size limit. The settings only the
-default transport has (`add_root_certificate`, `http_version`, `connect_timeout`) are a `Config`
-error with `build_with_service`, never silently ignored.
+default transport has (`add_root_certificate`, `http_version`, `connect_timeout`, available
+with the `hyper` feature) are a `Config` error with `build_with_service`, never silently ignored.
 
 ```rust
 use std::{
@@ -333,7 +337,7 @@ use std::{
 };
 
 use http::{Request, Response};
-use typesafe_sdk::{Body, Client, Noul, Questions};
+use typesafe_sdk::{Body, ClientBuilder, Noul, Questions};
 
 /// Answers every request with the same JSON body.
 #[derive(Clone)]
@@ -356,7 +360,7 @@ impl tower_service::Service<Request<Body>> for Canned {
 #[tokio::main]
 async fn main() -> Result<(), typesafe_sdk::Error> {
     let answer = r#"{"model":"jev-latest","usage":{},"answers":{"spam":{"type":"noul","noul":0.98}}}"#;
-    let client = Client::builder().api_key("test-key").build_with_service(Canned(answer))?;
+    let client = ClientBuilder::new().api_key("test-key").build_with_service(Canned(answer))?;
     let questions = Questions::new().noul("spam", Noul::new().instructions("Spam?")).prepare()?;
     let response = client.system_one("Buy now!", &questions).send().await?;
     assert_eq!(response.answers().noul("spam").map(|answer| answer.noul()), Some(0.98));
@@ -371,7 +375,8 @@ header's value into the message.
 ## Connections and concurrency
 
 A `Client` is cheap to clone (one reference count) and every clone shares one connection pool;
-a clone per task is the intended use. The default transport is hyper over rustls, with the
+a clone per task is the intended use. With the `hyper` feature (on by default), the built-in
+transport is hyper over rustls, with the
 operating system's trust store through `rustls-platform-verifier` (plus any
 `add_root_certificate` roots), `TCP_NODELAY`, idle connections kept 90 s and HTTP/2 keep-alive
 pings every 30 s.
@@ -535,7 +540,7 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | Synchronous `TypeSafeClient` | No blocking client; async only | Scope: one client, on Tokio. Upstream runs most client tests against both its clients; this crate ports the async half. |
 | Timeout per httpx phase; `httpx.Timeout` objects | One total deadline per attempt (default 10 s), an optional `connect_timeout`, and `no_timeout()` | One timer per attempt. |
 | `http_client.timeout` takes precedence | A custom transport owns its own timeouts; the SDK deadline still wraps each attempt | The transport is the caller's service, configured by the caller. |
-| `http_client=` or `transport=`, mutually exclusive | One builder with two terminal methods: `build()` gives the default transport, `build_with_service(s)` a custom one; `add_root_certificate`, `http_version` and `connect_timeout` are a `Config` error with a custom one | A client needs a key and a base URL whatever sends the bytes; a setting that cannot apply is refused, never ignored. |
+| `http_client=` or `transport=`, mutually exclusive | One builder with two terminal methods: `build()` needs the `hyper` feature (on by default) and gives the default transport, `build_with_service(s)` a custom one; `add_root_certificate`, `http_version` and `connect_timeout` are a `Config` error with a custom one | A client needs a key and a base URL whatever sends the bytes; a setting that cannot apply is refused, never ignored. |
 | `.nouls` / `.choices` / `.scores` as cached dict copies | Iterators that filter without copying | Nothing to cache and nothing to leave out of serialization. |
 | Covariant `Mapping` question inputs | The `Questions` builder | Generics take any string type and any iterator of options or levels. |
 | `close()`, context managers, closing a supplied client | `Drop`; a supplied service is owned by value and dropped with the last clone of the client | Ownership replaces lifecycle calls. |

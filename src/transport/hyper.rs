@@ -50,6 +50,7 @@ const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// URL and [`Auto`](HttpVersion::Auto) for an `http` one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
 pub enum HttpVersion {
     /// HTTP/2 only: negotiated through TLS ALPN on `https`, and spoken with
     /// prior knowledge (h2c) on `http`.
@@ -80,6 +81,7 @@ pub(crate) struct TransportSettings {
 ///
 /// Cloning it shares the connection pool.
 #[derive(Clone)]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
 pub struct HyperTransport {
     client: legacy::Client<HttpsConnector<HttpConnector>, Body>,
     version: HttpVersion,
@@ -170,6 +172,7 @@ impl Service<Request<Body>> for HyperTransport {
 
 /// The response of one request sent by [`HyperTransport`].
 #[must_use = "futures do nothing unless polled"]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
 pub struct HyperResponseFuture {
     inner: legacy::ResponseFuture,
     connect_timeout: Option<Duration>,
@@ -206,6 +209,7 @@ impl Future for HyperResponseFuture {
 /// lets a response over the limit be refused before a byte of it is read.
 ///
 /// `Debug` prints no part of the body.
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
 pub struct ResponseBody(Incoming);
 
 impl fmt::Debug for ResponseBody {

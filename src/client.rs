@@ -10,13 +10,19 @@
 //! and lives as long as the client and every request built from it; `HeaderValue`
 //! is `Bytes`-backed and shared by reference count, so it cannot be zeroed on drop.
 
-use std::{ffi::OsString, fmt, sync::Arc, time::Duration};
+#[cfg(feature = "hyper")]
+use std::ffi::OsString;
+use std::{fmt, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use http::{HeaderMap, uri::Scheme};
+use http::HeaderMap;
+#[cfg(feature = "hyper")]
+use http::uri::Scheme;
 use secrecy::SecretString;
 use serde::Serialize;
 
+#[cfg(feature = "hyper")]
+use crate::transport::{HttpVersion, HyperTransport, TransportSettings};
 use crate::{
     codec,
     config::{Config, Explicit},
@@ -25,25 +31,26 @@ use crate::{
     question::PreparedQuestions,
     request::SystemOne,
     retry::RetryPolicy,
-    transport::{self, HttpService, HttpVersion, HyperTransport, TransportSettings},
+    transport::{self, HttpService},
 };
 
 /// A client of the TypeSafe API.
 ///
-/// Build one with [`Client::builder`], or with [`Client::from_env`] when the
-/// environment holds everything. Cloning a client is cheap - the settings and
+/// Build one with [`ClientBuilder::new`] and [`ClientBuilder::build_with_service`],
+/// or use `Client::builder()` / `Client::from_env()` with the `hyper` feature.
+/// Cloning a client is cheap - the settings and
 /// the transport are shared behind one reference count - so a clone per task
 /// is the way to use one from many tasks, and all of them share one
 /// connection pool.
 ///
-/// `S` is the transport. The default, [`HyperTransport`], is an HTTP/2 client
-/// over TLS; any `tower` service over `http` requests is accepted through
-/// [`ClientBuilder::build_with_service`].
+/// `S` is the transport. With the `hyper` feature its default is
+/// `HyperTransport`, an HTTP/2 client over TLS; any `tower` service over
+/// `http` requests is accepted through [`ClientBuilder::build_with_service`].
 ///
 /// Every request runs on the caller's Tokio runtime, which needs its time
 /// driver enabled: each attempt has a deadline, and HTTP/2 keep-alive pings
 /// run on a timer.
-pub struct Client<S = HyperTransport> {
+pub struct Client<#[cfg(feature = "hyper")] S = HyperTransport, #[cfg(not(feature = "hyper"))] S> {
     shared: Arc<Shared<S>>,
 }
 
@@ -80,6 +87,8 @@ impl<S: fmt::Debug> fmt::Debug for Client<S> {
     }
 }
 
+#[cfg(feature = "hyper")]
+#[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
 impl Client<HyperTransport> {
     /// A builder for a client; every setting it leaves unset comes from the
     /// environment, then from the SDK's default.
@@ -172,7 +181,8 @@ where
 /// back to `TYPESAFE_API_KEY`, `TYPESAFE_BASE_URL` and
 /// `TYPESAFE_DEFAULT_MODEL`, then to the SDK's defaults (no key, which fails;
 /// `https://api.typesafe.ai`; `jev-latest`). The methods never fail: what
-/// they are given is checked by [`build`](ClientBuilder::build).
+/// they are given is checked by `build()` (with the `hyper` feature) or
+/// [`build_with_service`](ClientBuilder::build_with_service).
 #[derive(Default)]
 pub struct ClientBuilder {
     api_key: Option<SecretString>,
@@ -182,8 +192,11 @@ pub struct ClientBuilder {
     timeout: Option<Option<Duration>>,
     default_headers: Vec<(String, String)>,
     max_response_bytes: Option<usize>,
+    #[cfg(feature = "hyper")]
     extra_roots: Vec<Vec<u8>>,
+    #[cfg(feature = "hyper")]
     http_version: Option<HttpVersion>,
+    #[cfg(feature = "hyper")]
     connect_timeout: Option<Duration>,
     retry: Option<RetryPolicy>,
     user_agent_product: Option<String>,
@@ -194,6 +207,15 @@ pub struct ClientBuilder {
 }
 
 impl ClientBuilder {
+    /// A builder with no explicit settings, as [`Default`] also gives.
+    ///
+    /// Use [`build_with_service`](Self::build_with_service) with a custom
+    /// transport, or `build()` with the `hyper` feature.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// The API key. It is sent as `Authorization: Bearer <key>` and is
     /// printed nowhere. Leading and trailing whitespace is stripped; an empty
     /// key, internal whitespace, control and non-ASCII characters are refused.
@@ -266,7 +288,7 @@ impl ClientBuilder {
     /// base URL's authority is outside RFC 9113 (section 8.3.1), and a
     /// conforming server may refuse the request as malformed. A caller that
     /// needs another `Host` routes by the base URL instead, or speaks
-    /// HTTP/1.1: [`HttpVersion::Auto`] does on an `http` base URL, and on an
+    /// HTTP/1.1: `HttpVersion::Auto` (with the `hyper` feature) does on an `http` base URL, and on an
     /// `https` one only when the server picks HTTP/1.1 through ALPN. A later
     /// call with the same name replaces an earlier one.
     ///
@@ -297,6 +319,8 @@ impl ClientBuilder {
     /// The default transport only; see
     /// [`build_with_service`](Self::build_with_service).
     #[must_use]
+    #[cfg(feature = "hyper")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
     pub fn add_root_certificate(mut self, der: impl Into<Vec<u8>>) -> Self {
         self.extra_roots.push(der.into());
         self
@@ -309,6 +333,8 @@ impl ClientBuilder {
     /// The default transport only; see
     /// [`build_with_service`](Self::build_with_service).
     #[must_use]
+    #[cfg(feature = "hyper")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
     pub fn http_version(mut self, version: HttpVersion) -> Self {
         self.http_version = Some(version);
         self
@@ -321,6 +347,8 @@ impl ClientBuilder {
     /// The default transport only; see
     /// [`build_with_service`](Self::build_with_service).
     #[must_use]
+    #[cfg(feature = "hyper")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = Some(timeout);
         self
@@ -351,7 +379,8 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// This method never fails. A product that breaks those rules makes
-    /// [`build`](Self::build) and [`build_with_service`](Self::build_with_service)
+    /// `build()` (with the `hyper` feature) and
+    /// [`build_with_service`](Self::build_with_service)
     /// return an [`ErrorKind::Config`](crate::ErrorKind::Config) error naming
     /// the rule, before anything is sent.
     ///
@@ -446,6 +475,8 @@ impl ClientBuilder {
     /// when the certificate verifier cannot be built, for an added root that
     /// is not a certificate among other causes. No message repeats the key, a
     /// header value or the URL.
+    #[cfg(feature = "hyper")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "hyper")))]
     pub fn build(self) -> Result<Client<HyperTransport>, Error> {
         self.build_with_env(|name: &str| std::env::var_os(name))
     }
@@ -478,49 +509,57 @@ impl ClientBuilder {
     ///
     /// # Errors
     ///
-    /// Everything [`build`](Self::build) refuses except the certificate
-    /// verifier, and, as a config error, any of
-    /// [`add_root_certificate`](Self::add_root_certificate),
-    /// [`http_version`](Self::http_version) and
-    /// [`connect_timeout`](Self::connect_timeout): they configure the default
+    /// A config error for missing or invalid settings, as `build()` (with the
+    /// `hyper` feature) reports, except that no certificate verifier is built.
+    /// With `hyper`, `add_root_certificate`, `http_version` and
+    /// `connect_timeout` are also config errors: they configure the default
     /// transport, which this client does not have, and are refused rather
     /// than ignored.
     pub fn build_with_service<S>(self, service: S) -> Result<Client<S>, Error>
     where
         S: HttpService,
     {
-        let mut unused = Vec::new();
-        if !self.extra_roots.is_empty() {
-            unused.push("add_root_certificate");
+        #[cfg(feature = "hyper")]
+        {
+            let mut unused = Vec::new();
+            if !self.extra_roots.is_empty() {
+                unused.push("add_root_certificate");
+            }
+            if self.http_version.is_some() {
+                unused.push("http_version");
+            }
+            if self.connect_timeout.is_some() {
+                unused.push("connect_timeout");
+            }
+            if !unused.is_empty() {
+                let verb = if unused.len() == 1 { "configures" } else { "configure" };
+                return Err(Error::config(format!(
+                    "{} {verb} the default transport, and a client built with \
+                     build_with_service has a transport of its own.",
+                    unused.join(", ")
+                )));
+            }
         }
-        if self.http_version.is_some() {
-            unused.push("http_version");
-        }
-        if self.connect_timeout.is_some() {
-            unused.push("connect_timeout");
-        }
-        if !unused.is_empty() {
-            let verb = if unused.len() == 1 { "configures" } else { "configure" };
-            return Err(Error::config(format!(
-                "{} {verb} the default transport, and a client built with \
-                 build_with_service has a transport of its own.",
-                unused.join(", ")
-            )));
-        }
-        let (explicit, _, retry) = self.split()?;
+        let (explicit, retry) = self.split()?;
         let config = Config::resolve(explicit, |name: &str| std::env::var_os(name))?;
         Ok(Client::assemble(config, retry, service))
     }
 
     /// [`build`](Self::build) with the environment read through `env`.
+    #[cfg(feature = "hyper")]
     pub(crate) fn build_with_env<V>(
-        self,
+        mut self,
         env: impl Fn(&str) -> Option<V>,
     ) -> Result<Client<HyperTransport>, Error>
     where
         V: Into<OsString>,
     {
-        let (explicit, transport, retry) = self.split()?;
+        let transport = TransportChoices {
+            version: self.http_version,
+            extra_roots: std::mem::take(&mut self.extra_roots),
+            connect_timeout: self.connect_timeout,
+        };
+        let (explicit, retry) = self.split()?;
         let config = Config::resolve(explicit, env)?;
         let https = config.endpoints().system_one().scheme() == Some(&Scheme::HTTPS);
         let settings = TransportSettings {
@@ -535,10 +574,9 @@ impl ClientBuilder {
         Ok(Client::assemble(config, retry, HyperTransport::new(settings)?))
     }
 
-    /// Checks what only the builder can check and separates the settings of
-    /// the configuration from those of the default transport and the retry
-    /// policy.
-    fn split(self) -> Result<(Explicit, TransportChoices, RetryPolicy), Error> {
+    /// Checks what only the builder can check and separates the configuration
+    /// from the retry policy.
+    fn split(self) -> Result<(Explicit, RetryPolicy), Error> {
         let Self {
             api_key,
             base_url,
@@ -546,8 +584,11 @@ impl ClientBuilder {
             timeout,
             default_headers,
             max_response_bytes,
-            extra_roots,
-            http_version,
+            #[cfg(feature = "hyper")]
+                extra_roots: _,
+            #[cfg(feature = "hyper")]
+                http_version: _,
+            #[cfg(feature = "hyper")]
             connect_timeout,
             retry,
             user_agent_product,
@@ -555,6 +596,7 @@ impl ClientBuilder {
             omit_endpoint_host,
         } = self;
 
+        #[cfg(feature = "hyper")]
         if connect_timeout.is_some_and(|timeout| timeout.is_zero()) {
             return Err(Error::config("connect_timeout must be a positive number of seconds."));
         }
@@ -576,16 +618,13 @@ impl ClientBuilder {
             omit_runtime_header,
             omit_endpoint_host,
         };
-        Ok((
-            explicit,
-            TransportChoices { version: http_version, extra_roots, connect_timeout },
-            retry.unwrap_or_default(),
-        ))
+        Ok((explicit, retry.unwrap_or_default()))
     }
 }
 
 /// The builder's settings for the default transport, before the base URL
 /// decides the default version.
+#[cfg(feature = "hyper")]
 struct TransportChoices {
     version: Option<HttpVersion>,
     extra_roots: Vec<Vec<u8>>,
@@ -595,7 +634,7 @@ struct TransportChoices {
 impl fmt::Debug for ClientBuilder {
     /// What was set, without the key, without header values, and with the
     /// roots as a count. The base URL is shown only once it has passed the
-    /// checks [`build`](ClientBuilder::build) runs, and then as its endpoints,
+    /// checks `build()` runs, and then as its endpoints,
     /// the way an error names them: a URL that failed them may still hold
     /// userinfo. A retry policy, a `User-Agent` product and a runtime header
     /// switched off are shown when they were set; the product is quoted and
@@ -616,7 +655,9 @@ impl fmt::Debug for ClientBuilder {
                 "default_headers",
                 &self.default_headers.iter().map(|(name, _)| name).collect::<Vec<_>>(),
             )
-            .field("max_response_bytes", &self.max_response_bytes)
+            .field("max_response_bytes", &self.max_response_bytes);
+        #[cfg(feature = "hyper")]
+        shown
             .field("extra_roots", &self.extra_roots.len())
             .field("http_version", &self.http_version)
             .field("connect_timeout", &self.connect_timeout);

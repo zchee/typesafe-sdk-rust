@@ -4,6 +4,7 @@
 use std::{error::Error as StdError, io};
 
 use http::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
+#[cfg(feature = "hyper")]
 use test_support::{Protocol, TestServer};
 
 use super::*;
@@ -246,6 +247,7 @@ fn a_call_header_that_cannot_be_sent_is_refused_without_its_value() {
 // ------------------------------------------------------------ one attempt
 
 /// Answers every request with `200 {}`.
+#[cfg(feature = "hyper")]
 async fn empty_object_server(protocol: Protocol) -> TestServer {
     TestServer::start(protocol, |_| async {
         http::Response::new(http_body_util::Full::new(Bytes::from_static(b"{}")))
@@ -254,6 +256,7 @@ async fn empty_object_server(protocol: Protocol) -> TestServer {
     .expect("the test server starts")
 }
 
+#[cfg(feature = "hyper")]
 #[tokio::test]
 async fn the_retry_count_is_sent_from_the_second_attempt_on_and_never_taken_from_a_caller() {
     let server = empty_object_server(Protocol::Http1).await;

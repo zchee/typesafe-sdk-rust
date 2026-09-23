@@ -30,7 +30,7 @@ use std::{
 use bytes::Bytes;
 use http::{Request, Response};
 use tower_service::Service;
-use typesafe_sdk::{Body, Client, Noul, PreparedQuestions, Questions, Score};
+use typesafe_sdk::{Body, ClientBuilder, Noul, PreparedQuestions, Questions, Score};
 
 // A plain wrapper type, so declaring it as the global allocator stays safe
 // code even though the crate under test forbids `unsafe`.
@@ -115,7 +115,7 @@ fn a_large_score_asked_does_not_multiply_what_small_answers_keep() {
         .build()
         .expect("the runtime builds");
     let body = flood_body();
-    let client = Client::builder()
+    let client = ClientBuilder::new()
         .api_key("test-key")
         .base_url("http://127.0.0.1:9")
         .default_model("jev-latest")

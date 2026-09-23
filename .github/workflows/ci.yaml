@@ -83,13 +83,16 @@ jobs:
       # feature, or only from tests, is dead in this build, and the run above
       # cannot see that: every feature is on there.
       - name: Lints without default features
-        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --workspace --exclude typesafe-sdk-rust-live-tests --all-targets --no-default-features -- -D warnings
 
       # No `--workspace`: this one runs code. A crate whose tests need a live
       # API key is a workspace member and not a default member, so the default
       # selection is the one that can never reach it.
       - name: Tests
         run: cargo nextest run --all-features
+
+      - name: Tests without default features
+        run: cargo nextest run --no-default-features
 
       # The same tests under libtest, which runs the tests of one binary as
       # threads of one process where nextest gives each its own: state that
@@ -144,6 +147,11 @@ jobs:
       # review. Denying rustdoc's warnings is what turns that into a failure.
       - name: Documentation
         run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Documentation without default features
+        run: cargo doc --no-deps --no-default-features -p typesafe-sdk-rust
         env:
           RUSTDOCFLAGS: -D warnings
 
