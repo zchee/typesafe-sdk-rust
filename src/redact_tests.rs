@@ -188,6 +188,20 @@ fn every_escaped_form_of_a_credential_is_replaced() {
         assert_no_variant(&error, &credentials);
     }
 
+    // A link whose derived `Debug` prints a `String` field that already holds
+    // an escaped form escapes it a second time; that form is replaced too.
+    let map = headers(&[("x-api-key", credential)]);
+    let credentials = Credentials::new(&map);
+    let held = format!("{credential:?}");
+    let chain = Link::new("wrapped", &format!("Wrapped {{ text: {held:?} }}"), "Wrapped", None);
+    let error = failed(chain, &map, &[]);
+    assert_eq!(
+        format!("{error:?}").matches(r#"Wrapped { text: "\"***\"" }"#).count(),
+        1,
+        "{error:?}"
+    );
+    assert_no_variant(&error, &credentials);
+
     // Each chain is replaced because a link's `{:?}` names a credential; the
     // message is built from the copy's `Display`, where the escaping spells
     // one: `a\` and `tb` across the escaped tab, `x: y` across the joiner.

@@ -50,7 +50,10 @@ pub(crate) fn is_secret(name: &HeaderName, value: &HeaderValue) -> bool {
 /// split as Python's `str.split(maxsplit=1)` splits it. Empty values are
 /// skipped. Each credential is looked for as it is and as `{:?}` of a `str`,
 /// `str::escape_debug`, `{:?}` of an `http::HeaderValue`, `{:?}` of a
-/// `bytes::Bytes` and a JSON string write it, each without its quotes.
+/// `bytes::Bytes` and a JSON string write it, each without its quotes. Each
+/// of those forms is also looked for as `{:?}` of a `str` writes it once
+/// more, without the quotes: that is how a derived `Debug` prints a `String`
+/// field that already holds an escaped form.
 ///
 /// The matcher is a plain left-to-right scan that tries the longest form
 /// first, as the Python SDK's regular expression alternation does.
@@ -164,7 +167,14 @@ fn push_variants(variants: &mut Vec<String>, bytes: &[u8]) {
         unquote(&bytes_debug, "b\"").to_owned(),
         json_escape(&text),
     ];
-    variants.extend(forms.into_iter().filter(|form| !form.is_empty()));
+    // A second level: a `String` holding one of the forms above, printed by
+    // a derived `Debug`, escapes it once more. Duplicates of a first-level
+    // form are removed with the rest in `Credentials::new`.
+    let escaped_again = forms.each_ref().map(|form| {
+        let quoted = format!("{form:?}");
+        unquote(&quoted, "\"").to_owned()
+    });
+    variants.extend(forms.into_iter().chain(escaped_again).filter(|form| !form.is_empty()));
 }
 
 /// `text` without the `open` it starts with and the `"` it ends with.

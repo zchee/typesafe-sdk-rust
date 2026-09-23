@@ -420,7 +420,9 @@ impl ClientBuilder {
     /// `proxy-authorization`, `x-api-key`, `api-key`, `cookie`, `set-cookie`,
     /// or any name containing `token` or `secret`) or that is flagged
     /// sensitive, as it is, as `{:?}` of a `str`, `str::escape_debug`, `{:?}`
-    /// of a `HeaderValue` and of `Bytes`, and a JSON string write it. When
+    /// of a `HeaderValue` and of `Bytes`, and a JSON string write it, and each
+    /// of those escaped once more as `{:?}` of a `str` writes it, which is how
+    /// a derived `Debug` prints a `String` field holding one. When
     /// any of those occurs in the error's `Display`, `{:?}` or `{:#?}`, or in
     /// any error below it, the [`source`](std::error::Error::source) is a
     /// redacted copy that cannot be downcast. The message is redacted after

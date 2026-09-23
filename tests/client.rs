@@ -862,20 +862,30 @@ const PROVIDER_SECRET: &str = "provider-credential";
 
 /// Every form in which `secret` could be printed: as it is, and as `{:?}` of
 /// a `str`, `escape_debug`, `{:?}` of a `HeaderValue` and of `Bytes`, and a
-/// JSON string write it, without their quotes.
+/// JSON string write it, without their quotes; and each of those once more
+/// as `{:?}` of a `str` writes it, as a derived `Debug` prints a `String`
+/// field holding it.
 fn printed_forms(secret: &str) -> Vec<String> {
     let debug = format!("{secret:?}");
     let header = format!("{:?}", http::HeaderValue::from_str(secret).expect("a header value"));
     let bytes = format!("{:?}", Bytes::copy_from_slice(secret.as_bytes()));
     let json = serde_json::to_string(secret).expect("a string encodes");
-    vec![
+    let forms = vec![
         secret.to_owned(),
         debug[1..debug.len() - 1].to_owned(),
         secret.escape_debug().to_string(),
         header[1..header.len() - 1].to_owned(),
         bytes[2..bytes.len() - 1].to_owned(),
         json[1..json.len() - 1].to_owned(),
-    ]
+    ];
+    let again: Vec<String> = forms
+        .iter()
+        .map(|form| {
+            let quoted = format!("{form:?}");
+            quoted[1..quoted.len() - 1].to_owned()
+        })
+        .collect();
+    forms.into_iter().chain(again).collect()
 }
 
 /// Every rendering of `error` a caller can reach: `Display`, `{:?}` and
@@ -997,21 +1007,24 @@ async fn transport_errors_never_expose_a_credential() {
                             shown.contains("Rejected authorization: ***; provider: ***"),
                             "{case}: the redacted detail in {shown}"
                         );
+                        assert!(
+                            shown.contains(concat!(
+                                r#"detail: "Illegal header value b\"***\": "#,
+                                r#"Rejected authorization: ***; provider: ***""#,
+                            )),
+                            "{case}: the whole detail redacted in {shown}"
+                        );
                         // The detail is printed through `{:?}` a second time, so
                         // the `Bytes` form of the `Authorization` value is escaped
-                        // twice. A form escaped twice is not one the SDK looks for:
-                        // a credential without a quote or a backslash reads the same
-                        // and is replaced, the other one is left escaped twice.
-                        let twice = if credential == "ts_live_private" {
-                            r#"b\"***\""#.to_owned()
-                        } else {
-                            format!(
-                                "{:?}",
-                                format!("{:?}", Bytes::from(format!("Bearer {credential}")))
-                            )
-                        };
+                        // twice; that form must be gone from both renderings.
+                        let twice = format!(
+                            "{:?}",
+                            format!("{:?}", Bytes::from(format!("Bearer {credential}")))
+                        );
                         let twice = twice.trim_matches('"');
-                        assert!(shown.contains(twice), "{case}: {twice} in {shown}");
+                        for rendering in [&debug, &alternate] {
+                            assert!(!rendering.contains(twice), "{case}: {twice} in {rendering}");
+                        }
                     }
                 }
                 let top = error.source().unwrap_or_else(|| panic!("{case}: a cause: {error:?}"));
