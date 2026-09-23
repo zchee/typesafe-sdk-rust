@@ -22,7 +22,7 @@ TOOLING_FILES = (
 
 
 def summary(
-    rows: int = 121, rust: int = 88, deviation: int = 15, excluded: int = 18
+    rows: int = 129, rust: int = 94, deviation: int = 17, excluded: int = 18
 ) -> str:
     """The checker's closing line for the given tallies.
 
@@ -36,7 +36,7 @@ def summary(
         The summary line, without its line feed.
     """
     return (
-        f"{rows} rows for 121 upstream tests in 15 files: {rust} to Rust tests, "
+        f"{rows} rows for 129 upstream tests in 15 files: {rust} to Rust tests, "
         f"{deviation} to deviations, {excluded} excluded as Python tooling"
     )
 
@@ -241,7 +241,7 @@ def test_functional_row_moved_to_excluded_fails(run: Run, repository: Path) -> N
                 f"but {CLIENTS} is not a tooling file ({TOOLING_FILES})"
             )
         ],
-        summary(rust=87, excluded=19),
+        summary(rust=93, excluded=19),
     )
 
 
@@ -312,7 +312,7 @@ def test_emptied_target_fails(run: Run, repository: Path) -> None:
                 "0 deviation / 0 excluded, the rows give 21 / 20 / 0 / 0"
             ),
         ],
-        summary(rust=87),
+        summary(rust=93),
     )
 
 
@@ -329,7 +329,7 @@ def test_deleted_row_fails(run: Run) -> None:
             ),
             f"{MATRIX}: upstream tests/test_clients.py::test_error_mapping has no row",
         ],
-        summary(rows=120, rust=87),
+        summary(rows=128, rust=93),
     )
 
 
@@ -349,7 +349,7 @@ def test_deleted_row_with_its_count_lowered_fails(run: Run) -> None:
     assert status == 1
     assert out == failed(
         [f"{MATRIX}: upstream tests/test_clients.py::test_error_mapping has no row"],
-        summary(rows=120, rust=87),
+        summary(rows=128, rust=93),
     )
 
 
@@ -358,8 +358,8 @@ def test_wrong_count_fails(run: Run) -> None:
     status, out = run(
         lambda text: replace_once(
             text,
-            "| `tests/test_config.py` | 8 | 5 | 3 | 0 |",
-            "| `tests/test_config.py` | 9 | 5 | 3 | 0 |",
+            "| `tests/test_config.py` | 11 | 8 | 3 | 0 |",
+            "| `tests/test_config.py` | 12 | 8 | 3 | 0 |",
         )
     )
 
@@ -367,8 +367,8 @@ def test_wrong_count_fails(run: Run) -> None:
     assert out == failed(
         [
             (
-                f"{MATRIX}: tests/test_config.py states 9 functions / 5 Rust / "
-                "3 deviation / 0 excluded, the rows give 8 / 5 / 3 / 0"
+                f"{MATRIX}: tests/test_config.py states 12 functions / 8 Rust / "
+                "3 deviation / 0 excluded, the rows give 11 / 8 / 3 / 0"
             ),
         ],
         summary(),

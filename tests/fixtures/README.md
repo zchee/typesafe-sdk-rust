@@ -1,7 +1,7 @@
 # Response fixtures
 
-Response bodies taken from the upstream Python SDK's tests (`typesafe-ai/typesafe-sdk-python`, tag `v0.7.0`, commit
-`2ce5c65`), written as the compact JSON its test transport sends.
+Response bodies taken from the upstream Python SDK's tests (`typesafe-ai/typesafe-sdk-python`, tag `v0.7.1`, commit
+`0ffd094`), written as the compact JSON its test transport sends.
 
 | File | Upstream source |
 | --- | --- |

@@ -1,8 +1,8 @@
 # Upstream test matrix
 
 Every test function of the Python SDK's `tests/test_*.py`
-([typesafe-sdk-python](https://github.com/typesafe-ai/typesafe-sdk-python) 0.7.0, commit
-`2ce5c65`) and where its behaviour is covered here: a Rust test that exists in this repository,
+([typesafe-sdk-python](https://github.com/typesafe-ai/typesafe-sdk-python) 0.7.1, commit
+`0ffd094`) and where its behaviour is covered here: a Rust test that exists in this repository,
 named `path::function`, or a row of the deviations table in [`README.md`](../README.md), quoted
 by its first cell; a test of the Python repository's own tooling is listed as excluded, with its
 reason. `.github/scripts/port-test-matrix.py` checks every row; its docstring lists the checks.
@@ -22,10 +22,10 @@ Each of their functions is listed, with the file's reason, in the last section,
 | Upstream file | Functions | Rust test | Deviation row | Excluded |
 | --- | ---: | ---: | ---: | ---: |
 | `tests/test_clients.py` | 21 | 21 | 0 | 0 |
-| `tests/test_config.py` | 8 | 5 | 3 | 0 |
+| `tests/test_config.py` | 11 | 8 | 3 | 0 |
 | `tests/test_errors.py` | 6 | 4 | 2 | 0 |
 | `tests/test_integration.py` | 3 | 3 | 0 | 0 |
-| `tests/test_logging.py` | 3 | 2 | 1 | 0 |
+| `tests/test_logging.py` | 8 | 5 | 3 | 0 |
 | `tests/test_pydantic_response_models.py` | 5 | 5 | 0 | 0 |
 | `tests/test_questions.py` | 11 | 7 | 4 | 0 |
 | `tests/test_responses.py` | 15 | 11 | 4 | 0 |
@@ -53,7 +53,7 @@ Each of their functions is listed, with the file's reason, in the last section,
 | `test_validation_before_network` | 4 | `tests/client.rs::validation_before_network`, `src/question_tests.rs::an_empty_set_is_rejected` |
 | `test_error_mapping` | 22 | `tests/client.rs::error_mapping` |
 | `test_error_messages` | 16 | `tests/client.rs::error_messages`, `tests/client.rs::server_text_in_an_api_error_is_escaped_and_cut` |
-| `test_transport_errors` | 10 | `tests/client.rs::transport_errors_are_connection_errors_with_their_cause`, `tests/client.rs::an_attempt_past_its_deadline_is_a_timeout_with_that_deadline` |
+| `test_transport_errors` | 12 | `tests/client.rs::transport_errors_are_connection_errors_with_their_cause`, `tests/client.rs::an_attempt_past_its_deadline_is_a_timeout_with_that_deadline` |
 | `test_system_one_timeout_override` | 8 | `tests/client.rs::system_one_timeout_override` |
 | `test_headers_timeout_and_logging` | 2 | `tests/client.rs::headers_timeout_and_logging`, `tests/client.rs::the_upstream_base_url_with_a_prefix_and_trailing_slashes` |
 | `test_http_client_settings` | 2 | `tests/client.rs::a_custom_transport_carries_every_request_with_the_sdk_headers` |
@@ -71,6 +71,9 @@ Each of their functions is listed, with the file's reason, in the last section,
 | `test_model_override` | 4 | `src/request_tests.rs::the_body_is_state_model_and_questions_in_that_order`, `src/config_tests.rs::each_setting_comes_from_the_caller_then_the_environment_then_the_default` |
 | `test_resolution` | 6 | `src/config_tests.rs::each_setting_comes_from_the_caller_then_the_environment_then_the_default`, `src/client_tests.rs::settings_the_builder_leaves_unset_come_from_the_environment` |
 | `test_missing_key` | 6 | `src/config_tests.rs::a_missing_or_blank_environment_key_is_the_upstream_error` |
+| `test_api_key_whitespace` | 16 | `src/config_tests.rs::a_padded_key_is_trimmed_as_python_strips_it_from_either_source` |
+| `test_invalid_explicit_key_does_not_fall_back_to_env` | 8 | `src/config_tests.rs::an_invalid_explicit_key_does_not_fall_back_to_the_environment` |
+| `test_invalid_api_key` | 32 | `src/config_tests.rs::a_key_outside_printable_ascii_is_refused_without_repeating_it` |
 | `test_empty_env_unset` | 2 | `src/config_tests.rs::blank_environment_values_count_as_unset_and_the_log_level_is_never_read` |
 | `test_invalid_timeout` | 8 | `src/config_tests.rs::a_zero_timeout_is_the_upstream_error_and_any_positive_one_is_kept`, `src/request_tests.rs::a_deadline_is_the_clients_a_calls_or_none_and_never_zero` |
 | `test_timeout_object` | 2 | Deviation: "Timeout per httpx phase; `httpx.Timeout` objects" |
@@ -100,6 +103,11 @@ Each of their functions is listed, with the file's reason, in the last section,
 | Upstream test | Cases | Covered by |
 | --- | ---: | --- |
 | `test_secret_headers_redacted` | 54 | `tests/client.rs::every_secret_header_spelling_is_redacted_both_ways`, `src/telemetry_tests.rs::every_upstream_secret_header_is_redacted_and_its_neighbour_is_not` |
+| `test_transport_errors_do_not_expose_credentials` | 40 | `tests/client.rs::transport_errors_never_expose_a_credential`, `tests/client.rs::transport_errors_never_log_a_credential` |
+| `test_exception_redaction_escaped_values` | 4 | `src/redact_tests.rs::every_escaped_form_of_a_credential_is_replaced` |
+| `test_exception_redaction_shared_causes_cycles_and_notes` | 1 | Deviation: "Redacted exception copies keep their type, `__notes__`, `__context__` and shared or cyclic causes" |
+| `test_exception_redaction_structured_constructor` | 1 | Deviation: "Redacted exception copies keep their type, `__notes__`, `__context__` and shared or cyclic causes" |
+| `test_exception_redaction_preserves_network_diagnostics` | 1 | `src/redact_tests.rs::a_chain_without_a_credential_is_kept_as_it_is` |
 | `test_logger_level_controls_output` | 6 | `tests/client.rs::every_attempt_gets_one_info_line_and_no_body_reaches_info_or_debug` |
 | `test_setup_logging_from_env` | 5 | Deviation: "`TYPESAFE_LOG_LEVEL` sets the logger level" |
 
@@ -161,7 +169,7 @@ Each of their functions is listed, with the file's reason, in the last section,
 | `test_retry_policy_timeout_budget` | 24 | `src/retry_tests.rs::the_budget_stops_retrying_as_upstream_test_retry_policy_timeout_budget` |
 | `test_retry_policy_timeout_override` | 4 | `src/retry_tests.rs::a_calls_budget_replaces_the_clients_as_upstream_test_retry_policy_timeout_override` |
 | `test_default_retry_statuses` | 24 | `src/retry_tests.rs::the_default_statuses_are_retried_as_upstream_test_default_retry_statuses` |
-| `test_connection_retry_recovers` | 6 | `src/retry_tests.rs::a_transport_failure_is_retried_as_upstream_test_connection_retry_recovers`, `src/retry_tests.rs::a_timeout_is_retried_as_upstream_test_connection_retry_recovers` |
+| `test_connection_retry_recovers` | 8 | `src/retry_tests.rs::a_transport_failure_is_retried_as_upstream_test_connection_retry_recovers`, `src/retry_tests.rs::a_timeout_is_retried_as_upstream_test_connection_retry_recovers`, `src/retry_tests.rs::a_failure_before_sending_is_retried_as_upstream_test_connection_retry_recovers` |
 | `test_server_delay_through_tenacity` | 8 | `src/retry_tests.rs::the_servers_delay_is_waited_as_upstream_test_server_delay_through_tenacity` |
 | `test_parse_retry_after` | 9 | `src/error_tests.rs::retry_after_reproduces_every_case_the_python_sdk_pins`, `src/error_tests.rs::retry_after_reads_an_http_date_against_the_instant_it_is_given` |
 | `test_backoff_dates_cap_and_jitter` | 1 | `src/retry_tests.rs::delays_follow_upstream_test_backoff_dates_cap_and_jitter`, `src/retry_tests.rs::default_schedule_doubles_then_caps_as_upstream_test_backoff_dates_cap_and_jitter` |

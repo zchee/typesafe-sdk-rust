@@ -1,6 +1,6 @@
 # Line coverage
 
-Measured at commit `4c27f80` with
+Measured at commit `5b4af27` with
 `cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85 --show-missing-lines`;
 every line number below is a line of that commit.
 
@@ -16,12 +16,12 @@ with rustc 1.98.1 and cargo-llvm-cov.
 
 | Lines | Missed | Line coverage | Regions | Missed | Functions | Missed |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4,043 | 155 | **96.17%** | 6,267 | 328 | 704 | 33 |
+| 4,282 | 151 | **96.47%** | 6,731 | 318 | 740 | 32 |
 
 A line counts as covered when any test executes it in any instantiation of the
 code it belongs to.
 
-The summary's 155 missed lines are more than the 136 this page lists because
+The summary's 151 missed lines are more than the 134 this page lists because
 llvm-cov's summary counts a line as missed when one instantiation of its
 function does not run it, even when another instantiation does, while
 `--show-missing-lines`, like this page's rule above, lists only the lines no
@@ -80,15 +80,14 @@ instantiation runs.
 | Lines | Why |
 | --- | --- |
 | 321 | A response-validation error whose headers name a delay, retried because a caller's predicate asked for it. **Cheap to cover** with a predicate test (`src/retry_tests.rs`). |
-| 662-663 | The real-clock arm of the test-only `run` (`#[cfg(test)]`): the crate's unit tests always pass a fake clock, and the integration tests run the non-test `run`, which is covered. |
 
 ### `src/telemetry.rs`
 
 | Lines | Why |
 | --- | --- |
-| 233-236 | The labels a failed-call event gives an API, response-validation, invalid-request or configuration error. The event tests assert the transport failures only. **Cheap to cover** (`src/telemetry_tests.rs`). |
-| 262 | The elapsed time of an event with no start instant (`-`). Every event the tests record has one. |
-| 324 | A logged text holding bytes that are not UTF-8, written as U+FFFD. **Cheap to cover** (`src/telemetry_tests.rs`). |
+| 234-237 | The labels a failed-call event gives an API, response-validation, invalid-request or configuration error. The event tests assert the transport failures only. **Cheap to cover** (`src/telemetry_tests.rs`). |
+| 263 | The elapsed time of an event with no start instant (`-`). Every event the tests record has one. |
+| 325 | A logged text holding bytes that are not UTF-8, written as U+FFFD. **Cheap to cover** (`src/telemetry_tests.rs`). |
 
 ### `src/transport/hyper.rs`
 

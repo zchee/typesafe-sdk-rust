@@ -72,7 +72,7 @@ EXCLUDED_FILES = frozenset(
     }
 )
 #: Every ``test_*`` function the upstream files define at the ported release
-#: (typesafe-sdk-python 2ce5c65, v0.7.0), as ``(file, name)``. Pinned so that a
+#: (typesafe-sdk-python 0ffd094, v0.7.1), as ``(file, name)``. Pinned so that a
 #: dropped, renamed or made-up row fails without an upstream checkout;
 #: ``--upstream`` checks the pin itself against a checkout.
 UPSTREAM_TESTS = frozenset(
@@ -98,8 +98,11 @@ UPSTREAM_TESTS = frozenset(
         ("tests/test_clients.py", "test_transport_errors"),
         ("tests/test_clients.py", "test_unserializable_request_body_raises"),
         ("tests/test_clients.py", "test_validation_before_network"),
+        ("tests/test_config.py", "test_api_key_whitespace"),
         ("tests/test_config.py", "test_empty_env_unset"),
         ("tests/test_config.py", "test_http_client_timeout_precedence"),
+        ("tests/test_config.py", "test_invalid_api_key"),
+        ("tests/test_config.py", "test_invalid_explicit_key_does_not_fall_back_to_env"),
         ("tests/test_config.py", "test_invalid_timeout"),
         ("tests/test_config.py", "test_missing_key"),
         ("tests/test_config.py", "test_model_override"),
@@ -117,9 +120,20 @@ UPSTREAM_TESTS = frozenset(
         ("tests/test_integration.py", "test_live_models"),
         ("tests/test_integration.py", "test_live_pydantic_response"),
         ("tests/test_integration.py", "test_live_questions"),
+        ("tests/test_logging.py", "test_exception_redaction_escaped_values"),
+        (
+            "tests/test_logging.py",
+            "test_exception_redaction_preserves_network_diagnostics",
+        ),
+        (
+            "tests/test_logging.py",
+            "test_exception_redaction_shared_causes_cycles_and_notes",
+        ),
+        ("tests/test_logging.py", "test_exception_redaction_structured_constructor"),
         ("tests/test_logging.py", "test_logger_level_controls_output"),
         ("tests/test_logging.py", "test_secret_headers_redacted"),
         ("tests/test_logging.py", "test_setup_logging_from_env"),
+        ("tests/test_logging.py", "test_transport_errors_do_not_expose_credentials"),
         ("tests/test_public_api_surface.py", "test_constructor_kwargs"),
         ("tests/test_public_api_surface.py", "test_package_exports"),
         ("tests/test_public_api_surface.py", "test_public_members"),
