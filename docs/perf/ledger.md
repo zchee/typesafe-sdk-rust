@@ -57,6 +57,8 @@ These six were established in T0.1-T0.3.
 
 ## S1 - sonic-rs semantics
 
+sonic-rs is the `sonic` feature since 0.2.0, see S7. These measurements remain the historical record.
+
 Binary: `spikes/sonic-probe`. One scenario per process run.
 
 ### S1(a) `serde_path_to_error` over `sonic_rs::Deserializer`
@@ -295,6 +297,8 @@ byte bound but still costs one block; and `curr_blocks` stays at +0 across a rea
 ---
 
 ## S6 - body encode buffer
+
+sonic-rs is the `sonic` feature since 0.2.0, see S7. The shared buffer policy is unchanged.
 
 Binary: `spikes/encode-buffer`. Body shape
 `{"state":<state>,"model":"jev-latest","questions":<297 bytes of pre-serialized JSON>}`. States: English-like text with
@@ -1404,3 +1408,172 @@ same `&str`. So a body is validated once: a `decode_seed` body was validated twi
 **Not measured.** Instruction counts on the Linux host: none were taken, and the host was retired, so CodSpeed's run is
 the Linux evidence. The expected delta is small (std's UTF-8 pass replaces sonic's for most bodies). Nor was any
 fuzzing done on x86_64, where sonic-rs picks other SIMD paths.
+
+## S7 - serde_json as the default backend
+
+Since 0.2.0, serde_json 1.0.151 is the default backend; `sonic` selects sonic-rs 0.5.10.
+The implementation measured here is `873f431`. Measurements began at 2026-09-24 03:09:13 JST
+(the measurement command's `date` output), on Darwin arm64 with rustc 1.98.1 and cargo 1.98.1.
+`RUSTFLAGS` and `TYPESAFE_API_KEY` were unset for every cargo invocation. No benchmark ran in
+parallel with these measurements, and no CPU-specific flags were used.
+
+The earlier sonic numbers in S1, S6 and Phase 5 remain unchanged as historical measurements.
+The direct-engine comparison under **sonic-rs and serde_json, no flags (`fd22977`)** is the
+existing throughput evidence, including the large-body encode advantage. No new SDK wall-clock
+or instruction-count comparison is claimed here. CodSpeed's default build now selects serde_json;
+its next default-backend result is not a like-for-like continuation of the old sonic build.
+
+### Three allocation runs per backend
+
+All five allocation tests ran three times per backend, serially. Encode, decode, call and derive
+retain their five-sample minimum after warming the identical operation; their repeated samples
+agreed. The level-hint test measures one warmed response per hinted/unhinted case in each run.
+Reproduce with the pinned toolchain and a dedicated target directory:
+
+```bash
+export CARGO_TARGET_DIR="$HOME/.cache/rust/target-main"
+for backend in sonic serde; do
+  if [ "$backend" = sonic ]; then
+    features=(--all-features)
+  else
+    features=(--features internals)
+  fi
+  for round in 1 2 3; do
+    for test in alloc_encode alloc_decode alloc_call alloc_derive alloc_level_hint; do
+      env -u RUSTFLAGS -u TYPESAFE_API_KEY cargo --config ~/.config/rust/config.dev.toml \
+        test "${features[@]}" --test "$test" -- --nocapture
+    done
+  done
+done
+```
+
+In the next table, `blocks/bytes` means the dhat allocation delta, not retained capacity.
+
+| Measurement | sonic r1 / r2 / r3 | serde_json r1 / r2 / r3 |
+| --- | --- | --- |
+| 1 KB string encode, blocks/bytes | 1/1408; 1/1408; 1/1408 | 1/1408; 1/1408; 1/1408 |
+| 64 KB string encode, blocks/bytes | 1/68608; 1/68608; 1/68608 | 1/68608; 1/68608; 1/68608 |
+| 1 MB string encode, blocks/bytes | 1/1092608; 1/1092608; 1/1092608 | 1/1092608; 1/1092608; 1/1092608 |
+| 1 MB object encode, blocks/bytes | 1/1092696; 1/1092696; 1/1092696 | 1/1092696; 1/1092696; 1/1092696 |
+| `Answers` decode, blocks/bytes | 7/578; 7/578; 7/578 | 7/578; 7/578; 7/578 |
+| Hand-written `Ticket` decode, blocks/bytes | 6/314; 6/314; 6/314 | 6/314; 6/314; 6/314 |
+| Derived `Review` decode, blocks/bytes | 6/314; 6/314; 6/314 | 6/314; 6/314; 6/314 |
+| Whole call's SDK-owned blocks, retry / no retry | 12/11; 12/11; 12/11 | 12/11; 12/11; 12/11 |
+| Derived `prepared()`, first / repeated blocks | 0/0; 0/0; 0/0 | 0/0; 0/0; 0/0 |
+| Runtime `Questions::prepare`, blocks/bytes | 3/1524; 3/1524; 3/1524 | 3/1524; 3/1524; 3/1524 |
+| Score level-hint retained-memory ratio (bound 2.0) | 1.390; 1.390; 1.390 | 1.390; 1.390; 1.390 |
+
+**The five tests' allocation budgets are equal under both backends.** No numeric budget was
+loosened and no duplicate per-backend constants are needed: decode remains 7 blocks / at most
+650 bytes (578 measured plus the existing 12.5% headroom), the struct set costs 6 blocks, and
+the SDK's own call costs at most 12 blocks or 11 without retry retention. Steady encode remains
+exactly one block and at most `1.05 * body_bytes + 4096` bytes. The level-hint bound remains 2.0.
+The naive-comparator ratio assertion remains unchanged in both ordinary backend runs.
+
+### Retained scratch and the mixed-size fixture
+
+The scratch policy is shared and unchanged: an 8 MiB retention cap, a hint that decays by
+one sixteenth per call, and one shrink to the hint when capacity exceeds eight times the hint.
+The engines reserve differently, so capacity and the call that crosses that threshold differ.
+All three runs of each backend produced these capacities:
+
+| State | sonic retained bytes | serde_json retained bytes |
+| --- | ---: | ---: |
+| 1 KB string | 6,188 | 2,304 |
+| 64 KB string | 393,260 | 73,728 |
+| 1 MB string | 6,291,500 | 1,179,648 |
+| 1 MB object | 6,291,587 | 1,179,648 |
+
+The six-fold string reservation and the roughly 1.33 MiB state threshold that exhausts the
+8 MiB cap describe sonic-rs, not serde_json. serde_json's retained buffer grows with the encoded
+body, rounded up by `Vec` growth.
+
+The mixed fixture keeps sonic's original 16 small calls and every original assertion. For
+serde_json it uses 33: **shrink at 32, steady at 33**. At call 32 the serde_json result is
+2 blocks / 139,946 bytes, with capacity and hint both 138,538; at call 33 it is back to
+1 block / 1,408 bytes, capacity 138,538 and hint 129,880. Sonic still shrinks at call 6,
+2 blocks / 743,219 bytes, capacity and hint 741,811. The different sequence lengths exercise
+the same post-shrink condition, not different allocation limits. A 16-call serde_json sequence
+correctly stays within the 8x bound but has not shrunk; ending on call 32 observes the shrink's
+extra block rather than the following steady call.
+
+Three unit fixtures also distinguish reservation behavior without changing their names or the
+production policy:
+
+| Test | sonic parameter / bound | serde_json parameter / bound |
+| --- | --- | --- |
+| `an_outlier_body_stops_pinning_the_scratch` | 16 small calls | 32 small calls |
+| `a_scratch_past_the_ceiling_is_not_kept` | 2 MiB state crosses the cap through the six-fold reserve | 8 MiB + 1 byte state crosses the cap directly |
+| `a_scratch_under_the_ceiling_is_kept` | capacity > 6 * state length, and <= 8 MiB | capacity >= encoded string length (state + 2), and <= 8 MiB |
+
+### Backend behavior and positions
+
+The codec seam is `src/codec/backend.rs`. SDK decode keeps raw wire text verbatim; a caller's
+serde_json reload renders it back to compact JSON. The synchronous `DecoderMark` is entered
+inside `decode` and `decode_seed`, spans the failure re-read, nests by counter and clears on
+unwind. It identifies an SDK decode on the current thread, not an arbitrary deserializer's type.
+
+`DecodeError` continues to expose the SDK's kind and field path without backend text. The
+512-case path comparison at the original `codec_tests.rs:382` passes through the selected
+backend's deserializer. These existing tests retain their names except the two explicitly named
+negative-zero replacements:
+
+| Case | sonic SDK build | serde_json SDK build |
+| --- | --- | --- |
+| Literal `-0.0` decoded as f64 | bits 0; `a_literal_negative_zero_loses_its_sign_with_sonic` | bits 0x8000000000000000; `a_literal_negative_zero_keeps_its_sign` |
+| `-1e-400` underflow | negative zero | negative zero |
+| Raw `-0.0` transcoded by `a_negative_zero_on_the_transcode_path_is_written_as_the_backend_reads_it` | `0.0` | `-0.0` |
+| Same codec wrapped outside the SDK encoder, field `a` | `0.0` | `-0.0` |
+| Empty raw/content input | line 1, column 1 | line 1, column 0 |
+| Derived answer set receives `[]` instead of an object | `answers`, column 79 | `answers`, column 77 |
+| Standalone answer `[1]`, read by the other engine | serde_json reference: missing `type`, column 1 | sonic reference: missing `type`, column 2 |
+| Unencodable raw-question tuple key | `Expected the key to be string/bool/number when serializing map, now is tuple` | `key must be a string` |
+| Failing foreign I/O writer | serde_json names `the sink is full` | sonic names `io error while serializing or deserializing` |
+
+Raw splicing remains byte-exact for both backends, including whitespace, order and negative zero.
+The foreign-codec tests compare the visitor message and position without sonic's appended input
+excerpt. `EncodeError::message()` remains the selected serializer's text, so its exact wording is
+asserted only under the matching feature selection.
+
+The overflow probe, run before changing differential expectations, found both engines refusing
+`1e400`, `-1e309`, `[1e400]` and `[-1e309]`. The error positions are respectively 1:5, 1:6, 1:6
+and 1:7 for both. Thus those cases remain agreement by mutual refusal, not a one-sided divergence.
+The differential suite compares against serde_json under `sonic` and sonic-rs otherwise, with
+10,000 documents and 10,000 states per run. Its negative-zero normalization follows that direction.
+
+### Unified arbitrary_precision
+
+A separate full test run enables `internals,serde_json/arbitrary_precision` and sets
+`TYPESAFE_SDK_TEST_ARBITRARY_PRECISION=1` in that command's environment only. The tests compare
+this switch with a real `1E2` parse/serialize probe: `100.0` normally, `1e+2` under the feature;
+an accidental feature unification therefore fails rather than silently changing expectations.
+
+A caller's serde_json reload keeps its scanned numeric text under this feature: `0.50` stays
+`0.50`, `1E2` becomes `1e+2`, and integer `-0` becomes `0`. The ordinary reload is canonical
+(`0.5`, `100.0`, `-0.0`). Transcoding still uses u64, i64, then finite f64: the 23-digit integer
+`12345678901234567890123` becomes `1.2345678901234568e+22` in every tested build. A non-finite
+number token is refused by the transcoder; raw rendering can preserve `1e400` as text.
+The combination of `sonic` with a caller's arbitrary_precision feature is not a tested run.
+
+Two explicit test adjustments apply only to the probed arbitrary-precision run:
+
+- The differential probe's `[1e400]` error is `Data`, not `Syntax`: the parser yields a number
+  token and the visitor rejects infinity with a custom error. Other syntax cases stay `Syntax`,
+  and none of these errors is excused by the SDK-refusal classifier.
+- The unchanged naive comparator uses an internally tagged serde derive. Its buffered floats
+  become token maps that its f64 fields cannot read, so only that comparator section and the
+  ratio-to-naive assertion are omitted, with the line
+  `naive comparator skipped: serde_json arbitrary_precision turns floats into token maps an internally tagged derive cannot read`.
+  SDK block/byte bounds, typed-set comparison and field equality remain asserted. No test is
+  ignored and the whole run still passes 495 tests; the CodSpeed comparator type is not changed.
+
+### Coverage and scope
+
+At `873f431`, the test totals are 495 with all features, 356 without defaults, 495 with internals
+and 495 with arbitrary_precision. The no-default count is 441 + 12 - 97: 97 existing tests need
+the built-in hyper transport and remain in the all-features suite, rather than being deleted.
+
+Fresh merged coverage from sonic and serde_json is **96.09%**: 4,500 lines, 176 missed;
+7,079 regions, 395 missed; 772 functions, 33 missed. Each instrumented SDK-only run passes
+449 tests. The commands and all uncovered source lines are in [`../uncovered-lines.md`](../uncovered-lines.md).
+The arbitrary-precision run is tested separately, not merged into that coverage report.

@@ -1,31 +1,38 @@
 # Line coverage
 
-Measured at commit `d4b11d4` with
-`cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85 --show-missing-lines`;
-every line number below is a line of that commit.
+Measured at commit `873f431` on 2026-09-24 with one merged report over both JSON
+backends; every line number below is a line of that commit. The measurement ran
+on macOS arm64 with rustc 1.98.1 and cargo-llvm-cov:
+
+```sh
+export CARGO_TARGET_DIR="$HOME/.cache/rust/target-main"
+export CARGO_LLVM_COV_TARGET_DIR="$CARGO_TARGET_DIR/llvm-cov"
+env -u RUSTFLAGS -u TYPESAFE_API_KEY cargo --config ~/.config/rust/config.dev.toml llvm-cov clean --workspace
+env -u RUSTFLAGS -u TYPESAFE_API_KEY cargo --config ~/.config/rust/config.dev.toml llvm-cov nextest -p typesafe-sdk-rust --all-features --no-report
+env -u RUSTFLAGS -u TYPESAFE_API_KEY cargo --config ~/.config/rust/config.dev.toml llvm-cov nextest -p typesafe-sdk-rust --features internals --no-report
+env -u RUSTFLAGS -u TYPESAFE_API_KEY cargo --config ~/.config/rust/config.dev.toml llvm-cov report --fail-under-lines 85 --show-missing-lines
+```
+
+`--all-features` selects sonic-rs; `--features internals` selects the default
+serde_json backend and keeps the allocation-test seam. Each instrumented run
+passes 449 tests of the published SDK package. The separate arbitrary-precision
+test run is not part of this coverage report.
 
 The published crate `typesafe-sdk-rust` is held to 85% line coverage by CI's
-`coverage` job. This page records the measured total and every line the tests
-do not reach, with the reason it is not reached.
-
-The CI form (`.github/workflows/ci.yaml`, job `coverage`) is the same command
-without `--show-missing-lines`. The list below was measured on macOS arm64
-with rustc 1.98.1 and cargo-llvm-cov.
+`coverage` job. CI uses the same clean/two-runs/report sequence without
+`--show-missing-lines` or the local target-directory configuration.
 
 ## Total
 
 | Lines | Missed | Line coverage | Regions | Missed | Functions | Missed |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4,290 | 151 | **96.48%** | 6,752 | 318 | 741 | 32 |
+| 4,500 | 176 | **96.09%** | 7,079 | 395 | 772 | 33 |
 
-A line counts as covered when any test executes it in any instantiation of the
-code it belongs to.
-
-The summary's 151 missed lines are more than the 134 this page lists because
-llvm-cov's summary counts a line as missed when one instantiation of its
-function does not run it, even when another instantiation does, while
-`--show-missing-lines`, like this page's rule above, lists only the lines no
-instantiation runs.
+A line counts as covered here when any test executes it in any instantiation.
+The summary reports 176 missed lines; `--show-missing-lines` lists 139 distinct
+source lines that no instantiation reaches. The two counts use different
+aggregation over instantiated code. `src/codec/backend.rs` is fully covered in
+the merged report (14 lines); neither backend is represented only by the other.
 
 ## Uncovered lines
 
@@ -35,63 +42,70 @@ instantiation runs.
 
 | Lines | Why |
 | --- | --- |
-| 50-52, 124-130, 135-141, 146-151, 161-163 | Thin wrappers that exist for the benchmarks and the fuzz targets (`check_depth`, `decode_list_models`, `api_error`, `parse_retry_after`, `backoff_seconds`). Neither the benchmarks nor the fuzz targets run under the coverage command; the code each wrapper forwards to is covered by the unit tests. |
+| 50-52, 124-130, 135-141, 146-151, 161-163 | Thin wrappers used by benchmarks and fuzz targets (`check_depth`, `decode_list_models`, `api_error`, `parse_retry_after`, `backoff_seconds`). Those targets do not run under this coverage command; the underlying code is covered by unit tests. |
 
 ### `src/client.rs`
 
 | Lines | Why |
 | --- | --- |
-| 94-96 | `Client::from_env`, one line calling `builder().build()`. Reading the process environment is tested through the injected lookup `Config::resolve` takes; a test of `from_env` itself would have to set a variable, which `std::env::set_var` makes `unsafe` in edition 2024 and the crate forbids. The live tests call the same `build()`. |
+| 107-109 | `Client::from_env`, the wrapper around `builder().build()`. Environment resolution is tested through the injected lookup; mutating the process environment is unsafe in edition 2024 and is forbidden in this crate. |
 
 ### `src/codec.rs`
 
 | Lines | Why |
 | --- | --- |
-| 468 | `Detail::Opaque`: the path-tracking pass accepted what the first pass refused. Both passes read the same text with the same type, so it is a guard against the two disagreeing, not a path any input is known to take. |
-| 529 | `Segment::Unknown`: a map key `serde_path_to_error` could not capture. No response type here has such a key. |
-| 689 | A transcode failure the parser raised rather than the target serializer. The text of a `RawJson` is one complete JSON value by construction, so the parser cannot fail on it. |
-| 719 | A `RawJson` asked to write itself twice through one splice; the SDK's encoder asks once. Defensive. |
-| 736-738, 926-928, 1066-1068, 1214-1216 | `Visitor::expecting`, which serde calls only to word a type-mismatch message. These visitors accept every JSON value, so no mismatch is reported through them. |
-| 748-750, 756-758, 780-781, 783-785, 787-788 | Transcoder arms for `i128`, `u128`, `Option` and newtype values. The transcode reads the value with the codec's `deserialize_any`, which never produces these (sonic-rs 0.5.10 `serde/de.rs`); the arms exist because a `Visitor` must answer every shape. |
-| 772-774, 776-778 | Transcoder `null` (`visit_unit`, `visit_none`). **Cheap to cover**: a `RawJson` holding `null` written through serde_json (`src/codec_tests.rs`). |
-| 958-960, 962-964, 966-968, 974-976, 982-984, 986-988, 990-992, 994-995 | `RawJson` read by a foreign deserializer that answers the raw-text request with a bare scalar instead of itself. The tests use serde_json, which hands itself over (the `visit_newtype_struct` path, covered); the `u64` and `f64` arms are reached by the existing tests. **Cheap to cover**: `bool`, `i64`, `null` the same way. `i128`/`u128` need a deserializer that produces them. |
-| 1075-1077, 1079-1081, 1087-1089, 1091-1093, 1105-1108, 1110-1112, 1114-1115, 1117-1119, 1121-1122 | `Render`, the renderer for a `RawJson` read by a foreign deserializer: negative integers, `i128`/`u128`, floats, `null`, `Option` and newtype values. serde_json produces no `i128`/`u128`/`Option`/newtype through `deserialize_any`. **Cheap to cover**: a negative integer, a float and `null` inside a `RawJson` read by serde_json. |
+| 473 | `Detail::Opaque`: the path-tracking pass accepted what the first pass refused. Both passes read the same text with the same type; no input is known to reach this defensive disagreement case. |
+| 532 | `Segment::Unknown`, a map key the path tracker could not capture. No response type here has such a key. |
+| 743 | Reusing one `Transcoder` value after its deserializer was consumed. Ordinary JSON serializers ask it to write once. Defensive. |
+| 760-762, 993-995, 1016-1018, 1243-1245, 1382-1384 | `Visitor::expecting` messages not requested by the current fixtures. **Cheap to cover** for the string/key visitors with a foreign adapter of the wrong shape. |
+| 772-774, 780-782, 796-798, 800-802, 804-805, 807-809, 811-812 | Transcoder compatibility arms for `i128`, `u128`, `Option` and newtype values. The selected JSON parser's `deserialize_any` does not produce these shapes. |
+| 834, 839, 842 | Number-token transcoding: an extra token-map entry, or token text that fits `u64`/`i64`. The synthetic tests cover a fraction, a wide integer and refusals, but not these arms. **Cheap to cover** by extending the number-token cases. |
+| 859 | Transcoding an empty object through the serde_json source. **Cheap to cover** with an empty `RawJson` object written through another serializer. |
+| 1037-1040 | Owned bare-string raw-text input. The real serde_json owned capture uses `TextSeed::visit_string`, which is covered; this compatibility arm needs a foreign string adapter. **Cheap to cover**. |
+| 1053-1055, 1057-1059, 1061-1063, 1069-1071, 1077-1079, 1081-1083, 1085-1087, 1089-1090 | Raw text requested from a foreign deserializer that directly yields `bool`, `i64`, `i128`, `u128`, `null` or `Option`. The direct `u64` and `f64` cases are covered. **Cheap to cover** for ordinary scalar adapters; 128-bit and option cases need adapters that produce them. |
+| 1123 | A second entry after the raw-value token. Real serde_json raw captures contain one entry; a foreign token-keyed map can reach this guard. **Cheap to cover**. |
+| 1252-1254, 1256-1258, 1264-1266, 1282-1285, 1287-1289, 1291-1292, 1294-1296, 1298-1299 | `Render` compatibility arms for negative integers, `i128`/`u128`, `Option` and newtypes. **Cheap to cover** for a negative integer; the other shapes need foreign adapters because JSON `deserialize_any` does not yield them. |
+
+### `src/config.rs`
+
+| Lines | Why |
+| --- | --- |
+| 252 | The resolved configuration's `Debug` field for `log_endpoint_host(false)`. The builder's field and the event output are tested, not this `Debug`. **Cheap to cover**. |
 
 ### `src/de.rs`
 
 | Lines | Why |
 | --- | --- |
-| 893, 906 | Level-keyed probabilities on a choice, or option-keyed ones on a score. Probabilities are read in the shape the answer's `type` already chose, or held raw until it is known, so the two mixed states cannot arise; the arms keep the `match` exhaustive. |
+| 893, 906 | Level-keyed probabilities on a choice, or option-keyed probabilities on a score. The answer type chooses the shape before reading it, or the members are held raw until it is known; these mixed states keep the match exhaustive. |
 
 ### `src/models.rs`
 
 | Lines | Why |
 | --- | --- |
-| 56-58 | `Debug` for the `Models` resource handle. **Cheap to cover**: `format!("{:?}", client.models())` (`src/models_tests.rs`). |
+| 56-58 | `Debug` for the `Models` resource handle. **Cheap to cover** with `format!("{:?}", client.models())`. |
 
 ### `src/name.rs`
 
 | Lines | Why |
 | --- | --- |
-| 101-103 | `visit_string`, an owned `String` from a deserializer. The codec hands names over borrowed or as `&str`, never as an owned `String`; only a foreign deserializer reaches it. |
+| 101-103 | An owned `String` supplied to `visit_string`. The JSON parsers supply borrowed text or `&str` on this path; a foreign adapter can supply an owned string. |
 
 ### `src/retry.rs`
 
 | Lines | Why |
 | --- | --- |
-| 321 | A response-validation error whose headers name a delay, retried because a caller's predicate asked for it. **Cheap to cover** with a predicate test (`src/retry_tests.rs`). |
+| 339 | A response-validation error carrying a retry delay and selected by a caller's predicate. **Cheap to cover** with a predicate test. |
 
 ### `src/telemetry.rs`
 
 | Lines | Why |
 | --- | --- |
-| 234-237 | The labels a failed-call event gives an API, response-validation, invalid-request or configuration error. The event tests assert the transport failures only. **Cheap to cover** (`src/telemetry_tests.rs`). |
-| 263 | The elapsed time of an event with no start instant (`-`). Every event the tests record has one. |
-| 325 | A logged text holding bytes that are not UTF-8, written as U+FFFD. **Cheap to cover** (`src/telemetry_tests.rs`). |
+| 278 | An event's elapsed time without a start instant (`-`). Every recorded timed event in the tests has a start. |
+| 340 | Bytes that are not UTF-8 in a logged body, rendered as U+FFFD. **Cheap to cover** with a trace-level event fixture. |
 
 ### `src/transport/hyper.rs`
 
 | Lines | Why |
 | --- | --- |
-| 179-181 | `Debug` for the default transport's response future. **Cheap to cover**. |
-| 243-245 | A connect timeout mapped to `ErrorKind::Timeout`. A loopback connection is refused or accepted at once, never left pending, so no test reaches the connect timeout; the detection it depends on is unit-tested. README's "What is not measured" lists it. |
+| 182-184 | `Debug` for the default transport's response future. **Cheap to cover**. |
+| 247-249 | A connect timeout mapped to `ErrorKind::Timeout`. Loopback connections are accepted or refused immediately, not left pending; the timeout detection is unit-tested separately. |
