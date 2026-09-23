@@ -242,14 +242,19 @@ async fn ask_twice(questions: &PreparedQuestions) -> Result<(), Error> {
     // Retried as the client's policy says.
     client.system_one("hello", questions).send().await?;
     // One attempt only; the client and its other calls keep their policy.
-    client.system_one("hello", questions).retry(RetryPolicy::default().max_retries(0)).send().await?;
+    client.system_one("hello", questions).retry(RetryPolicy::none()).send().await?;
     Ok(())
 }
 ```
 
 - A policy given to a call with `.retry()` replaces the client's for that call only.
+  `RetryPolicy::new().max_retries(0)` is the same policy as `RetryPolicy::none()`.
 - **Budget rule**: before each retry, if the time the call has already taken plus the next delay
   reaches the budget, retrying stops and the call fails with the last attempt's error, unchanged.
+  The budget is checked only before a retry and never cuts an attempt short, so a call lasts at
+  most the budget plus one per-attempt deadline; with `RetryPolicy::none()` it lasts at most one
+  per-attempt deadline. Dropping a call's future cancels the attempt in flight; the SDK spawns
+  no task of its own, so nothing is sent or retried after the drop.
   `RetryPolicy::no_timeout()` removes the budget. The budget is separate from the per-attempt
   deadline set with the client's or the call's `timeout`. Without a budget a server's
   `Retry-After` is obeyed however long it is; keep a budget, or turn `respect_retry_after` off,
@@ -287,8 +292,9 @@ Python's `str.strip()` rules), a blank one counts as unset, and one that is not 
 `Config` error naming the variable. An explicit key or default model that is blank is refused
 instead of sent. Trailing slashes come off the base URL, and a path prefix is kept
 (`https://example.test/prefix///` sends to `https://example.test/prefix/v1/systemone`). The
-per-attempt deadline runs from the first byte sent to the last byte received: a multi-megabyte
-`state` on a slow link can exceed 10 s and be retried, so raise the deadline for large states.
+per-attempt deadline covers transport readiness, connect, send and body read, including the
+caller's own pool wait and connect with a custom transport. A multi-megabyte `state` on a slow
+link can exceed 10 s and be retried, so raise the deadline for large states.
 
 The API key is sent as `Authorization: Bearer <key>` and never printed: the `Debug` output of
 the builder, the client and a request show neither the key nor any header value. Headers are

@@ -189,7 +189,7 @@ dhat = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 # `net` and `io-util` for the raw sockets the failure tests answer with.
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "test-util"] }
 # Compiles the derive's misuse cases and compares rustc's messages.
 trybuild = { workspace = true }
 # Path only, no version: cargo strips a path dev-dependency when it publishes,

@@ -218,11 +218,18 @@ impl ClientBuilder {
         self
     }
 
-    /// The deadline of each attempt, from the first byte sent to the last
-    /// byte received. The default is 10 seconds.
+    /// The deadline of each whole attempt: transport readiness, connect,
+    /// send and body read. With a custom transport it includes the caller's
+    /// own pool wait and connect. The default is 10 seconds.
     ///
     /// A large `state` on a slow link can take longer than that to upload;
     /// raise the deadline for it, or use [`no_timeout`](Self::no_timeout).
+    ///
+    /// The budget is checked only before a retry and never cuts an attempt short,
+    /// so a call lasts at most the budget plus one per-attempt deadline; with
+    /// `RetryPolicy::none()` it lasts at most one per-attempt deadline.
+    /// Dropping a call's future cancels the attempt in flight; the SDK spawns no
+    /// task of its own, so nothing is sent or retried after the drop.
     #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(Some(timeout));

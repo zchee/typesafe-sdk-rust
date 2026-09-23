@@ -40,7 +40,7 @@ use tower_service::Service;
 
 use super::*;
 use crate::{
-    Client, Noul, PreparedQuestions, Questions, RawQuestion,
+    Client, ClientBuilder, Noul, PreparedQuestions, Questions, RawQuestion,
     error::ApiError,
     transport::{Body, BoxError, HttpVersion, HyperTransport, ResponseBody, TransportSettings},
 };
@@ -668,6 +668,170 @@ async fn holding(held: usize) -> (TestServer, watch::Sender<bool>) {
     .await
     .expect("the test server starts");
     (server, release)
+}
+
+/// The result a custom service returns on every attempt, or a held response.
+#[derive(Debug, Clone, Copy)]
+enum AttemptOutcome {
+    Io(io::ErrorKind),
+    Status(StatusCode),
+    Pending,
+}
+
+/// Counts attempts and records when a pending response future is cancelled.
+#[derive(Clone)]
+struct AttemptService {
+    outcome: AttemptOutcome,
+    calls: Arc<AtomicUsize>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl Service<Request<Body>> for AttemptService {
+    type Response = Response<Body>;
+    type Error = io::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Response<Body>, io::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _: Request<Body>) -> Self::Future {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let outcome = self.outcome;
+        let dropped = Arc::clone(&self.dropped);
+        Box::pin(async move {
+            match outcome {
+                AttemptOutcome::Io(kind) => Err(io::Error::new(kind, "attempt failed")),
+                AttemptOutcome::Status(status) => {
+                    let mut response = Response::new(Body::empty());
+                    *response.status_mut() = status;
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        response.headers_mut().insert(RETRY_AFTER, HeaderValue::from_static("0"));
+                    }
+                    Ok(response)
+                }
+                AttemptOutcome::Pending => {
+                    let _dropped = SetOnDrop(&dropped);
+                    std::future::pending().await
+                }
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn none_makes_one_attempt_whatever_fails() {
+    const NONE: RetryPolicy = RetryPolicy::none();
+    assert_eq!(format!("{NONE:?}"), format!("{:?}", RetryPolicy::new().max_retries(0)));
+    let cases = [
+        AttemptOutcome::Io(io::ErrorKind::ConnectionRefused),
+        AttemptOutcome::Io(io::ErrorKind::TimedOut),
+        AttemptOutcome::Status(StatusCode::TOO_MANY_REQUESTS),
+        AttemptOutcome::Status(StatusCode::SERVICE_UNAVAILABLE),
+    ];
+    for outcome in cases {
+        let time = FakeTime::new();
+        let transport = AttemptService { outcome, calls: Arc::default(), dropped: Arc::default() };
+        let client = ClientBuilder::default()
+            .api_key("test-key")
+            .base_url("http://127.0.0.1:9")
+            .default_model("jev-latest")
+            .retry(RetryPolicy::none().on(&time))
+            .build_with_service(transport.clone())
+            .expect("the custom-service client builds");
+
+        let error = client.models().list().send().await.expect_err("every attempt fails");
+        assert_eq!(transport.calls.load(Ordering::SeqCst), 1, "{outcome:?}: {error:?}");
+        assert!(time.delays().is_empty(), "{outcome:?}: no retry delay is scheduled");
+        match outcome {
+            AttemptOutcome::Io(kind) => {
+                assert!(matches!(error.kind(), ErrorKind::Connection), "{outcome:?}: {error:?}");
+                assert_eq!(error.to_string(), "Connection error: attempt failed", "{outcome:?}");
+                let source = error.source().expect("the I/O error remains the cause");
+                assert_eq!(
+                    source.downcast_ref::<io::Error>().expect("an I/O error").kind(),
+                    kind,
+                    "{outcome:?}"
+                );
+            }
+            AttemptOutcome::Status(status) => {
+                let code = status.as_u16();
+                assert_api(
+                    &error,
+                    code,
+                    &format!("GET http://127.0.0.1:9/v1/models: {code} status code (no body)"),
+                );
+            }
+            AttemptOutcome::Pending => panic!("the failure cases contain no pending response"),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_the_call_future_cancels_the_attempt_and_nothing_follows() {
+    let time = FakeTime::new();
+    let transport = AttemptService {
+        outcome: AttemptOutcome::Pending,
+        calls: Arc::default(),
+        dropped: Arc::default(),
+    };
+    let client = ClientBuilder::default()
+        .api_key("test-key")
+        .base_url("http://127.0.0.1:9")
+        .default_model("jev-latest")
+        .retry(RetryPolicy::new().on(&time))
+        .build_with_service(transport.clone())
+        .expect("the custom-service client builds");
+
+    let mut call = Box::pin(client.models().list().send());
+    std::future::poll_fn(|cx| {
+        assert!(call.as_mut().poll(cx).is_pending(), "the attempt is held in the service");
+        Poll::Ready(())
+    })
+    .await;
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1, "the first attempt started");
+    assert!(!transport.dropped.load(Ordering::SeqCst), "the attempt is still in flight");
+    drop(call);
+    assert!(transport.dropped.load(Ordering::SeqCst), "the in-flight attempt was dropped");
+
+    let past_budget = Duration::from_secs(3600);
+    time.advance(past_budget);
+    tokio::time::advance(past_budget).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1, "no attempt follows cancellation");
+    assert!(time.delays().is_empty(), "no retry wait follows cancellation");
+}
+
+#[tokio::test(start_paused = true)]
+async fn none_with_a_per_attempt_deadline_times_out_after_exactly_one_call() {
+    let transport = AttemptService {
+        outcome: AttemptOutcome::Pending,
+        calls: Arc::default(),
+        dropped: Arc::default(),
+    };
+    let deadline = Duration::from_secs(1);
+    let client = ClientBuilder::default()
+        .api_key("test-key")
+        .base_url("http://127.0.0.1:9")
+        .default_model("jev-latest")
+        .retry(RetryPolicy::none())
+        .timeout(deadline)
+        .build_with_service(transport.clone())
+        .expect("the custom-service client builds");
+
+    let started = tokio::time::Instant::now();
+    let error = client.models().list().send().await.expect_err("the held attempt times out");
+    assert_eq!(started.elapsed(), deadline, "the paused clock advances to the attempt deadline");
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 1, "none permits only one call");
+    assert!(
+        matches!(error.kind(), ErrorKind::Timeout { timeout } if *timeout == deadline),
+        "{error:?}"
+    );
+    assert_eq!(error.to_string(), "Request timed out (timeout=1s).");
+    assert!(error.source().is_none(), "the SDK's deadline has no transport cause");
+    assert!(transport.dropped.load(Ordering::SeqCst), "the timed-out attempt was dropped");
 }
 
 // -------------------------------------------------- ports of test_retry.py

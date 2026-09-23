@@ -143,7 +143,19 @@ impl RetryPolicy {
         }
     }
 
-    /// The most retries after the first attempt; `0` makes one attempt only.
+    /// A policy that makes one attempt only, whatever fails.
+    ///
+    /// Equivalent to `RetryPolicy::new().max_retries(0)`. The client's or
+    /// call's per-attempt deadline still applies.
+    #[must_use]
+    pub const fn none() -> Self {
+        let mut policy = Self::new();
+        policy.max_retries = 0;
+        policy
+    }
+
+    /// The most retries after the first attempt; `0` makes one attempt only,
+    /// as [`none`](Self::none) does.
     #[must_use]
     pub fn max_retries(mut self, retries: u32) -> Self {
         self.max_retries = retries;
@@ -247,12 +259,18 @@ impl RetryPolicy {
         self
     }
 
-    /// The most time one call may take in all - every attempt and every wait
+    /// The budget of one call, including every attempt and every wait
     /// between them. Retrying stops before a wait that would reach it, and
     /// the call fails with the last error. 30 s unless set.
     ///
     /// This is not the deadline of one attempt, which the client and each
     /// call set with their own `timeout`.
+    ///
+    /// The budget is checked only before a retry and never cuts an attempt short,
+    /// so a call lasts at most the budget plus one per-attempt deadline; with
+    /// `RetryPolicy::none()` it lasts at most one per-attempt deadline.
+    /// Dropping a call's future cancels the attempt in flight; the SDK spawns no
+    /// task of its own, so nothing is sent or retried after the drop.
     ///
     /// # Errors
     ///
