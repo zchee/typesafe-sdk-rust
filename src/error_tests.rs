@@ -87,6 +87,44 @@ fn every_status_lands_in_the_class_the_python_sdk_puts_it_in() {
     }
 }
 
+#[test]
+fn is_authentication_holds_for_401_and_for_an_authentication_error_type_at_any_status() {
+    let cases = [
+        (401, "", true, ApiErrorKind::Authentication),
+        (
+            401,
+            r#"{"detail":{"error_type":"permission_denied"}}"#,
+            true,
+            ApiErrorKind::Authentication,
+        ),
+        (403, LIVE_403_BODY, true, ApiErrorKind::PermissionDenied),
+        (403, "{}", false, ApiErrorKind::PermissionDenied),
+        (
+            403,
+            r#"{"detail":{"error_type":"permission_denied"}}"#,
+            false,
+            ApiErrorKind::PermissionDenied,
+        ),
+        (400, LIVE_403_BODY, true, ApiErrorKind::BadRequest),
+        (500, LIVE_403_BODY, true, ApiErrorKind::InternalServer),
+        (
+            403,
+            r#"{"detail":{"error_type":"Authentication_Error"}}"#,
+            false,
+            ApiErrorKind::PermissionDenied,
+        ),
+        (403, "<html><body>403 Forbidden</body></html>", false, ApiErrorKind::PermissionDenied),
+        (401, "<html><body>403 Forbidden</body></html>", true, ApiErrorKind::Authentication),
+        (403, r#"{"detail":{"error_type":1}}"#, false, ApiErrorKind::PermissionDenied),
+        (403, r#"{"error_type":"authentication_error"}"#, false, ApiErrorKind::PermissionDenied),
+    ];
+    for (code, body, expected, kind) in cases {
+        let error = api(code, body);
+        assert_eq!(error.is_authentication(), expected, "status {code}, body {body:?}");
+        assert_eq!(error.kind(), kind, "status {code}, body {body:?}");
+    }
+}
+
 // ------------------------------------------------------ message extraction
 
 #[test]

@@ -390,6 +390,18 @@ impl ApiError {
         self.error_type.as_deref()
     }
 
+    /// Whether the status or the server's error type names an authentication failure.
+    ///
+    /// True for 401, or for any status whose [`error_type`](Self::error_type)
+    /// is exactly `authentication_error`. The live API uses 403 with that
+    /// error type for a request without a key; [`kind`](Self::kind) still
+    /// returns [`ApiErrorKind::PermissionDenied`] for that status.
+    /// Only `detail.error_type` is read, not a top-level `error_type`.
+    pub fn is_authentication(&self) -> bool {
+        self.kind() == ApiErrorKind::Authentication
+            || self.error_type() == Some("authentication_error")
+    }
+
     /// The response body, exactly as it arrived.
     pub fn body(&self) -> &[u8] {
         &self.body

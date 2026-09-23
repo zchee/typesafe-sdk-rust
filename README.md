@@ -181,9 +181,9 @@ The enum is `#[non_exhaustive]`, so a `match` needs a catch-all arm.
 `RateLimit`, 500 and above `InternalServer`, anything else `Other`), `headers()`, `endpoint()`,
 `message()`, `error_type()`, `body()`, `body_text()`, `body_json::<T>()`, `request_id()` (from
 `x-typesafe-request-id`) and `retry_after()` (from `retry-after-ms`, else `Retry-After` as
-seconds or an HTTP date, truncated to whole milliseconds). The live API answers a request
-without a key with **403** and `error_type() == Some("authentication_error")`, not the
-documented 401.
+seconds or an HTTP date, truncated to whole milliseconds), and `is_authentication()`: true
+for 401 and for any status whose `error_type()` is `authentication_error`, which is how the
+live API answers a request without a key (**403**, not the documented 401).
 
 An error's `Display` is the sentence to show a user; for an API error it reads
 `POST https://api.typesafe.ai/v1/systemone: 429 Too many requests (request_id=req_123)`.
