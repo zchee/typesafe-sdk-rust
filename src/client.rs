@@ -5,6 +5,10 @@
 //! reference. The API key enters as a secret and is kept only as the finished
 //! `Authorization` header value, marked sensitive, so no formatting of the
 //! client or its configuration can print it.
+//!
+//! The key is copied once into the `Authorization` header value, which is not zeroed
+//! and lives as long as the client and every request built from it; `HeaderValue`
+//! is `Bytes`-backed and shared by reference count, so it cannot be zeroed on drop.
 
 use std::{ffi::OsString, fmt, sync::Arc, time::Duration};
 
@@ -191,6 +195,10 @@ impl ClientBuilder {
     /// The API key. It is sent as `Authorization: Bearer <key>` and is
     /// printed nowhere. Leading and trailing whitespace is stripped; an empty
     /// key, internal whitespace, control and non-ASCII characters are refused.
+    ///
+    /// The key is copied once into the `Authorization` header value, which is not zeroed
+    /// and lives as long as the client and every request built from it; `HeaderValue`
+    /// is `Bytes`-backed and shared by reference count, so it cannot be zeroed on drop.
     #[must_use]
     pub fn api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(SecretString::from(key.into()));
