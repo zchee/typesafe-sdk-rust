@@ -166,7 +166,7 @@ what failed:
 
 | `ErrorKind` | Meaning |
 | --- | --- |
-| `Config` | The client could not be built: no API key, a blank or non-ASCII key, a base URL that is not an absolute `http`/`https` URL without userinfo, query or fragment, a zero deadline or size limit, an environment variable that is not UTF-8, a default header that cannot be sent. |
+| `Config` | The client could not be built: no API key, a key that is blank or holds whitespace, a control or a non-ASCII character once trimmed, a base URL that is not an absolute `http`/`https` URL without userinfo, query or fragment, a zero deadline or size limit, an environment variable that is not UTF-8, a default header that cannot be sent. |
 | `InvalidRequest` | The request was never sent: a header that is not a valid header, a zero deadline, a `state` that encodes as a number, a boolean or `null`, a value that cannot be encoded as JSON, an invalid question set. |
 | `Api(ApiError)` | The server answered with a status outside 2xx. |
 | `Connection` | No HTTP response was read: the connection failed, was refused, or broke. `source()` leads to the transport's error. |
@@ -406,8 +406,10 @@ data, so bodies appear only at `TRACE`.
 
 - **The API key** is held as a `secrecy::SecretString` until it becomes the `Authorization`
   header value, which is flagged sensitive; no `Debug` or `Display` of this crate prints it, and
-  no error message repeats it. An `http://` base URL sends it unencrypted, so use one only for a
-  local proxy or a test server.
+  no error message repeats it. Leading and trailing whitespace is stripped from it, as the Python
+  SDK strips it; a key that is then empty, or holds whitespace, a control or a non-ASCII
+  character, is refused when the client is built. An `http://` base URL sends it unencrypted,
+  so use one only for a local proxy or a test server.
 - **Server text is escaped and cut.** Every message read from a response body (whichever member
   it came from, or the body itself when no member holds one) has its control characters and
   text-hiding format characters written as Rust escapes (`\n`, `\u{1b}`, `\u{202e}`) and is cut
@@ -534,9 +536,8 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | ALPN chooses between HTTP/2 and HTTP/1.1 | `Http2Only` for `https` base URLs, `Auto` as the option for HTTP/1.1-only proxies; `http` base URLs use `Auto` | A cold 64-way fan-out opened 64 connections under `Auto` and 1 under HTTP/2 only. |
 | Server messages are used verbatim and uncut | Every message read from a response body is escaped and cut at 200 characters plus U+2026; the request id is shown escaped and cut at 128; the raw data stays in `body()`, `body_text()`, `body_json()`, `request_id()`, `error_type()` | A server-controlled body of up to 16 MiB, with real newlines, terminal escapes or bidi overrides, must not become a log line. A long validation message is cut in `message()`; the whole text is in `body_text()`. |
 | `Retry-After` kept as float milliseconds | A `Duration` truncated to whole milliseconds (`125.7` becomes 125 ms) | The precision the header carries. |
-| An explicit empty `api_key` is sent | An explicit key or default model that is empty or whitespace-only is a `Config` error, even when the environment holds a usable value; a padded non-blank value is kept byte for byte | A critical setting fails when the client is built, not later as a 401 or 403. |
+| An explicit empty `default_model` is sent | An explicit default model that is empty or whitespace-only is a `Config` error, even when the environment holds a usable value; a padded non-blank model is kept byte for byte | A critical setting fails when the client is built, not later as a 401 or 403. |
 | The base URL is not checked until the first request | Checked when the client is built: absolute `http`/`https`, a non-empty host, no userinfo, query or fragment; no message repeats the URL | Fail fast, and a URL that did not parse cannot be trusted to have had its userinfo found. |
-| Any header-legal bytes in the API key | The key must be printable ASCII, spaces or tabs; the message never repeats it | Anything else is a paste error (a curly quote, a non-breaking space) that would only fail later as an authentication error. |
 | Caller headers are sent as the caller set them, `Content-Length`, `Transfer-Encoding`, `Connection` and the other framing and connection headers included | `Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer` and `Upgrade` are dropped from client defaults and per-call headers on every protocol; `Host` is sent as given | They belong to the transport: HTTP/2 forbids the connection-specific ones, and a `Content-Length` that disagrees with the body fails an HTTP/2 stream and hangs an HTTP/1.1 call until its deadline. |
 | Log redaction by header name only | A value flagged sensitive is redacted as well; the name rules are the Python SDK's | A tightening. |
 | A typed noul can send `null` outcomes and empty `criteria` | An undescribed outcome and empty `criteria` are left out; `RawQuestion` can still send all three shapes | The same meaning to the API. |

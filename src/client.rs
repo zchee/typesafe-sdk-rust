@@ -189,7 +189,8 @@ pub struct ClientBuilder {
 
 impl ClientBuilder {
     /// The API key. It is sent as `Authorization: Bearer <key>` and is
-    /// printed nowhere.
+    /// printed nowhere. Leading and trailing whitespace is stripped; an empty
+    /// key, internal whitespace, control and non-ASCII characters are refused.
     #[must_use]
     pub fn api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(SecretString::from(key.into()));
@@ -390,7 +391,8 @@ impl ClientBuilder {
     /// # Errors
     ///
     /// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error when
-    /// no API key is found or the key is blank or not printable ASCII; when
+    /// no API key is found or the key is empty after trimming or holds
+    /// whitespace, a control or a non-ASCII character; when
     /// the base URL is not an absolute `http` or `https` URL without
     /// userinfo, query or fragment; when the default model is blank; when a
     /// deadline or the response limit is zero; when a default header is not a

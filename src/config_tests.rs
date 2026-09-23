@@ -20,6 +20,10 @@ use crate::ErrorKind;
 const MISSING_KEY: &str =
     "No API key was provided. Pass api_key or set the TYPESAFE_API_KEY environment variable.";
 
+/// The message a key outside printable ASCII fails with, as upstream words it.
+const INVALID_KEY: &str =
+    "API key must contain only printable ASCII characters without whitespace.";
+
 /// A lookup that finds nothing: a process with none of the variables set.
 fn no_env(_: &str) -> Option<String> {
     None
@@ -189,10 +193,6 @@ fn explicit_settings_are_used_without_consulting_the_environment() {
     assert_eq!(config.timeout(), Some(Duration::from_millis(1500)));
 }
 
-/// The message an explicit blank API key fails with.
-const BLANK_KEY: &str = "The API key is empty. \
-    Pass a non-empty api_key or set the TYPESAFE_API_KEY environment variable.";
-
 /// The message an explicit blank default model fails with.
 const BLANK_MODEL: &str = "The default model is empty. \
     Pass a non-empty default_model or set the TYPESAFE_DEFAULT_MODEL environment variable.";
@@ -201,23 +201,99 @@ const BLANK_MODEL: &str = "The default model is empty. \
 /// ASCII separators Python counts as whitespace and Rust does not.
 const BLANK: [&str; 5] = ["", " ", " \t\n ", "\u{1c}", "\u{1d}\u{1f} \u{1e}"];
 
-/// Upstream `_resolve_env` keeps any explicit value that is not `None`, so it
-/// sends a blank key as `Bearer `. The port refuses it instead, even with a
-/// usable key in the environment: the caller said which key to use, and it is
-/// no key at all. The message repeats nothing of the value.
+/// A lookup over `pairs` that fails the test when it is asked for the API
+/// key: an explicit key, whatever it holds, is the key.
+fn env_without_key_lookup<'a>(
+    pairs: &'a [(&'a str, &'a str)],
+) -> impl Fn(&str) -> Option<String> + 'a {
+    move |name| {
+        assert_ne!(name, "TYPESAFE_API_KEY", "the environment was read for an explicit key");
+        env(pairs)(name)
+    }
+}
+
+/// Upstream strips an explicit key as it strips the environment's since
+/// 0.7.1, so a blank one is the missing-key error, and the environment is not
+/// consulted even when it holds a usable key: the caller said which key to
+/// use, and it is no key at all. The message repeats nothing of the value.
 #[test]
-fn an_explicit_blank_key_is_a_config_error_even_with_a_key_in_the_environment() {
+fn an_explicit_blank_key_is_the_missing_key_error_and_the_environment_is_not_read() {
     let environment = [("TYPESAFE_API_KEY", "env-key")];
     for given in BLANK {
         let error = Config::resolve(
             Explicit { api_key: Some(given.into()), ..Explicit::default() },
-            env(&environment),
+            env_without_key_lookup(&environment),
         )
         .expect_err("an explicit blank key must not resolve");
         assert!(matches!(error.kind(), ErrorKind::Config), "{given:?}: {error:?}");
-        assert_eq!(error.to_string(), BLANK_KEY, "{given:?}");
-        assert_eq!(format!("{error:?}"), config_debug(BLANK_KEY), "{given:?}");
+        assert_eq!(error.to_string(), MISSING_KEY, "{given:?}");
+        assert_eq!(format!("{error:?}"), config_debug(MISSING_KEY), "{given:?}");
     }
+}
+
+/// Upstream `test_invalid_explicit_key_does_not_fall_back_to_env`: an
+/// explicit key that is blank or holds a control character fails, with the
+/// environment holding a usable key that is never looked up.
+#[test]
+fn an_invalid_explicit_key_does_not_fall_back_to_the_environment() {
+    let environment = [("TYPESAFE_API_KEY", "env-key")];
+    let cases = [
+        ("", MISSING_KEY),
+        (" \t\r\n ", MISSING_KEY),
+        ("\u{0}private", INVALID_KEY),
+        ("private\u{0}", INVALID_KEY),
+    ];
+    for (given, message) in cases {
+        let error = Config::resolve(
+            Explicit { api_key: Some(given.into()), ..Explicit::default() },
+            env_without_key_lookup(&environment),
+        )
+        .expect_err("an invalid explicit key must not resolve");
+        assert!(matches!(error.kind(), ErrorKind::Config), "{given:?}: {error:?}");
+        assert_eq!(error.to_string(), message, "{given:?}");
+        let debug = format!("{error:?}");
+        assert_eq!(debug, config_debug(message), "{given:?}");
+        assert!(!debug.contains("private"), "{given:?} leaked into {debug}");
+        assert!(!debug.contains("env-key"), "{given:?}: the environment's key leaked into {debug}");
+    }
+}
+
+/// Upstream `test_api_key_whitespace`: a key padded with whitespace is sent
+/// stripped, whether it was passed or read from the environment. The
+/// explicit cases run with another key in the environment, which must not
+/// win. Python's `str.strip()` also strips U+00A0 and U+001C; U+200B is not
+/// whitespace to it, so a key ending in one is refused.
+#[test]
+fn a_padded_key_is_trimmed_as_python_strips_it_from_either_source() {
+    for padding in ["", "\n", "\r\n", " \t\r\n "] {
+        let key = format!("{padding}test-key{padding}");
+
+        let environment = [("TYPESAFE_API_KEY", "env-key")];
+        let config = Config::resolve(
+            Explicit { api_key: Some(key.as_str().into()), ..Explicit::default() },
+            env_without_key_lookup(&environment),
+        )
+        .unwrap_or_else(|error| panic!("explicit {key:?} failed to resolve: {error:?}"));
+        assert_eq!(authorization(&config).as_bytes(), b"Bearer test-key", "explicit {key:?}");
+
+        let environment = [("TYPESAFE_API_KEY", key.as_str())];
+        let config = Config::resolve(Explicit::default(), env(&environment))
+            .unwrap_or_else(|error| panic!("environment {key:?} failed to resolve: {error:?}"));
+        assert_eq!(authorization(&config).as_bytes(), b"Bearer test-key", "environment {key:?}");
+    }
+
+    let config = Config::resolve(
+        Explicit { api_key: Some("\u{a0}key\u{1c}".into()), ..Explicit::default() },
+        no_env,
+    )
+    .unwrap_or_else(|error| panic!("a key padded with U+00A0 and U+001C failed: {error:?}"));
+    assert_eq!(authorization(&config).as_bytes(), b"Bearer key", "U+00A0 and U+001C are stripped");
+
+    let rendered = config_error(
+        Explicit { api_key: Some("key\u{200b}".into()), ..Explicit::default() },
+        no_env,
+    );
+    assert_eq!(rendered, INVALID_KEY, "U+200B is not whitespace to Python and stays in the key");
 }
 
 /// The same rule for the default model, which upstream would send as an
@@ -239,22 +315,19 @@ fn an_explicit_blank_default_model_is_a_config_error_even_with_one_in_the_enviro
     }
 }
 
-/// A padded explicit key or model that is not blank is kept byte for byte:
-/// trimming a credential would be a silent repair, and upstream sends both as
-/// given.
+/// A padded explicit default model that is not blank is kept byte for byte,
+/// as upstream sends it as given.
 #[test]
-fn a_padded_non_blank_explicit_key_and_model_are_kept_byte_for_byte() {
-    let environment = [("TYPESAFE_API_KEY", "env-key"), ("TYPESAFE_DEFAULT_MODEL", "env-model")];
-    let cases = [("  k  ", "Bearer   k  "), ("\tk\t", "Bearer \tk\t"), (" a b ", "Bearer  a b ")];
-    for (given, header) in cases {
+fn a_padded_non_blank_explicit_model_is_kept_byte_for_byte() {
+    let environment = [("TYPESAFE_DEFAULT_MODEL", "env-model")];
+    for given in ["  m  ", "\tm\t", " a b "] {
         let explicit = Explicit {
-            api_key: Some(given.into()),
+            api_key: Some("test-key".into()),
             default_model: Some(given.into()),
             ..Explicit::default()
         };
         let config = Config::resolve(explicit, env(&environment))
             .unwrap_or_else(|error| panic!("explicit {given:?} failed to resolve: {error:?}"));
-        assert_eq!(authorization(&config).as_bytes(), header.as_bytes(), "key {given:?}");
         assert_eq!(config.default_model().as_bytes(), given.as_bytes(), "model {given:?}");
     }
 }
@@ -546,36 +619,57 @@ fn the_authorization_value_is_flagged_sensitive() {
     assert_eq!(format!("{:?}", config.authorization()), "Sensitive");
 }
 
-/// A key `http` could not put in a header, or that holds a character no API
-/// key is spelled with, fails here with a message that does not repeat it.
+/// Upstream `test_invalid_api_key`: a key holding whitespace, a control, DEL
+/// or a non-ASCII character once stripped fails from either source, with a
+/// message that does not repeat it. The explicit cases run with a usable key
+/// in the environment. The last six are keys `http` could not put in a
+/// header or that hold a pasted character; a character that only pads the
+/// key would be stripped, so each sits inside it.
 #[test]
-fn a_key_that_cannot_be_a_header_value_is_a_config_error_that_does_not_repeat_it() {
-    let message = "The API key contains a character that cannot be sent in an HTTP header.";
-    let cases = [
-        "sk-secret\nInjected: header",
-        "sk-secret\r",
-        "sk-secret\u{0}",
-        "sk-secret\u{7f}",
-        "sk-secret\u{a0}",
-        "sk-secret\u{201c}",
-    ];
-    for key in cases {
-        let error =
-            Config::resolve(Explicit { api_key: Some(key.into()), ..Explicit::default() }, no_env)
-                .expect_err("an unsendable key must not resolve");
-        assert!(matches!(error.kind(), ErrorKind::Config), "{key:?}: {error:?}");
-        assert_eq!(error.to_string(), message, "{key:?}");
-        let debug = format!("{error:?}");
-        assert_eq!(debug, config_debug(message), "{key:?}");
-        assert!(!debug.contains("sk-secret"), "{key:?} leaked into {debug}");
+fn a_key_outside_printable_ascii_is_refused_without_repeating_it() {
+    let mut keys: Vec<String> = ['\n', '\r', '\t', '\u{1f}', '\u{7f}', ' ', '\u{e9}', '\u{200b}']
+        .into_iter()
+        .map(|c| format!("ts_live_private{c}suffix"))
+        .collect();
+    keys.extend(
+        [
+            "ts_live_private\nInjected: header",
+            "ts_live_private\rsuffix",
+            "ts_live_private\u{0}",
+            "ts_live_private\u{7f}",
+            "ts_live_private\u{a0}suffix",
+            "ts_live_private\u{201c}",
+        ]
+        .map(str::to_owned),
+    );
+    for key in &keys {
+        let environment = [("TYPESAFE_API_KEY", "env-key")];
+        let explicit = Config::resolve(
+            Explicit { api_key: Some(key.as_str().into()), ..Explicit::default() },
+            env_without_key_lookup(&environment),
+        )
+        .expect_err("an invalid explicit key must not resolve");
+        let environment = [("TYPESAFE_API_KEY", key.as_str())];
+        let from_environment = Config::resolve(Explicit::default(), env(&environment))
+            .expect_err("an invalid environment key must not resolve");
+        for (source, error) in [("explicit", explicit), ("environment", from_environment)] {
+            assert!(matches!(error.kind(), ErrorKind::Config), "{source} {key:?}: {error:?}");
+            let display = error.to_string();
+            assert_eq!(display, INVALID_KEY, "{source} {key:?}");
+            let debug = format!("{error:?}");
+            assert_eq!(debug, config_debug(INVALID_KEY), "{source} {key:?}");
+            for rendering in [&display, &debug] {
+                assert!(!rendering.contains("ts_live_private"), "{source} {key:?} in {rendering}");
+            }
+        }
     }
 }
 
-/// Every printable ASCII character, a space and a tab are accepted as they
-/// are.
+/// Every printable ASCII character but the space is accepted as it is.
 #[test]
 fn a_key_of_printable_ascii_is_sent_byte_for_byte() {
-    let key: String = (b' '..=b'~').map(char::from).chain(['\t']).collect();
+    let key: String = (b'!'..=b'~').map(char::from).collect();
+    assert_eq!(key.len(), 94, "'!' to '~' is 94 characters");
     let config = Config::resolve(
         Explicit { api_key: Some(key.as_str().into()), ..Explicit::default() },
         no_env,
@@ -590,7 +684,7 @@ fn a_key_of_printable_ascii_is_sent_byte_for_byte() {
 fn an_unsendable_environment_key_is_refused_without_repeating_it() {
     let environment = [("TYPESAFE_API_KEY", "sk-env\u{7f}secret")];
     let rendered = config_error(Explicit::default(), env(&environment));
-    assert_eq!(rendered, "The API key contains a character that cannot be sent in an HTTP header.");
+    assert_eq!(rendered, INVALID_KEY);
 }
 
 // ---------------------------------------------------------------- Debug

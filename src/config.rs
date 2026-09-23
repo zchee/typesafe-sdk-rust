@@ -67,16 +67,21 @@ impl Config {
     /// `std::env::var_os`. It is consulted only for settings the caller left
     /// unset. A value it returns is trimmed, and a blank one counts as unset;
     /// one that is not UTF-8 is refused, by the name of the variable. An
-    /// explicit value always wins and is taken as given, without trimming, as
-    /// the Python SDK takes it - except that an explicit API key or default
+    /// explicit value always wins. The API key, from either source, is trimmed
+    /// as Python's `str.strip()` trims, as the Python SDK trims it; an explicit
+    /// key that is blank is the missing-key error, and the environment is not
+    /// consulted for it. Every other explicit value is taken as given, without
+    /// trimming, as the Python SDK takes it - except that an explicit default
     /// model that is blank is refused rather than sent, where the Python SDK
     /// would send it.
     ///
     /// # Errors
     ///
     /// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error when no
-    /// API key is found, when an explicit API key or default model is blank,
-    /// when the key cannot be sent in an HTTP header, when the base URL is not
+    /// API key is found or the given one is blank, when the trimmed key holds
+    /// anything but printable ASCII without whitespace (see
+    /// [`validate_api_key`]), when an explicit default model is blank, when
+    /// the base URL is not
     /// an absolute `http` or `https` URL without credentials, query or
     /// fragment, when the timeout or the response size limit is zero, when the
     /// `User-Agent` product is not a product token (see [`user_agent`]), or
@@ -99,26 +104,16 @@ impl Config {
             omit_runtime_header,
         } = explicit;
 
+        // An explicit key, even a blank one, is the key: the environment is
+        // not consulted for it. An unset or blank variable becomes the empty
+        // key, which `validate_api_key` refuses as missing. `String::new()`
+        // does not allocate, and the secret wrapper owns the bytes until
+        // `bearer` has copied them.
         let api_key = match api_key {
-            // A blank key can only be a mistake, and sending it would turn a
-            // configuration error into an authentication failure at the
-            // server. The message does not repeat the value: whitespace is
-            // still part of what the caller passed as a credential.
-            Some(key) if is_blank(key.expose_secret()) => {
-                return Err(Error::config(format!(
-                    "The API key is empty. \
-                     Pass a non-empty api_key or set the {API_KEY_ENV} environment variable."
-                )));
-            }
             Some(key) => key,
-            None => from_env(&env, API_KEY_ENV)?.map(SecretString::from).ok_or_else(|| {
-                Error::config(format!(
-                    "No API key was provided. \
-                     Pass api_key or set the {API_KEY_ENV} environment variable."
-                ))
-            })?,
+            None => SecretString::from(from_env(&env, API_KEY_ENV)?.unwrap_or_default()),
         };
-        let authorization = bearer(&api_key)?;
+        let authorization = bearer(validate_api_key(api_key.expose_secret())?);
 
         let base_url = match base_url {
             Some(url) => Some(url),
@@ -354,33 +349,21 @@ pub(crate) fn endpoints(base_url: &str) -> Result<Endpoints, Error> {
 
 /// Builds the `Authorization` value for `key`, flagged sensitive.
 ///
-/// This is the one place the key is read out of its secret wrapper. The key
-/// is copied once, into a buffer that becomes the header value's own storage;
-/// that value is not zeroed and lives as long as the client.
-///
-/// # Errors
-///
-/// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error, which does
-/// not repeat the key, when the key holds anything but printable ASCII, spaces
-/// and tabs.
-fn bearer(key: &SecretString) -> Result<HeaderValue, Error> {
+/// `key` is what [`validate_api_key`] returned: printable ASCII without
+/// whitespace, which `http` always accepts. The key is copied once, into a
+/// buffer that becomes the header value's own storage; that value is not
+/// zeroed and lives as long as the client.
+fn bearer(key: &str) -> HeaderValue {
     const SCHEME: &[u8] = b"Bearer ";
-    let key = key.expose_secret().as_bytes();
-    // `http` would also accept bytes above 0x7F, but no API key is spelled
-    // with them: one there is a paste of a curly quote or a non-breaking space,
-    // and sending it would only fail later as an authentication error.
-    if !key.iter().all(|&byte| byte == b'\t' || (b' '..=b'~').contains(&byte)) {
-        return Err(Error::config(
-            "The API key contains a character that cannot be sent in an HTTP header.",
-        ));
-    }
+    let key = key.as_bytes();
+    debug_assert!(key.iter().all(|byte| (b'!'..=b'~').contains(byte)), "unvalidated API key");
     let mut value = Vec::with_capacity(SCHEME.len() + key.len());
     value.extend_from_slice(SCHEME);
     value.extend_from_slice(key);
     let mut value = HeaderValue::from_maybe_shared(Bytes::from(value))
-        .expect("invariant: every byte was checked to be printable ASCII, a space or a tab");
+        .expect("invariant: validate_api_key admits only printable ASCII without whitespace");
     value.set_sensitive(true);
-    Ok(value)
+    value
 }
 
 /// The most bytes a caller's `User-Agent` product may hold.
@@ -482,6 +465,34 @@ fn is_python_space(c: char) -> bool {
 /// Whether `text` is empty once Python's `str.strip()` has trimmed it.
 fn is_blank(text: &str) -> bool {
     text.chars().all(is_python_space)
+}
+
+/// `key` trimmed as Python's `str.strip()` trims it, once it is known to be
+/// usable: not empty, and every character printable ASCII other than the
+/// space (`'!'..='~'`), which is what the Python SDK accepts since 0.7.1.
+///
+/// The result borrows from `key`; nothing is copied.
+///
+/// # Errors
+///
+/// Returns an [`ErrorKind::Config`](crate::ErrorKind::Config) error with the
+/// Python SDK's missing-key message when the trimmed key is empty, and with
+/// its invalid-key message when a character is outside that range. Neither
+/// repeats the key.
+fn validate_api_key(key: &str) -> Result<&str, Error> {
+    let key = key.trim_matches(is_python_space);
+    if key.is_empty() {
+        return Err(Error::config(format!(
+            "No API key was provided. \
+             Pass api_key or set the {API_KEY_ENV} environment variable."
+        )));
+    }
+    if !key.bytes().all(|byte| (b'!'..=b'~').contains(&byte)) {
+        return Err(Error::config(
+            "API key must contain only printable ASCII characters without whitespace.",
+        ));
+    }
+    Ok(key)
 }
 
 /// The variable `name` as `env` finds it, trimmed as [`is_python_space`]
