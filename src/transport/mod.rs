@@ -45,8 +45,9 @@ use crate::{
         JSON_CONTENT_TYPE, PROTECTED_HEADERS, RETRY_COUNT_HEADER, RUNTIME_IDENTIFIER,
         SDK_IDENTIFIER, TRANSPORT_HEADERS,
     },
-    error::{ApiError, Error, format_endpoint},
+    error::{ApiError, Error, ErrorKind, format_endpoint},
     question::upsert,
+    redact::{self, Credentials, Outcome},
     telemetry,
     text::{self, Backslash, SafeText},
 };
@@ -337,8 +338,9 @@ type Received = (StatusCode, HeaderMap, Bytes);
 ///   passes first.
 /// - [`ErrorKind::Api`](crate::ErrorKind::Api) for any status outside 2xx.
 /// - [`ErrorKind::Connection`](crate::ErrorKind::Connection) when the
-///   transport fails or the body cannot be read; the transport's own error is
-///   the [`source`](StdError::source).
+///   transport fails or the body cannot be read; the transport's own error, or
+///   its redacted copy when it held a credential of the request, is the
+///   [`source`](StdError::source).
 /// - [`ErrorKind::ResponseTooLarge`](crate::ErrorKind::ResponseTooLarge) when
 ///   a success response's body is larger than the limit. A body over the
 ///   limit is not read past it, and a failure response whose body is over the
@@ -411,7 +413,7 @@ where
             .into());
         }
         Err(Failure::TooLarge { .. }) => Error::response_too_large(exchange.max_response_bytes),
-        Err(Failure::Error(error)) => error,
+        Err(Failure::Error(error)) => redacted(error, exchange),
     };
     telemetry::failed(events, &failure, started);
     Err(failure)
@@ -469,7 +471,7 @@ where
 /// it is. Anything else is a connection failure whose message is the chain of
 /// the transport's own messages - the cause stays reachable as the
 /// [`source`](StdError::source).
-fn connection(error: impl Into<BoxError>) -> Error {
+pub(crate) fn connection(error: impl Into<BoxError>) -> Error {
     match error.into().downcast::<Error>() {
         Ok(ours) => *ours,
         Err(other) => Error::connection(connection_message(&*other), Some(other)),
@@ -496,24 +498,144 @@ fn connection(error: impl Into<BoxError>) -> Error {
 /// backslash would only make an escape harder to read, and nothing is ever
 /// parsed back out of this message.
 fn connection_message(error: &(dyn StdError + 'static)) -> String {
-    use fmt::Write as _;
+    cut(&render_uncut(error))
+}
 
-    let mut message = SafeText::after(
-        String::from("Connection error: "),
-        text::MAX_MESSAGE_CHARS,
-        Backslash::Keep,
-    );
+/// What every connection error's message starts with.
+const CONNECTION_PREFIX: &str = "Connection error: ";
+
+/// A connection error's message before it is cut: the text, and the byte
+/// offset at which each of its pieces ends. A piece is one escaped character
+/// or the `": "` between two links, and a cut never splits one.
+struct Uncut {
+    text: String,
+    ends: Vec<usize>,
+}
+
+/// The whole message for `error`: [`CONNECTION_PREFIX`], then up to eight
+/// links of the chain, each escaped, joined with `": "`.
+fn render_uncut(error: &(dyn StdError + 'static)) -> Uncut {
+    let mut message = SafeText::after(String::from(CONNECTION_PREFIX), usize::MAX, Backslash::Keep);
+    let mut ends = Vec::new();
+    let mut character_bytes = [0; 4];
     let mut link = Some(error);
     for index in 0..8 {
         let Some(current) = link else { break };
         if index > 0 {
             message.fixed(": ");
+            ends.push(message.byte_len());
         }
-        write!(message.untrusted_writer(), "{current}")
-            .expect("invariant: the escaping writer never fails");
+        for character in current.to_string().chars() {
+            message.untrusted(character.encode_utf8(&mut character_bytes), usize::MAX);
+            ends.push(message.byte_len());
+        }
         link = current.source();
     }
-    message.into_string()
+    Uncut { text: message.into_string(), ends }
+}
+
+/// `uncut` cut at [`text::MAX_MESSAGE_CHARS`] characters after the prefix,
+/// the last whole piece that fits followed by U+2026.
+fn cut(uncut: &Uncut) -> String {
+    let mut message = String::from(CONNECTION_PREFIX);
+    let mut chars = 0;
+    let mut start = CONNECTION_PREFIX.len();
+    for &end in &uncut.ends {
+        let piece = &uncut.text[start..end];
+        let len = piece.chars().count();
+        if chars + len > text::MAX_MESSAGE_CHARS {
+            message.push('\u{2026}');
+            break;
+        }
+        message.push_str(piece);
+        chars += len;
+        start = end;
+    }
+    message
+}
+
+impl Uncut {
+    /// This message with every form of a credential after the prefix
+    /// replaced by `***`.
+    ///
+    /// It runs over the escaped text, since escaping can form a credential no
+    /// link holds: a tab written as `\t`, or two links joined by `": "`. A
+    /// match that covers part of a piece takes the whole piece, and the
+    /// replacement is one piece, so the cut can neither split it nor leave
+    /// part of the credential before it.
+    fn redacted(&self, credentials: &Credentials) -> Self {
+        let prefix = CONNECTION_PREFIX.len();
+        let mut found = credentials
+            .matches(&self.text[prefix..])
+            .map(|range| range.start + prefix..range.end + prefix);
+        let mut next = found.next();
+        let mut text = String::from(CONNECTION_PREFIX);
+        let mut ends = Vec::with_capacity(self.ends.len());
+        let mut start = prefix;
+        let mut index = 0;
+        while let Some(&end) = self.ends.get(index) {
+            match &next {
+                Some(first) if first.start < end => {
+                    let mut group_end = first.end;
+                    next = found.next();
+                    while let Some(&piece_end) = self.ends.get(index) {
+                        index += 1;
+                        while let Some(another) = &next
+                            && another.start < piece_end
+                        {
+                            group_end = group_end.max(another.end);
+                            next = found.next();
+                        }
+                        start = piece_end;
+                        if piece_end >= group_end {
+                            break;
+                        }
+                    }
+                    text.push_str("***");
+                }
+                _ => {
+                    text.push_str(&self.text[start..end]);
+                    start = end;
+                    index += 1;
+                }
+            }
+            ends.push(text.len());
+        }
+        Self { text, ends }
+    }
+}
+
+/// `error` with the request's credentials kept out of it.
+///
+/// Only a connection error with a cause can hold one: its cause is the
+/// transport's error, and its message is built from it. The credentials are
+/// read from the headers the request was built from, and only here, after
+/// the attempt failed. A chain that holds none is returned as it is; see
+/// [`redact::copy_chain`] for the other two outcomes.
+pub(crate) fn redacted(error: Error, exchange: Exchange<'_>) -> Error {
+    if !matches!(error.kind(), ErrorKind::Connection) {
+        return error;
+    }
+    let Some(source) = StdError::source(&error) else {
+        return error;
+    };
+    let credentials = Credentials::new(
+        exchange
+            .base_headers
+            .iter()
+            .chain(exchange.call_headers.iter().map(|(name, value)| (name, value))),
+    );
+    match redact::copy_chain(source, &error.to_string(), &credentials) {
+        Outcome::Kept => error,
+        Outcome::MessageOnly => {
+            let (message, source) = error.into_parts();
+            Error::connection(credentials.redact(&message), source)
+        }
+        Outcome::Replaced(link) => {
+            let message = cut(&render_uncut(&link).redacted(&credentials));
+            Error::connection(message, Some(Box::new(link)))
+        }
+    }
 }
 
 /// The endpoint of `exchange` as an error names it.

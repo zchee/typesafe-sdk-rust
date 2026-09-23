@@ -99,6 +99,11 @@ impl SafeText {
         Untrusted { into: self }
     }
 
+    /// How many bytes the rendering holds so far, its prefix included.
+    pub(crate) fn byte_len(&self) -> usize {
+        self.text.len()
+    }
+
     /// The rendering.
     pub(crate) fn into_string(self) -> String {
         self.text

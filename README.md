@@ -408,8 +408,11 @@ data, so bodies appear only at `TRACE`.
   header value, which is flagged sensitive; no `Debug` or `Display` of this crate prints it, and
   no error message repeats it. Leading and trailing whitespace is stripped from it, as the Python
   SDK strips it; a key that is then empty, or holds whitespace, a control or a non-ASCII
-  character, is refused when the client is built. An `http://` base URL sends it unencrypted,
-  so use one only for a local proxy or a test server.
+  character, is refused when the client is built. When a transport fails with an error that
+  prints the request's credentials, their values are replaced by `***` first, as the Python SDK
+  does since 0.7.1: the key and every secret or sensitive header value, in the forms the
+  documentation of `ClientBuilder::build_with_service` lists. An `http://` base URL sends the
+  key unencrypted, so use one only for a local proxy or a test server.
 - **Server text is escaped and cut.** Every message read from a response body (whichever member
   it came from, or the body itself when no member holds one) has its control characters and
   text-hiding format characters written as Rust escapes (`\n`, `\u{1b}`, `\u{202e}`) and is cut
@@ -552,7 +555,8 @@ TYPESAFE_LIVE_TESTS=1 TYPESAFE_API_KEY=... cargo nextest run -p typesafe-sdk-rus
 | An answer that names `type` twice: the last wins | Two different values are a response-validation error at `answers.<name>.type`; the same value twice is accepted | A response that contradicts itself is malformed. |
 | A misshaped member is reported at `answers.<name>.<member>` in any member order | With `type` first, the order the API writes, every path matches. `Answers` holds a member that arrives before `type` as raw text and checks it later, so that failure is reported at `answers.<name>`; a derived field reads its members as they arrive, so a misshaped member ahead of a wrong `type` is reported at the member | One pass, without buffering parsed values. |
 | Server-chosen keys appear verbatim in field paths | The key is still shown, but control characters and text-hiding format characters are escaped, each name is cut at 128 characters and the whole path at 320, marked with U+2026 | A server-chosen key must not break a log line, recolour a terminal or grow a message without bound. |
-| `Connection error: {error}` carries the transport's whole text | The chain (at most 8 links) is escaped and cut at 200 characters plus U+2026 after the prefix; `source()` keeps the whole chain | GOAWAY debug data (up to 16 KiB), certificate subjects and a custom transport's text are not text the SDK wrote. |
+| `Connection error: {error}` carries the transport's whole text | The chain (at most 8 links) is escaped and cut at 200 characters plus U+2026 after the prefix; values of the request's credential headers are replaced by `***` first, as the Python SDK does since 0.7.1; `source()` keeps the whole chain | GOAWAY debug data (up to 16 KiB), certificate subjects and a custom transport's text are not text the SDK wrote. |
+| Redacted exception copies keep their type, `__notes__`, `__context__` and shared or cyclic causes | When a credential of the request occurs in any link's `Display`, `{:?}` or `{:#?}`, `source()` becomes a copy of up to 32 links of a private type carrying the redacted texts; it cannot be downcast, whatever the transport, so a short secret header value (`x-csrf-token: 1`) can turn a clean `Connection refused (os error 61)` chain into a copy. The message is redacted after escaping as well, so a credential the escaping forms by chance becomes `***` while the original chain is kept. A chain kept as the original is scanned once, at failure time; a link that prints changing interior state can still show a credential later. Rust errors have no notes, no second link and no cycles | A Rust error cannot be rebuilt from its message as `type(error)(message)` does. |
 | The API key is any `str` | `api_key(impl Into<String>)`, wrapped into a secret at once | No pre-1.0 type appears in a public signature. |
 | The response body type is httpx's | The default transport's body is this crate's `ResponseBody` | No `hyper` type in a public signature, so a hyper upgrade is not a breaking change here. |
 | A 2xx status in the retryable set retries a response that did not validate | A 2xx in `StatusSet` retries nothing: `ResponseValidation` is never retried for its status; a `predicate` can ask for it | A schema mismatch is not transient, and every retry is a billed model call. |

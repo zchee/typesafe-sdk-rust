@@ -117,8 +117,8 @@ pub(crate) const PROTECTED_HEADERS: [HeaderName; 5] =
 ///
 /// Lower-cased, because that is how `http` stores every name. A name that
 /// merely contains `token` or `secret` is treated the same way; that rule lives
-/// with the redaction that applies it, which exists only when events do.
-#[cfg(any(test, feature = "tracing"))]
+/// in `redact::is_secret`, which both the log events and the connection
+/// errors apply.
 pub(crate) const SECRET_HEADERS: [&str; 6] =
     ["authorization", "proxy-authorization", "x-api-key", "api-key", "cookie", "set-cookie"];
 

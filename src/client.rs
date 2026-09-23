@@ -414,9 +414,20 @@ impl ClientBuilder {
     /// limit.
     ///
     /// When the service fails, its error's text becomes the connection
-    /// error's message, escaped and cut at 200 characters; the SDK cannot know
-    /// what that text holds, so a service that prints a request header into
-    /// its error puts that header's value into the message.
+    /// error's message, escaped and cut at 200 characters. The request's
+    /// credentials are replaced by `***` first: the API key, and the value of
+    /// every header whose name is a secret one (`authorization`,
+    /// `proxy-authorization`, `x-api-key`, `api-key`, `cookie`, `set-cookie`,
+    /// or any name containing `token` or `secret`) or that is flagged
+    /// sensitive, as it is, as `{:?}` of a `str`, `str::escape_debug`, `{:?}`
+    /// of a `HeaderValue` and of `Bytes`, and a JSON string write it. When
+    /// any of those occurs in the error's `Display`, `{:?}` or `{:#?}`, or in
+    /// any error below it, the [`source`](std::error::Error::source) is a
+    /// redacted copy that cannot be downcast. The message is redacted after
+    /// escaping as well, so a covered form the escaping creates by chance is
+    /// `***` too. The value of any other header a service prints stays in the
+    /// message, and so does a credential written in a form not listed here:
+    /// as a list of byte values, `{:x?}`, percent-encoded or in base64.
     ///
     /// # Errors
     ///

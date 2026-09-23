@@ -458,7 +458,7 @@ pub(crate) const ZERO_TIMEOUT: &str = "timeout must be a positive, finite number
 /// Python SDK trims with: Unicode whitespace plus the four ASCII separators
 /// U+001C to U+001F, which Python counts as whitespace and Rust's
 /// `char::is_whitespace` does not.
-fn is_python_space(c: char) -> bool {
+pub(crate) fn is_python_space(c: char) -> bool {
     c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 

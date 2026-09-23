@@ -128,9 +128,18 @@ impl Error {
     /// The request failed without an HTTP response.
     ///
     /// `cause` is the transport's own error, kept as the
-    /// [`source`](StdError::source) so a caller can downcast to it.
+    /// [`source`](StdError::source) so a caller can downcast to it - unless it
+    /// held a credential of the request, when it is a private redacted copy
+    /// that cannot be downcast.
     pub(crate) fn connection(message: impl Into<Box<str>>, cause: Option<Cause>) -> Self {
         Self::plain(ErrorKind::Connection, message, cause)
+    }
+
+    /// The message and the cause, taken apart so that one of them can be
+    /// replaced without touching the other.
+    pub(crate) fn into_parts(self) -> (Box<str>, Option<Cause>) {
+        let Inner { message, source, .. } = *self.0;
+        (message, source)
     }
 
     /// The attempt ran past `timeout`.
@@ -200,7 +209,10 @@ impl StdError for Error {
     /// An [`ErrorKind::Api`] has none: the server's answer is the failure, and
     /// it is already what `Display` prints. A response-validation failure
     /// leads to the decode error that names the offending field, which carries
-    /// a position `Display` leaves out.
+    /// a position `Display` leaves out. A connection failure leads to the
+    /// transport's own error, which a caller can downcast to - unless it held
+    /// a credential of the request, when it is a private redacted copy that
+    /// cannot be downcast.
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match &self.0.kind {
             ErrorKind::Api(_) => None,

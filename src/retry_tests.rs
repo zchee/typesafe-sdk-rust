@@ -564,13 +564,18 @@ fn assert_config(result: Result<RetryPolicy, Error>, display: &str) {
 /// A transport that fails its first `failures` calls with an I/O error of
 /// `kind` whose text is `attempt <n>`, and hands the rest to the default
 /// transport: a connection that could not be made, or broke, as upstream's
-/// mock transport raises `ConnectError` or `ReadError`.
+/// mock transport raises `ConnectError` or `ReadError`. With
+/// `ready_failures`, its first calls to `poll_ready` fail instead, with
+/// `failed`: a failure before anything is sent, as upstream's
+/// `LocalProtocolError`.
 #[derive(Clone)]
 struct Flaky {
     inner: HyperTransport,
     calls: Arc<AtomicUsize>,
     failures: usize,
     kind: io::ErrorKind,
+    readies: Arc<AtomicUsize>,
+    ready_failures: usize,
 }
 
 impl Flaky {
@@ -585,11 +590,23 @@ impl Flaky {
             calls: Arc::new(AtomicUsize::new(0)),
             failures,
             kind,
+            readies: Arc::new(AtomicUsize::new(0)),
+            ready_failures: 0,
         }
+    }
+
+    /// A transport whose first `failures` calls to `poll_ready` fail, and
+    /// whose calls all go through.
+    fn not_ready(failures: usize) -> Self {
+        Self { ready_failures: failures, ..Self::new(0, io::ErrorKind::Other) }
     }
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn readies(&self) -> usize {
+        self.readies.load(Ordering::SeqCst)
     }
 }
 
@@ -601,6 +618,10 @@ impl Service<Request<Body>> for Flaky {
     type Future = Answered;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), BoxError>> {
+        let ready = self.readies.fetch_add(1, Ordering::SeqCst) + 1;
+        if ready <= self.ready_failures {
+            return Poll::Ready(Err(Box::new(io::Error::other("failed"))));
+        }
         Poll::Ready(Ok(()))
     }
 
@@ -944,6 +965,40 @@ async fn a_transport_failure_is_retried_as_upstream_test_connection_retry_recove
         assert!((0.375..=0.5).contains(&delays[0].as_secs_f64()));
         assert!((0.75..=1.0).contains(&delays[1].as_secs_f64()));
     }
+}
+
+/// `test_connection_retry_recovers`, `LocalProtocolError`: a transport that
+/// fails before anything is sent - here, its `poll_ready` - is retried like
+/// one that fails the call, and the third attempt succeeds.
+#[tokio::test]
+async fn a_failure_before_sending_is_retried_as_upstream_test_connection_retry_recovers() {
+    let server = serve(|_, _| respond(200, r#"{"models": []}"#, &[])).await;
+    let time = FakeTime::new();
+    let transport = Flaky::not_ready(2);
+    let client = flaky_client(&server, transport.clone(), RetryPolicy::default().on(&time));
+
+    let response = client.models().list().send().await.expect("the third attempt succeeds");
+    assert!(response.models().is_empty());
+    assert_eq!(transport.readies(), 3, "one poll_ready per attempt");
+    assert_eq!(transport.calls(), 1, "only the third attempt is sent");
+    assert_eq!(retry_counts(&server.requests()), [Some("2".to_owned())]);
+    assert_eq!(time.delays(), [Duration::from_millis(438), Duration::from_millis(875)]);
+
+    // With no retry, the first failure is the error: a connection error
+    // with the transport's error as its cause.
+    let transport = Flaky::not_ready(1);
+    let error = flaky_client(&server, transport.clone(), RetryPolicy::default().max_retries(0))
+        .models()
+        .list()
+        .send()
+        .await
+        .expect_err("the transport is not ready");
+    assert!(matches!(error.kind(), ErrorKind::Connection), "{error:?}");
+    assert_eq!(error.to_string(), "Connection error: failed");
+    let cause = error.source().expect("the transport's error is the cause");
+    assert_eq!(cause.to_string(), "failed");
+    assert!(cause.downcast_ref::<io::Error>().is_some(), "{error:?}");
+    assert_eq!(transport.readies(), 1);
 }
 
 /// `test_connection_retry_recovers`, `ReadTimeout`: an attempt that runs

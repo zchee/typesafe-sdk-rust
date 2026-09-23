@@ -41,8 +41,9 @@ use tracing::Level;
 use crate::error::Error;
 #[cfg(feature = "tracing")]
 use crate::{
-    constants::{SECRET_HEADERS, request_id},
+    constants::request_id,
     error::{ErrorKind, format_endpoint},
+    redact::is_secret,
     text::{Backslash, MAX_NAME_CHARS, SafeText},
 };
 
@@ -387,19 +388,6 @@ impl fmt::Debug for Shown<'_> {
             None => fmt::Debug::fmt(REDACTED, formatter),
         }
     }
-}
-
-/// Whether the value of this header must not be printed.
-///
-/// `http` stores every header name lower-cased, which is what makes the
-/// comparisons here case-insensitive without lower-casing anything.
-#[cfg(feature = "tracing")]
-fn is_secret(name: &HeaderName, value: &HeaderValue) -> bool {
-    let name = name.as_str();
-    value.is_sensitive()
-        || SECRET_HEADERS.contains(&name)
-        || name.contains("token")
-        || name.contains("secret")
 }
 
 #[cfg(all(test, feature = "tracing"))]

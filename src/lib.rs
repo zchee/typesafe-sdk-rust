@@ -74,6 +74,7 @@ pub mod error;
 pub mod models;
 mod name;
 pub mod question;
+mod redact;
 #[cfg(test)]
 mod rendering_tests;
 pub mod request;

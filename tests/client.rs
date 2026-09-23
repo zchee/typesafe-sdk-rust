@@ -600,6 +600,42 @@ async fn transport_errors_are_connection_errors_with_their_cause() {
     let message = connection_message(&error);
     assert!(message.starts_with("Connection error: client error (SendRequest): "), "{message}");
     assert!(cause::<hyper::Error>(&error).is_some_and(hyper::Error::is_parse), "{error:?}");
+
+    // Upstream's `LocalProtocolError`: the transport fails before anything is
+    // sent, which here is `poll_ready`.
+    let error = Client::builder()
+        .api_key("test-key")
+        .base_url("https://api.typesafe.ai")
+        .retry(RetryPolicy::default().max_retries(0))
+        .build_with_service(NeverReady)
+        .expect("the client builds")
+        .models()
+        .list()
+        .send()
+        .await
+        .expect_err("the transport is never ready");
+    assert_eq!(connection_message(&error), "Connection error: failed");
+    let cause = error.source().expect("the transport's error is the cause");
+    assert_eq!(cause.to_string(), "failed");
+    assert!(cause.downcast_ref::<std::io::Error>().is_some(), "{error:?}");
+}
+
+/// A transport that is never ready to take a request.
+#[derive(Debug, Clone, Copy)]
+struct NeverReady;
+
+impl Service<Request<Body>> for NeverReady {
+    type Response = Response<Body>;
+    type Error = std::io::Error;
+    type Future = std::future::Ready<Result<Response<Body>, std::io::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Err(std::io::Error::other("failed")))
+    }
+
+    fn call(&mut self, _: Request<Body>) -> Self::Future {
+        unreachable!("the client calls a service only once it is ready")
+    }
 }
 
 /// A transport error that says whatever it likes: a newline, an ANSI
@@ -661,6 +697,334 @@ async fn a_transport_error_of_any_text_is_escaped_and_cut_in_the_message() {
     }
     let cause = error.source().and_then(|cause| cause.downcast_ref::<Loud>());
     assert_eq!(cause.map(ToString::to_string), Some(Loud.to_string()));
+}
+
+// ------------------------------------------------ credentials in errors
+
+/// Where a failing [`Echo`] fails.
+#[derive(Debug, Clone, Copy)]
+enum Stage {
+    /// `poll_ready`, before there is a request.
+    PollReady,
+    /// The call itself.
+    Call,
+    /// Reading the response body.
+    Body,
+    /// The call, with an `io::Error` of kind `TimedOut` around the error.
+    TimedOut,
+}
+
+/// Where the credential appears in the error [`Echo`] fails with.
+#[derive(Debug, Clone, Copy)]
+enum Placement {
+    /// In the `Display` of the top link and of a source below it.
+    Source,
+    /// Only in the top link's `{:?}`.
+    Debug,
+    /// Only in the top link's `{:#?}`.
+    AlternateDebug,
+}
+
+/// The error [`Echo`] fails with. Its `Debug` prints the fields, plus
+/// `detail` in the form its placement asks for.
+struct EchoError {
+    display: String,
+    detail: Option<(Placement, String)>,
+    source: Option<Box<EchoError>>,
+}
+
+impl std::fmt::Display for EchoError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.display)
+    }
+}
+
+impl std::fmt::Debug for EchoError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let alternate = formatter.alternate();
+        let mut shown = formatter.debug_struct("EchoError");
+        shown.field("display", &self.display);
+        match &self.detail {
+            Some((Placement::Debug, detail)) if !alternate => {
+                shown.field("detail", detail);
+            }
+            Some((Placement::AlternateDebug, detail)) if alternate => {
+                shown.field("detail", detail);
+            }
+            _ => {}
+        }
+        shown.field("source", &self.source).finish()
+    }
+}
+
+impl StdError for EchoError {
+    fn source(&self) -> Option<&(dyn StdError + 'static)> {
+        self.source.as_deref().map(|source| source as &(dyn StdError + 'static))
+    }
+}
+
+/// A transport that fails at its [`Stage`] with an error that prints the
+/// request's `Authorization` value as `Bytes` `Debug` does, and a source that
+/// prints the credential after the scheme and the `x-client-secret` value,
+/// as upstream's `test_transport_errors_do_not_expose_credentials` does.
+/// Before there is a request it prints the values it was built with.
+#[derive(Clone)]
+struct Echo {
+    stage: Stage,
+    placement: Placement,
+    authorization: String,
+    secret: String,
+    /// Invocations of the step that fails.
+    calls: Arc<AtomicUsize>,
+    /// The `Display` of the last error failed with, and of its source.
+    last: Arc<Mutex<String>>,
+}
+
+impl Echo {
+    fn error(&self, authorization: &[u8], secret: &[u8]) -> Box<dyn StdError + Send + Sync> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let authorization_text = String::from_utf8_lossy(authorization);
+        let credential = authorization_text.split_once(' ').map_or("", |(_, rest)| rest);
+        let inner = format!(
+            "Rejected authorization: {credential}; provider: {}",
+            String::from_utf8_lossy(secret)
+        );
+        let inner_text = inner.clone();
+        let echoed = format!("Illegal header value {:?}", Bytes::copy_from_slice(authorization));
+        let error = match self.placement {
+            Placement::Source => EchoError {
+                display: echoed,
+                detail: None,
+                source: Some(Box::new(EchoError { display: inner, detail: None, source: None })),
+            },
+            placement => EchoError {
+                display: String::from("Illegal header value"),
+                detail: Some((placement, format!("{echoed}: {inner}"))),
+                source: None,
+            },
+        };
+        let mut last = self.last.lock().expect("not poisoned");
+        *last = format!("{error} / {error:?} / {error:#?} / {inner_text}");
+        drop(last);
+        match self.stage {
+            Stage::TimedOut => Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, error)),
+            _ => Box::new(error),
+        }
+    }
+}
+
+/// A response body that fails on its first read.
+struct EchoBody(Option<Box<dyn StdError + Send + Sync>>);
+
+impl http_body::Body for EchoBody {
+    type Data = Bytes;
+    type Error = Box<dyn StdError + Send + Sync>;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        Poll::Ready(self.0.take().map(Err))
+    }
+}
+
+impl Service<Request<Body>> for Echo {
+    type Response = Response<EchoBody>;
+    type Error = Box<dyn StdError + Send + Sync>;
+    type Future = std::future::Ready<Result<Response<EchoBody>, Self::Error>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        match self.stage {
+            Stage::PollReady => {
+                Poll::Ready(Err(self.error(self.authorization.as_bytes(), self.secret.as_bytes())))
+            }
+            _ => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn call(&mut self, request: Request<Body>) -> Self::Future {
+        let headers = request.headers();
+        let error =
+            self.error(headers["authorization"].as_bytes(), headers["x-client-secret"].as_bytes());
+        std::future::ready(match self.stage {
+            Stage::Body => Ok(Response::new(EchoBody(Some(error)))),
+            _ => Err(error),
+        })
+    }
+}
+
+/// The two credentials upstream's test uses: a plain one, and one whose
+/// quote, double quote and backslash every escaping form writes differently.
+const CREDENTIALS: [&str; 2] = ["ts_live_private", "ts_live_quo'te\"slash\\tail"];
+
+/// The value of the secret default header in these tests.
+const PROVIDER_SECRET: &str = "provider-credential";
+
+/// Every form in which `secret` could be printed: as it is, and as `{:?}` of
+/// a `str`, `escape_debug`, `{:?}` of a `HeaderValue` and of `Bytes`, and a
+/// JSON string write it, without their quotes.
+fn printed_forms(secret: &str) -> Vec<String> {
+    let debug = format!("{secret:?}");
+    let header = format!("{:?}", http::HeaderValue::from_str(secret).expect("a header value"));
+    let bytes = format!("{:?}", Bytes::copy_from_slice(secret.as_bytes()));
+    let json = serde_json::to_string(secret).expect("a string encodes");
+    vec![
+        secret.to_owned(),
+        debug[1..debug.len() - 1].to_owned(),
+        secret.escape_debug().to_string(),
+        header[1..header.len() - 1].to_owned(),
+        bytes[2..bytes.len() - 1].to_owned(),
+        json[1..json.len() - 1].to_owned(),
+    ]
+}
+
+/// Every rendering of `error` a caller can reach: `Display`, `{:?}` and
+/// `{:#?}` of it and of every link of its `source()` chain.
+fn every_rendering(error: &Error) -> Vec<String> {
+    let mut renderings = vec![error.to_string(), format!("{error:?}"), format!("{error:#?}")];
+    for link in
+        std::iter::successors(error.source(), |cause: &&(dyn StdError + 'static)| (*cause).source())
+    {
+        renderings.extend([link.to_string(), format!("{link:?}"), format!("{link:#?}")]);
+    }
+    renderings
+}
+
+/// Asserts that no printed form of any of `secrets` is in any rendering of
+/// `error`.
+#[track_caller]
+fn assert_no_credential(error: &Error, secrets: &[&str], case: &str) {
+    for rendering in every_rendering(error) {
+        for secret in secrets {
+            for form in printed_forms(secret) {
+                assert!(
+                    !rendering.contains(&form),
+                    "{case}: {form:?} of {secret:?} in {rendering}"
+                );
+            }
+        }
+    }
+}
+
+/// The client of these tests: the credential as its key, a secret default
+/// header, and three attempts with no wait between them.
+fn echo_client(echo: Echo, credential: &str) -> Client<Echo> {
+    Client::builder()
+        .api_key(credential)
+        .base_url("https://api.typesafe.ai")
+        .default_header("x-client-secret", PROVIDER_SECRET)
+        .retry(
+            RetryPolicy::default()
+                .max_retries(2)
+                .backoff_initial(Duration::ZERO)
+                .backoff_max(Duration::ZERO),
+        )
+        .build_with_service(echo)
+        .expect("the client builds")
+}
+
+/// Fails through an [`Echo`] and returns the error and the echo.
+async fn echo_failure(stage: Stage, placement: Placement, credential: &str) -> (Error, Echo) {
+    let echo = Echo {
+        stage,
+        placement,
+        authorization: format!("Bearer {credential}"),
+        secret: PROVIDER_SECRET.to_owned(),
+        calls: Arc::default(),
+        last: Arc::default(),
+    };
+    let error = echo_client(echo.clone(), credential)
+        .models()
+        .list()
+        .send()
+        .await
+        .expect_err("the transport fails");
+    (error, echo)
+}
+
+const STAGES: [Stage; 4] = [Stage::PollReady, Stage::Call, Stage::Body, Stage::TimedOut];
+
+const PLACEMENTS: [Placement; 3] = [Placement::Source, Placement::Debug, Placement::AlternateDebug];
+
+/// Upstream `test_transport_errors_do_not_expose_credentials`: a transport
+/// whose error prints the request's credentials, at every stage an attempt
+/// can fail at, never lets one reach the connection error - its message, its
+/// `Debug`, or any link of its chain - in any form, while the transport's
+/// own error still holds it. The chain is then a redacted copy, which cannot
+/// be downcast to the transport's type.
+#[tokio::test]
+async fn transport_errors_never_expose_a_credential() {
+    for stage in STAGES {
+        for placement in PLACEMENTS {
+            for credential in CREDENTIALS {
+                let case = format!("{stage:?} {placement:?} {credential:?}");
+                let (error, echo) = echo_failure(stage, placement, credential).await;
+
+                assert!(matches!(error.kind(), ErrorKind::Connection), "{case}: {error:?}");
+                assert_eq!(echo.calls.load(Ordering::SeqCst), 3, "{case}: three attempts");
+                let last = echo.last.lock().expect("not poisoned").clone();
+                assert!(last.contains(credential), "{case}: the transport's own text: {last}");
+                assert!(last.contains(PROVIDER_SECRET), "{case}: {last}");
+                match placement {
+                    Placement::Source => {
+                        assert_eq!(
+                            error.to_string(),
+                            "Connection error: Illegal header value b\"***\": \
+                             Rejected authorization: ***; provider: ***",
+                            "{case}"
+                        );
+                        let second = error
+                            .source()
+                            .and_then(StdError::source)
+                            .unwrap_or_else(|| panic!("{case}: two links: {error:?}"));
+                        assert_eq!(
+                            second.to_string(),
+                            "Rejected authorization: ***; provider: ***",
+                            "{case}"
+                        );
+                    }
+                    Placement::Debug | Placement::AlternateDebug => {
+                        assert_eq!(
+                            error.to_string(),
+                            "Connection error: Illegal header value",
+                            "{case}"
+                        );
+                        let debug = format!("{error:?}");
+                        let alternate = format!("{error:#?}");
+                        let shown =
+                            if matches!(placement, Placement::Debug) { &debug } else { &alternate };
+                        assert!(
+                            shown.contains("Rejected authorization: ***; provider: ***"),
+                            "{case}: the redacted detail in {shown}"
+                        );
+                        // The detail is printed through `{:?}` a second time, so
+                        // the `Bytes` form of the `Authorization` value is escaped
+                        // twice. A form escaped twice is not one the SDK looks for:
+                        // a credential without a quote or a backslash reads the same
+                        // and is replaced, the other one is left escaped twice.
+                        let twice = if credential == "ts_live_private" {
+                            r#"b\"***\""#.to_owned()
+                        } else {
+                            format!(
+                                "{:?}",
+                                format!("{:?}", Bytes::from(format!("Bearer {credential}")))
+                            )
+                        };
+                        let twice = twice.trim_matches('"');
+                        assert!(shown.contains(twice), "{case}: {twice} in {shown}");
+                    }
+                }
+                let top = error.source().unwrap_or_else(|| panic!("{case}: a cause: {error:?}"));
+                assert!(top.downcast_ref::<EchoError>().is_none(), "{case}: {top:?}");
+                assert!(top.downcast_ref::<std::io::Error>().is_none(), "{case}: {top:?}");
+                assert_no_credential(
+                    &error,
+                    &[credential, &format!("Bearer {credential}"), PROVIDER_SECRET],
+                    &case,
+                );
+            }
+        }
+    }
 }
 
 /// A TLS server whose certificate the client was not told to trust.
@@ -1561,6 +1925,34 @@ mod logging {
             assert!(!failure.contains(&error.to_string()), "{failure}");
         }
         held.release.notify_waiters();
+    }
+
+    /// The events of a failing attempt, and a caller's own event holding the
+    /// error it returned, carry no credential of the request in any form.
+    #[tokio::test]
+    async fn transport_errors_never_log_a_credential() {
+        for stage in STAGES {
+            for credential in CREDENTIALS {
+                let case = format!("{stage:?} {credential:?}");
+                let recorder = Recorder::default();
+                let _installed = install(&recorder);
+
+                let (error, _) = echo_failure(stage, Placement::Source, credential).await;
+                tracing::error!(error = %error, detail = ?error);
+
+                let text = recorder.text();
+                assert!(text.contains("<- connection error"), "{case}:\n{text}");
+                assert!(
+                    text.contains("Rejected authorization: ***; provider: ***"),
+                    "{case}:\n{text}"
+                );
+                for secret in [credential, &format!("Bearer {credential}"), PROVIDER_SECRET] {
+                    for form in printed_forms(secret) {
+                        assert!(!text.contains(&form), "{case}: {form:?} reached\n{text}");
+                    }
+                }
+            }
+        }
     }
 
     /// Upstream `test_secret_headers_redacted`, the nine spellings of a secret
