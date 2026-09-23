@@ -737,6 +737,72 @@ fn a_response_too_large_names_its_limit_and_has_no_cause() {
 }
 
 #[test]
+fn summary_is_one_fixed_sentence_per_kind_and_never_the_message() {
+    let body = Bytes::from_static(br#"{"model":"jev-1","answers":{"spam":{}}}"#);
+    let decode_error = codec::decode::<Fixture>(&body).expect_err("the noul field is missing");
+    let invalid =
+        ResponseValidationError::new(status(200), body, HeaderMap::new(), None, decode_error);
+    let cause = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "10.0.0.7:443 refused");
+    let connection = Error::connection("10.0.0.7:443 refused", Some(Box::new(cause)));
+    assert_eq!(
+        connection.source().expect("the transport cause is retained").to_string(),
+        "10.0.0.7:443 refused"
+    );
+    let cases = [
+        (
+            Error::timeout(Duration::from_secs(10)),
+            "timeout",
+            "The request timed out.",
+            "Request timed out (timeout=10s).",
+        ),
+        (
+            connection,
+            "connection error",
+            "The connection to the API failed.",
+            "10.0.0.7:443 refused",
+        ),
+        (
+            Error::response_too_large(1024),
+            "response too large",
+            "The response was larger than the size limit.",
+            "The response body exceeded the limit of 1024 bytes and was not read.",
+        ),
+        (
+            Error::from(api(403, r#"{"message":"server-chosen text"}"#)),
+            "api error",
+            "The API answered with an error.",
+            "403 server-chosen text",
+        ),
+        (
+            Error::from(invalid),
+            "invalid response",
+            "The response did not have the expected shape.",
+            "200 Invalid response data at 'answers.spam.noul'.",
+        ),
+        (
+            Error::invalid_request("caller-chosen text"),
+            "invalid request",
+            "The request was invalid and was not sent.",
+            "caller-chosen text",
+        ),
+        (
+            Error::config("configuration detail"),
+            "config error",
+            "The client configuration is invalid.",
+            "configuration detail",
+        ),
+    ];
+    for (error, word, sentence, display) in cases {
+        let summary: &'static str = error.summary();
+        assert_eq!(summary, sentence, "{word}: {error:?}");
+        assert_eq!(error.kind().words(), (word, sentence), "{word}: {error:?}");
+        assert_eq!(error.to_string(), display, "{word}: Display stays unchanged");
+        assert!(!summary.contains("10.0.0.7:443"), "{word}: no transport address in {summary}");
+        assert!(!summary.contains("refused"), "{word}: no transport message in {summary}");
+    }
+}
+
+#[test]
 fn each_kind_renders_and_chains_the_way_its_caller_will_read_it() {
     let config = Error::config("TYPESAFE_API_KEY is not set");
     assert!(matches!(config.kind(), ErrorKind::Config));

@@ -187,6 +187,7 @@ live API answers a request without a key (**403**, not the documented 401).
 
 An error's `Display` is the sentence to show a user; for an API error it reads
 `POST https://api.typesafe.ai/v1/systemone: 429 Too many requests (request_id=req_123)`.
+`Error::summary()` instead returns one fixed sentence per kind, never server or transport text.
 
 A response body that is **not valid UTF-8** is not JSON (RFC 8259 requires UTF-8), and every body
 is checked before the parser reads it. With a 2xx status it is a `ResponseValidation` error: its

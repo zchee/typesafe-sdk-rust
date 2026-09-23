@@ -109,10 +109,39 @@ pub enum ErrorKind {
     },
 }
 
+impl ErrorKind {
+    /// The fixed log word and user-facing sentence for this kind.
+    pub(crate) fn words(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Timeout { .. } => ("timeout", "The request timed out."),
+            Self::Connection => ("connection error", "The connection to the API failed."),
+            Self::ResponseTooLarge { .. } => {
+                ("response too large", "The response was larger than the size limit.")
+            }
+            Self::Api(_) => ("api error", "The API answered with an error."),
+            Self::ResponseValidation(_) => {
+                ("invalid response", "The response did not have the expected shape.")
+            }
+            Self::InvalidRequest => {
+                ("invalid request", "The request was invalid and was not sent.")
+            }
+            Self::Config => ("config error", "The client configuration is invalid."),
+        }
+    }
+}
+
 impl Error {
     /// Which kind of failure this is.
     pub fn kind(&self) -> &ErrorKind {
         &self.0.kind
+    }
+
+    /// A fixed sentence for this kind of failure, safe to show a user.
+    ///
+    /// It never contains server or transport text. Unlike `Display`, it
+    /// names only the kind, not this failure's message or metadata.
+    pub fn summary(&self) -> &'static str {
+        self.kind().words().1
     }
 
     /// The client could not be built from the configuration it was given.

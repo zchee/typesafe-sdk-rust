@@ -42,7 +42,7 @@ use crate::error::Error;
 #[cfg(feature = "tracing")]
 use crate::{
     constants::request_id,
-    error::{ErrorKind, format_endpoint},
+    error::format_endpoint,
     redact::is_secret,
     text::{Backslash, MAX_NAME_CHARS, SafeText},
 };
@@ -196,13 +196,13 @@ pub(crate) fn received(
 /// can carry text the server chose.
 #[cfg(feature = "tracing")]
 pub(crate) fn failed(exchange: Exchange<'_>, error: &Error, started: Started) {
-    tracing::info!(target: TARGET, "{} <- {}", Endpoint(exchange), failure_word(error));
+    tracing::info!(target: TARGET, "{} <- {}", Endpoint(exchange), error.kind().words().0);
     tracing::debug!(
         target: TARGET,
         method = %exchange.method,
         endpoint = %exchange.uri,
         elapsed = %Elapsed(started),
-        failure = failure_word(error),
+        failure = error.kind().words().0,
         "request failed"
     );
 }
@@ -223,20 +223,6 @@ pub(crate) fn retrying(exchange: Exchange<'_>) {
 /// A failed request is about to be sent again.
 #[cfg(not(feature = "tracing"))]
 pub(crate) fn retrying(_: Exchange<'_>) {}
-
-/// The word a failure is logged as.
-#[cfg(feature = "tracing")]
-fn failure_word(error: &Error) -> &'static str {
-    match error.kind() {
-        ErrorKind::Timeout { .. } => "timeout",
-        ErrorKind::Connection => "connection error",
-        ErrorKind::ResponseTooLarge { .. } => "response too large",
-        ErrorKind::Api(_) => "api error",
-        ErrorKind::ResponseValidation(_) => "invalid response",
-        ErrorKind::InvalidRequest => "invalid request",
-        ErrorKind::Config => "config error",
-    }
-}
 
 /// A request's method and URL, as an error names its endpoint. Built only
 /// when an event that prints it is recorded.
