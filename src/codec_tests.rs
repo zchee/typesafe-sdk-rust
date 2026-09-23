@@ -63,6 +63,37 @@ fn raw_json_reads_back_through_from_reader_from_value_and_a_token_keyed_map() {
         assert_eq!(raw, expected, "{case}");
     }
 
+    #[cfg(not(feature = "sonic"))]
+    {
+        use serde::de::value::StringDeserializer;
+
+        let case = "owned raw text keeps its buffer";
+        let text = r#"{"a":1}"#;
+        let owned = String::from(text);
+        let pointer = owned.as_ptr();
+        let length = owned.len();
+        let raw = RawJson::deserialize(StringDeserializer::<ValueError>::new(owned))
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(raw.as_str(), text, "{case}");
+        assert_eq!(raw.as_str().len(), length, "{case}");
+        assert_eq!(raw.as_str().as_ptr(), pointer, "{case}");
+    }
+    #[cfg(not(feature = "sonic"))]
+    {
+        let case = "owned token value keeps its buffer inside the SDK";
+        let text = r#"{"a":1}"#;
+        let owned = String::from(text);
+        let pointer = owned.as_ptr();
+        let length = owned.len();
+        // Only the SDK decode path keeps token text without rendering it again.
+        let _inside = DecoderMark::enter();
+        let map = MapDeserializer::<_, ValueError>::new([(SPLICE_TOKEN, owned)].into_iter());
+        let raw = RawJson::deserialize(map).unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(raw.as_str(), text, "{case}");
+        assert_eq!(raw.as_str().len(), length, "{case}");
+        assert_eq!(raw.as_str().as_ptr(), pointer, "{case}");
+    }
+
     let injected = r#"{"a":1},"x":2"#;
     let map =
         MapDeserializer::<_, ValueError>::new([(backend::SPLICE_TOKEN, injected)].into_iter());
