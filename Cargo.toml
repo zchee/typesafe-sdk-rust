@@ -105,7 +105,7 @@ trybuild = "1.0.121"
 
 [package]
 name = "typesafe-sdk-rust"
-version = "0.1.1"
+version = "0.2.0"
 description = "Async Rust SDK for the TypeSafe AI System One API"
 readme = "README.md"
 keywords = ["typesafe", "ai", "llm", "sdk", "async"]

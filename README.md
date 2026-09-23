@@ -15,7 +15,7 @@ taken on crates.io. The library it builds is **`typesafe_sdk`**, so code writes
 
 ```toml
 [dependencies]
-typesafe-sdk-rust = "0.1.1"
+typesafe-sdk-rust = "0.2.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
