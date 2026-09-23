@@ -1,6 +1,6 @@
 # Line coverage
 
-Measured at commit `86a4ba4` with
+Measured at commit `d4b11d4` with
 `cargo llvm-cov nextest -p typesafe-sdk-rust --all-features --fail-under-lines 85 --show-missing-lines`;
 every line number below is a line of that commit.
 
@@ -16,7 +16,7 @@ with rustc 1.98.1 and cargo-llvm-cov.
 
 | Lines | Missed | Line coverage | Regions | Missed | Functions | Missed |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4,287 | 151 | **96.48%** | 6,744 | 318 | 741 | 32 |
+| 4,290 | 151 | **96.48%** | 6,752 | 318 | 741 | 32 |
 
 A line counts as covered when any test executes it in any instantiation of the
 code it belongs to.
