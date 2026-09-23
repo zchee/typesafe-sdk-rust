@@ -223,7 +223,9 @@ pub(crate) enum Outcome {
 }
 
 /// Scans `source` and the links below it, and the `message` already built
-/// from them, for the credentials.
+/// from them, for the credentials. `message` is the part after the fixed
+/// `Connection error: ` prefix, which is the SDK's own text and is never
+/// redacted.
 ///
 /// Every link is rendered with `Display`, `{:?}` and `{:#?}`: an error's
 /// `Debug` prints its source's `Debug`, and `{:#?}` passes the alternate flag

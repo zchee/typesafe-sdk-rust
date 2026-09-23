@@ -624,11 +624,16 @@ pub(crate) fn redacted(error: Error, exchange: Exchange<'_>) -> Error {
             .iter()
             .chain(exchange.call_headers.iter().map(|(name, value)| (name, value))),
     );
-    match redact::copy_chain(source, &error.to_string(), &credentials) {
+    // The fixed prefix is the SDK's own text: only what follows it came from
+    // the transport, as the Python SDK redacts the error before prefixing it.
+    let message = error.to_string();
+    let transport_text = message.strip_prefix(CONNECTION_PREFIX).unwrap_or(&message);
+    match redact::copy_chain(source, transport_text, &credentials) {
         Outcome::Kept => error,
         Outcome::MessageOnly => {
-            let (message, source) = error.into_parts();
-            Error::connection(credentials.redact(&message), source)
+            let (_, source) = error.into_parts();
+            let redacted = credentials.redact(transport_text);
+            Error::connection(format!("{CONNECTION_PREFIX}{redacted}"), source)
         }
         Outcome::Replaced(link) => {
             let message = cut(&render_uncut(&link).redacted(&credentials));

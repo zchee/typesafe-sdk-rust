@@ -395,6 +395,32 @@ fn a_chain_without_a_credential_is_kept_as_it_is() {
     assert!(source.downcast_ref::<OpaqueError>().is_some(), "the original is kept: {source:?}");
     assert_eq!(source.to_string(), "a\tb");
     assert_no_variant(&error, &credentials);
+
+    // The fixed `Connection error: ` prefix is the SDK's own text and is
+    // never scanned: a secret that occurs only there keeps the chain and the
+    // message, and a message-only replacement leaves the prefix whole.
+    let prefix_only = headers(&[("x-csrf-token", "nect")]);
+    let error = failed(Link::plain("refused", None), &prefix_only, &[]);
+    assert_eq!(error.to_string(), "Connection error: refused");
+    let source = StdError::source(&error).expect("a cause");
+    assert!(source.downcast_ref::<Link>().is_some(), "the original is kept: {source:?}");
+
+    let mut spelled_and_short = spelled.clone();
+    spelled_and_short.insert("x-csrf-token", HeaderValue::from_static("on"));
+    let error = failed(OpaqueError, &spelled_and_short, &[]);
+    assert_eq!(error.to_string(), "Connection error: ***");
+    let source = StdError::source(&error).expect("a cause");
+    assert!(source.downcast_ref::<OpaqueError>().is_some(), "the original is kept: {source:?}");
+    assert_no_variant(&error, &credentials);
+
+    // A link that holds the secret is replaced by a copy; the prefix of its
+    // message still reads as the SDK wrote it.
+    let short = headers(&[("x-csrf-token", "on")]);
+    let error = failed(Link::plain("connection refused", None), &short, &[]);
+    assert_eq!(error.to_string(), "Connection error: c***necti*** refused");
+    let source = StdError::source(&error).expect("a cause");
+    assert!(source.downcast_ref::<Link>().is_none(), "a copy: {source:?}");
+    assert_eq!(source.to_string(), "c***necti*** refused");
 }
 
 /// A chain longer than the scan limit cannot be shown to be clean, so it is
