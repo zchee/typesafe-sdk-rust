@@ -1953,7 +1953,7 @@ dependencies = [
 
 [[package]]
 name = "typesafe-sdk-rust"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "codspeed-divan-compat",
