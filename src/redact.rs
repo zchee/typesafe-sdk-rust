@@ -85,11 +85,6 @@ impl Credentials {
         Self { variants }
     }
 
-    /// Whether there is nothing to look for.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.variants.is_empty()
-    }
-
     /// Whether any form of a credential occurs in `text`.
     pub(crate) fn occur_in(&self, text: &str) -> bool {
         self.next_match(text, 0).is_some()
@@ -230,9 +225,6 @@ pub(crate) fn copy_chain(
     message: &str,
     credentials: &Credentials,
 ) -> Outcome {
-    if credentials.is_empty() {
-        return Outcome::Kept;
-    }
     let mut texts = Vec::new();
     let mut found = false;
     let mut link = Some(source);

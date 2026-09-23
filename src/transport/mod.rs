@@ -613,10 +613,9 @@ impl Uncut {
 /// the attempt failed. A chain that holds none is returned as it is; see
 /// [`redact::copy_chain`] for the other two outcomes.
 pub(crate) fn redacted(error: Error, exchange: Exchange<'_>) -> Error {
-    if !matches!(error.kind(), ErrorKind::Connection) {
-        return error;
-    }
-    let Some(source) = StdError::source(&error) else {
+    let Some(source) =
+        StdError::source(&error).filter(|_| matches!(error.kind(), ErrorKind::Connection))
+    else {
         return error;
     };
     let credentials = Credentials::new(

@@ -140,7 +140,10 @@ impl StdError for OpaqueError {}
 /// Upstream `test_exception_redaction_escaped_values`: the credential
 /// `private'quoted"value\tail` (a backslash, not a tab), under each of four
 /// secret headers, is replaced in every form Rust writes it in. The two
-/// authorization headers carry it after a scheme.
+/// authorization headers carry it after a scheme. A form that only the
+/// escaping of the message spells - a link's tab written as `\t`, two links
+/// joined by `": "` - is replaced in the message of a redacted chain too,
+/// whole, and the cut cannot leave part of it.
 #[test]
 fn every_escaped_form_of_a_credential_is_replaced() {
     let credential = r#"private'quoted"value\tail"#;
@@ -182,6 +185,30 @@ fn every_escaped_form_of_a_credential_is_replaced() {
         assert!(error.to_string().starts_with("Connection error: raw=***; "), "{name}: {error}");
         let source = StdError::source(&error).expect("a cause");
         assert!(source.downcast_ref::<io::Error>().is_none(), "{name}: a copy, not the original");
+        assert_no_variant(&error, &credentials);
+    }
+
+    // Each chain is replaced because a link's `{:?}` names a credential; the
+    // message is built from the copy's `Display`, where the escaping spells
+    // one: `a\` and `tb` across the escaped tab, `x: y` across the joiner.
+    let spelled = headers(&[("x-api-key", r"a\"), ("api-key", "tb"), ("x-secret", "x: y")]);
+    let credentials = Credentials::new(&spelled);
+    let cases = [
+        (Link::new("a\tb", r"Tab { a\ }", "Tab", None), "Connection error: ***"),
+        (
+            Link::new("x", "Joined { x: y }", "Joined", Some(Link::plain("y", None))),
+            "Connection error: ***",
+        ),
+        (
+            Link::new(&format!("{}a\tb", "z".repeat(198)), "Tab { tb }", "Tab", None),
+            &*format!("Connection error: {}\u{2026}", "z".repeat(198)),
+        ),
+    ];
+    for (chain, message) in cases {
+        let error = failed(chain, &spelled, &[]);
+        assert_eq!(error.to_string(), message);
+        let source = StdError::source(&error).expect("a cause");
+        assert!(source.downcast_ref::<Link>().is_none(), "a copy: {source:?}");
         assert_no_variant(&error, &credentials);
     }
 }
@@ -281,7 +308,7 @@ fn only_secret_or_sensitive_headers_are_credentials() {
     assert_eq!(credentials.variants, sorted, "distinct, longest first");
 
     let none = Credentials::new(&headers(&[("x-default", "value"), ("x-api-key", "")]));
-    assert!(none.is_empty());
+    assert!(none.variants.is_empty());
     assert!(!none.occur_in("value"));
     assert_eq!(none.redact("value"), "value");
 }
