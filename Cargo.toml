@@ -1,30 +1,30 @@
 [workspace]
-# The root package is a workspace member as well, so "." is listed explicitly
-# next to the helper crates. `fuzz/` is a workspace of its own, run with the
-# nightly toolchain only.
-members = [".", "crates/live-tests", "crates/macros", "crates/test-support"]
 # Naming the default set explicitly is what keeps a crate whose tests need a
 # live API key out of a bare `cargo test` and out of CI: such a crate is added
 # to `members` and left out here, so no command has to remember to exclude it.
 default-members = [".", "crates/macros", "crates/test-support"]
+# `fuzz/` is a workspace of its own, run with the nightly toolchain only.
 exclude = ["fuzz"]
+# The root package is a workspace member as well, so "." is listed explicitly
+# next to the helper crates.
+members = [".", "crates/live-tests", "crates/macros", "crates/test-support"]
 # Resolver 3 is the edition-2024 default; stating it silences the warning that
 # a virtual workspace manifest has no edition to infer it from.
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.98"
 license = "Apache-2.0"
 repository = "https://github.com/zchee/typesafe-sdk-rust"
+rust-version = "1.98"
 
 # Lints are declared once here and inherited by every member with
 # `[lints] workspace = true`, so a member cannot quietly opt out of them.
 [workspace.lints.rust]
-unsafe_code = "forbid"
-missing_docs = "warn"
 missing_debug_implementations = "warn"
+missing_docs = "warn"
 unreachable_pub = "warn"
+unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 # `.expect("invariant ...")` stays available for conditions that cannot fail;
@@ -106,18 +106,18 @@ trybuild = "1.0.121"
 [package]
 name = "typesafe-sdk-rust"
 version = "0.2.0"
-description = "Async Rust SDK for the TypeSafe AI System One API"
-readme = "README.md"
-keywords = ["typesafe", "ai", "llm", "sdk", "async"]
 categories = ["api-bindings", "asynchronous"]
 edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
 # A release ships the library, its examples, the README the crate docs embed
 # and the licenses; nothing else of the repository. The tests and benches stay
 # here: they build against the test-support crate, which is never published.
 include = ["/src", "/examples", "/README.md", "/LICENSE", "/LICENSE-THIRD-PARTY"]
+keywords = ["typesafe", "ai", "llm", "sdk", "async"]
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+description = "Async Rust SDK for the TypeSafe AI System One API"
 
 # The package is `typesafe-sdk-rust` because `typesafe-sdk` is taken on
 # crates.io, but callers write `use typesafe_sdk::...`.
@@ -132,16 +132,16 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = ["hyper", "macros", "tracing"]
 # The built-in transport and its TLS stack.
 hyper = ["dep:hyper", "dep:hyper-rustls", "dep:hyper-util", "dep:rustls", "dep:rustls-platform-verifier"]
-# `#[derive(QuestionSet)]`: questions declared as a struct and serialized at
-# compile time.
-macros = ["dep:typesafe-sdk-rust-macros"]
-tracing = ["dep:tracing"]
-# A SIMD parser that carries `unsafe`; off by default.
-sonic = ["dep:sonic-rs"]
 # Exposes `typesafe_sdk::__internals`, the seam the allocation tests and the
 # benchmarks measure through. It carries no semver promise and is never on by
 # default.
 internals = []
+# `#[derive(QuestionSet)]`: questions declared as a struct and serialized at
+# compile time.
+macros = ["dep:typesafe-sdk-rust-macros"]
+# A SIMD parser that carries `unsafe`; off by default.
+sonic = ["dep:sonic-rs"]
+tracing = ["dep:tracing"]
 
 [dependencies]
 bytes = { workspace = true }
@@ -270,13 +270,13 @@ required-features = ["hyper"]
 # `sdk` is the CPU-only set that CodSpeed measures; `loopback` is a real
 # socket and stays out of that run (see the file).
 [[bench]]
-name = "sdk"
 harness = false
+name = "sdk"
 required-features = ["internals", "macros"]
 
 [[bench]]
-name = "loopback"
 harness = false
+name = "loopback"
 required-features = ["hyper"]
 
 [lints]
