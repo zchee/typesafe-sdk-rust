@@ -1,108 +1,3 @@
-[workspace]
-# Naming the default set explicitly is what keeps a crate whose tests need a
-# live API key out of a bare `cargo test` and out of CI: such a crate is added
-# to `members` and left out here, so no command has to remember to exclude it.
-default-members = [".", "crates/macros", "crates/test-support"]
-# `fuzz/` is a workspace of its own, run with the nightly toolchain only.
-exclude = ["fuzz"]
-# The root package is a workspace member as well, so "." is listed explicitly
-# next to the helper crates.
-members = [".", "crates/live-tests", "crates/macros", "crates/test-support"]
-# Resolver 3 is the edition-2024 default; stating it silences the warning that
-# a virtual workspace manifest has no edition to infer it from.
-resolver = "3"
-
-[workspace.package]
-edition = "2024"
-license = "Apache-2.0"
-repository = "https://github.com/zchee/typesafe-sdk-rust"
-rust-version = "1.98"
-
-# Lints are declared once here and inherited by every member with
-# `[lints] workspace = true`, so a member cannot quietly opt out of them.
-[workspace.lints.rust]
-missing_debug_implementations = "warn"
-missing_docs = "warn"
-unreachable_pub = "warn"
-unsafe_code = "forbid"
-
-[workspace.lints.clippy]
-# `.expect("invariant ...")` stays available for conditions that cannot fail;
-# a bare `.unwrap()` carries no such statement, so it is rejected outright.
-unwrap_used = "deny"
-
-# Versions are exact-as-of-publication minimums; cargo treats `"1.11.1"` as
-# `^1.11.1`, so patch and compatible minor upgrades still resolve.
-[workspace.dependencies]
-bytes = "1.12.1"
-# No `serde` feature: the names it holds are decoded and serialized by the
-# SDK's own code, which reads and writes them as plain strings.
-compact_str = { version = "0.10.0", default-features = false, features = ["std"] }
-fastrand = "2.5.0"
-http = "1.5.0"
-http-body = "1.1.0"
-http-body-util = "0.1.5"
-httpdate = "1.0.3"
-hyper = { version = "1.11.1", features = ["client", "http1", "http2"] }
-# hyper-rustls does NOT enable `http2` by default, so ALPN would negotiate
-# HTTP/1.1 only. `native-tokio` (its default root source) is dropped because
-# the trust anchors come from rustls-platform-verifier instead.
-hyper-rustls = { version = "0.27.9", default-features = false, features = [
-    "http1",
-    "http2",
-    "tls12",
-    "aws-lc-rs",
-] }
-hyper-util = { version = "0.1.20", features = [
-    "client-legacy",
-    "http1",
-    "http2",
-    "tokio",
-] }
-# The derive's parser and code generator.
-proc-macro2 = "1.0.107"
-quote = "1.0.47"
-# rustls' defaults are exactly the wanted set: aws_lc_rs, logging,
-# prefer-post-quantum, std, tls12.
-rustls = "0.23.45"
-rustls-platform-verifier = "0.7.0"
-secrecy = "0.10.3"
-serde = { version = "1.0.229", features = ["derive"] }
-sonic-rs = "0.5.10"
-# syn 3 is the major the rest of the graph (serde_derive, thiserror-impl)
-# already builds, so the derive adds no second copy; only the features it
-# uses are named.
-syn = { version = "3.0.6", default-features = false, features = [
-    "derive",
-    "parsing",
-    "printing",
-    "proc-macro",
-] }
-thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["rt", "time"] }
-tokio-rustls = { version = "0.26.5", default-features = false, features = [
-    "aws_lc_rs",
-    "logging",
-    "tls12",
-] }
-tower-service = "0.3.3"
-tracing = "0.1.44"
-
-codspeed-divan-compat = "5.0.2"
-dhat = "0.3.3"
-proptest = "1.11.0"
-# `aws_lc_rs` reuses the crypto backend rustls already links, so the test
-# certificate generator does not drag a second implementation into the graph.
-rcgen = { version = "0.14.10", default-features = false, features = [
-    "aws_lc_rs",
-    "crypto",
-] }
-# `float_roundtrip` makes serde_json parse f64 exactly, which is what the
-# differential tests against the primary codec compare against.
-serde_json = { version = "1.0.151", features = ["float_roundtrip", "raw_value"] }
-serde_path_to_error = "0.1.20"
-trybuild = "1.0.121"
-
 [package]
 name = "typesafe-sdk-rust"
 version = "0.2.0"
@@ -119,14 +14,14 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Async Rust SDK for the TypeSafe AI System One API"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 # The package is `typesafe-sdk-rust` because `typesafe-sdk` is taken on
 # crates.io, but callers write `use typesafe_sdk::...`.
 [lib]
 name = "typesafe_sdk"
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["hyper", "macros", "tracing"]
@@ -281,3 +176,108 @@ required-features = ["hyper"]
 
 [lints]
 workspace = true
+
+[workspace]
+# Naming the default set explicitly is what keeps a crate whose tests need a
+# live API key out of a bare `cargo test` and out of CI: such a crate is added
+# to `members` and left out here, so no command has to remember to exclude it.
+default-members = [".", "crates/macros", "crates/test-support"]
+# `fuzz/` is a workspace of its own, run with the nightly toolchain only.
+exclude = ["fuzz"]
+# The root package is a workspace member as well, so "." is listed explicitly
+# next to the helper crates.
+members = [".", "crates/live-tests", "crates/macros", "crates/test-support"]
+# Resolver 3 is the edition-2024 default; stating it silences the warning that
+# a virtual workspace manifest has no edition to infer it from.
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/zchee/typesafe-sdk-rust"
+rust-version = "1.98"
+
+# Lints are declared once here and inherited by every member with
+# `[lints] workspace = true`, so a member cannot quietly opt out of them.
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unreachable_pub = "warn"
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# `.expect("invariant ...")` stays available for conditions that cannot fail;
+# a bare `.unwrap()` carries no such statement, so it is rejected outright.
+unwrap_used = "deny"
+
+# Versions are exact-as-of-publication minimums; cargo treats `"1.11.1"` as
+# `^1.11.1`, so patch and compatible minor upgrades still resolve.
+[workspace.dependencies]
+bytes = "1.12.1"
+# No `serde` feature: the names it holds are decoded and serialized by the
+# SDK's own code, which reads and writes them as plain strings.
+compact_str = { version = "0.10.0", default-features = false, features = ["std"] }
+fastrand = "2.5.0"
+http = "1.5.0"
+http-body = "1.1.0"
+http-body-util = "0.1.5"
+httpdate = "1.0.3"
+hyper = { version = "1.11.1", features = ["client", "http1", "http2"] }
+# hyper-rustls does NOT enable `http2` by default, so ALPN would negotiate
+# HTTP/1.1 only. `native-tokio` (its default root source) is dropped because
+# the trust anchors come from rustls-platform-verifier instead.
+hyper-rustls = { version = "0.27.9", default-features = false, features = [
+    "http1",
+    "http2",
+    "tls12",
+    "aws-lc-rs",
+] }
+hyper-util = { version = "0.1.20", features = [
+    "client-legacy",
+    "http1",
+    "http2",
+    "tokio",
+] }
+# The derive's parser and code generator.
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+# rustls' defaults are exactly the wanted set: aws_lc_rs, logging,
+# prefer-post-quantum, std, tls12.
+rustls = "0.23.45"
+rustls-platform-verifier = "0.7.0"
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+sonic-rs = "0.5.10"
+# syn 3 is the major the rest of the graph (serde_derive, thiserror-impl)
+# already builds, so the derive adds no second copy; only the features it
+# uses are named.
+syn = { version = "3.0.6", default-features = false, features = [
+    "derive",
+    "parsing",
+    "printing",
+    "proc-macro",
+] }
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt", "time"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = [
+    "aws_lc_rs",
+    "logging",
+    "tls12",
+] }
+tower-service = "0.3.3"
+tracing = "0.1.44"
+
+codspeed-divan-compat = "5.0.2"
+dhat = "0.3.3"
+proptest = "1.11.0"
+# `aws_lc_rs` reuses the crypto backend rustls already links, so the test
+# certificate generator does not drag a second implementation into the graph.
+rcgen = { version = "0.14.10", default-features = false, features = [
+    "aws_lc_rs",
+    "crypto",
+] }
+# `float_roundtrip` makes serde_json parse f64 exactly, which is what the
+# differential tests against the primary codec compare against.
+serde_json = { version = "1.0.151", features = ["float_roundtrip", "raw_value"] }
+serde_path_to_error = "0.1.20"
+trybuild = "1.0.121"
